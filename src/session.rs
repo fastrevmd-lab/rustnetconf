@@ -360,6 +360,123 @@ impl Session {
         self.send_rpc(&xml, &msg_id).await?;
         Ok(())
     }
+
+    /// Confirmed commit with automatic rollback timeout (RFC 6241 §8.4).
+    ///
+    /// The device applies the candidate configuration but starts a rollback
+    /// timer. If [`confirming_commit`](Self::confirming_commit) is not called
+    /// within `confirm_timeout` seconds, the device automatically reverts to
+    /// the previous configuration.
+    ///
+    /// Requires the `:confirmed-commit` capability.
+    pub async fn confirmed_commit(&mut self, confirm_timeout: u32) -> Result<(), NetconfError> {
+        self.require_capability(
+            crate::capability::uri::CANDIDATE,
+            "confirmed-commit",
+        )?;
+        // Check for either 1.0 or 1.1 confirmed-commit capability
+        if !self.supports(crate::capability::uri::CONFIRMED_COMMIT)
+            && !self.supports(crate::capability::uri::CONFIRMED_COMMIT_1_1)
+        {
+            return Err(ProtocolError::CapabilityMissing(
+                "confirmed-commit requires :confirmed-commit capability".to_string(),
+            )
+            .into());
+        }
+
+        let msg_id = self.next_message_id();
+        let xml = operations::confirmed_commit_xml(&msg_id, confirm_timeout);
+
+        self.pending_commit = true;
+        let result = self.send_rpc(&xml, &msg_id).await;
+        self.pending_commit = false;
+
+        result?;
+        Ok(())
+    }
+
+    /// Send a confirming commit to make a previous confirmed-commit permanent.
+    ///
+    /// Must be called within the `confirm_timeout` window of a previous
+    /// [`confirmed_commit`](Self::confirmed_commit), otherwise the device
+    /// automatically rolls back.
+    pub async fn confirming_commit(&mut self) -> Result<(), NetconfError> {
+        // A confirming commit is just a regular <commit/> — same XML
+        self.commit().await
+    }
+
+    /// Lock a datastore, killing a stale session if the lock is held.
+    ///
+    /// Attempts to lock the target datastore. If the lock is denied because
+    /// another session holds it, extracts the blocking session-id from the
+    /// `<error-info>` and kills that session, then retries the lock once.
+    ///
+    /// Returns the session-id of the killed session if one was killed.
+    pub async fn lock_or_kill_stale(
+        &mut self,
+        target: Datastore,
+    ) -> Result<Option<u32>, NetconfError> {
+        match self.lock(target).await {
+            Ok(()) => return Ok(None),
+            Err(NetconfError::Rpc(crate::error::RpcError::ServerError {
+                ref tag,
+                ref info,
+                ..
+            })) if *tag == crate::types::ErrorTag::LockDenied => {
+                // Try to extract session-id from error-info
+                let stale_session_id = info
+                    .as_ref()
+                    .and_then(|info_xml| parse_session_id_from_info(info_xml));
+
+                if let Some(sid) = stale_session_id {
+                    tracing::warn!(
+                        stale_session_id = sid,
+                        "lock denied — killing stale session"
+                    );
+                    self.kill_session(sid).await?;
+                    // Retry the lock
+                    self.lock(target).await?;
+                    return Ok(Some(sid));
+                }
+
+                // Couldn't parse session-id — return the original error
+                return Err(ProtocolError::CapabilityMissing(format!(
+                    "lock denied but could not extract stale session-id from error-info: {:?}",
+                    info
+                ))
+                .into());
+            }
+            Err(other) => return Err(other),
+        }
+    }
+}
+
+/// Extract a session-id from `<error-info>` XML content.
+///
+/// Handles both structured XML (`<session-id>42</session-id>`) and
+/// Junos-style text (`session-id: 42` or `(pid 12345)`).
+fn parse_session_id_from_info(info: &str) -> Option<u32> {
+    // Try structured XML: <session-id>42</session-id>
+    if let Some(start) = info.find("<session-id>") {
+        let after = &info[start + "<session-id>".len()..];
+        if let Some(end) = after.find("</session-id>") {
+            if let Ok(id) = after[..end].trim().parse::<u32>() {
+                return Some(id);
+            }
+        }
+    }
+
+    // Try Junos text format: "session-id: 42" or similar
+    for line in info.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("session-id:") {
+            if let Ok(id) = rest.trim().parse::<u32>() {
+                return Some(id);
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -459,5 +576,132 @@ mod tests {
         assert!(!session.pending_commit, "pending_commit should be cleared after success");
 
         session.unlock(Datastore::Candidate).await.expect("unlock failed");
+    }
+
+    #[test]
+    fn test_parse_session_id_from_xml_info() {
+        let info = "<session-id>42</session-id>";
+        assert_eq!(parse_session_id_from_info(info), Some(42));
+    }
+
+    #[test]
+    fn test_parse_session_id_from_xml_with_whitespace() {
+        let info = "\n<session-id> 99 </session-id>\n";
+        assert_eq!(parse_session_id_from_info(info), Some(99));
+    }
+
+    #[test]
+    fn test_parse_session_id_from_text_format() {
+        let info = "session-id: 55806";
+        assert_eq!(parse_session_id_from_info(info), Some(55806));
+    }
+
+    #[test]
+    fn test_parse_session_id_not_found() {
+        let info = "some random error info with no session id";
+        assert_eq!(parse_session_id_from_info(info), None);
+    }
+
+    #[test]
+    fn test_parse_session_id_empty() {
+        assert_eq!(parse_session_id_from_info(""), None);
+    }
+
+    /// Build a mock device hello with confirmed-commit capability.
+    fn mock_device_hello_with_confirmed_commit() -> Vec<u8> {
+        let hello = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability>urn:ietf:params:netconf:base:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:candidate:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:confirmed-commit:1.0</capability>
+  </capabilities>
+  <session-id>1</session-id>
+</hello>"#;
+        let mut buf = hello.as_bytes().to_vec();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    #[tokio::test]
+    async fn test_confirmed_commit_sends_correct_xml() {
+        let mut response_data = mock_device_hello_with_confirmed_commit();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // lock
+        response_data.extend_from_slice(&mock_ok_reply("2")); // confirmed-commit
+        response_data.extend_from_slice(&mock_ok_reply("3")); // confirming commit
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session.lock(Datastore::Candidate).await.expect("lock failed");
+        session.confirmed_commit(120).await.expect("confirmed_commit failed");
+        session.confirming_commit().await.expect("confirming_commit failed");
+    }
+
+    #[tokio::test]
+    async fn test_confirmed_commit_requires_capability() {
+        // Hello WITHOUT confirmed-commit capability
+        let response_data = mock_device_hello();
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let result = session.confirmed_commit(120).await;
+        assert!(result.is_err(), "confirmed_commit should fail without capability");
+        let err_str = format!("{:?}", result.unwrap_err());
+        assert!(
+            err_str.contains("CapabilityMissing"),
+            "expected CapabilityMissing, got: {err_str}"
+        );
+    }
+
+    /// Build a mock lock-denied error response.
+    fn mock_lock_denied_reply(message_id: &str, stale_session_id: u32) -> Vec<u8> {
+        let reply = format!(
+            r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+  <rpc-error>
+    <error-type>protocol</error-type>
+    <error-tag>lock-denied</error-tag>
+    <error-severity>error</error-severity>
+    <error-message>Lock failed, lock is already held</error-message>
+    <error-info>
+      <session-id>{stale_session_id}</session-id>
+    </error-info>
+  </rpc-error>
+</rpc-reply>"#
+        );
+        let mut buf = reply.into_bytes();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    #[tokio::test]
+    async fn test_lock_or_kill_stale_succeeds_on_first_try() {
+        let mut response_data = mock_device_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // lock succeeds
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let result = session.lock_or_kill_stale(Datastore::Candidate).await;
+        assert_eq!(result.unwrap(), None, "no session killed when lock succeeds");
+    }
+
+    #[tokio::test]
+    async fn test_lock_or_kill_stale_kills_and_retries() {
+        let mut response_data = mock_device_hello();
+        response_data.extend_from_slice(&mock_lock_denied_reply("1", 42)); // first lock denied
+        response_data.extend_from_slice(&mock_ok_reply("2")); // kill-session succeeds
+        response_data.extend_from_slice(&mock_ok_reply("3")); // retry lock succeeds
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let result = session.lock_or_kill_stale(Datastore::Candidate).await;
+        assert_eq!(result.unwrap(), Some(42), "should have killed session 42");
     }
 }

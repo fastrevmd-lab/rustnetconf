@@ -56,6 +56,10 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
     // rpc-error field tracking
     let mut current_error: Option<RpcErrorBuilder> = None;
     let mut current_field: Option<ErrorField> = None;
+    // error-info can contain child elements — accumulate inner XML
+    let mut in_error_info = false;
+    let mut _error_info_depth: u32 = 0;
+    let mut error_info_xml = String::new();
 
     loop {
         match reader.read_event_into(&mut buf) {
@@ -102,8 +106,21 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
                         }
                         data_xml.push('>');
                     }
+                    _ if in_error_info => {
+                        // Inside <error-info>: accumulate child elements as XML
+                        _error_info_depth += 1;
+                        error_info_xml.push('<');
+                        error_info_xml.push_str(name);
+                        error_info_xml.push('>');
+                    }
                     _ if in_rpc_error => {
-                        current_field = ErrorField::from_name(name);
+                        if name == "error-info" {
+                            in_error_info = true;
+                            _error_info_depth = 1;
+                            error_info_xml.clear();
+                        } else {
+                            current_field = ErrorField::from_name(name);
+                        }
                     }
                     _ => {}
                 }
@@ -129,6 +146,10 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
                         data_xml.push('"');
                     }
                     data_xml.push_str("/>");
+                } else if in_error_info {
+                    error_info_xml.push('<');
+                    error_info_xml.push_str(name);
+                    error_info_xml.push_str("/>");
                 }
             }
             Ok(Event::Text(ref text)) => {
@@ -136,6 +157,8 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
 
                 if in_data {
                     data_xml.push_str(&value);
+                } else if in_error_info {
+                    error_info_xml.push_str(&value);
                 } else if in_rpc_error {
                     if let (Some(ref mut builder), Some(ref field)) =
                         (&mut current_error, &current_field)
@@ -167,6 +190,21 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
                         data_xml.push_str("</");
                         data_xml.push_str(name);
                         data_xml.push('>');
+                    }
+                    "error-info" if in_error_info => {
+                        in_error_info = false;
+                        if let Some(ref mut builder) = current_error {
+                            let trimmed = error_info_xml.trim().to_string();
+                            if !trimmed.is_empty() {
+                                builder.info = Some(trimmed);
+                            }
+                        }
+                    }
+                    _ if in_error_info => {
+                        _error_info_depth -= 1;
+                        error_info_xml.push_str("</");
+                        error_info_xml.push_str(name);
+                        error_info_xml.push('>');
                     }
                     _ if in_rpc_error => {
                         current_field = None;

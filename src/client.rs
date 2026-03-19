@@ -199,6 +199,37 @@ impl Client {
     pub async fn kill_session(&mut self, session_id: u32) -> Result<(), NetconfError> {
         self.session.kill_session(session_id).await
     }
+
+    /// Confirmed commit with automatic rollback timeout.
+    ///
+    /// The device applies the candidate configuration but automatically
+    /// rolls back if [`confirming_commit`](Self::confirming_commit) is not
+    /// called within `confirm_timeout` seconds.
+    ///
+    /// Requires the `:confirmed-commit` capability.
+    pub async fn confirmed_commit(&mut self, confirm_timeout: u32) -> Result<(), NetconfError> {
+        self.session.confirmed_commit(confirm_timeout).await
+    }
+
+    /// Confirm a previous confirmed-commit, making it permanent.
+    pub async fn confirming_commit(&mut self) -> Result<(), NetconfError> {
+        self.session.confirming_commit().await
+    }
+
+    /// Lock a datastore, killing a stale session if the lock is held.
+    ///
+    /// If the lock is denied because another (possibly crashed) session holds
+    /// it, extracts the blocking session-id from the error and kills that
+    /// session, then retries the lock.
+    ///
+    /// Returns `Ok(Some(killed_session_id))` if a stale session was killed,
+    /// or `Ok(None)` if the lock was acquired without contention.
+    pub async fn lock_or_kill_stale(
+        &mut self,
+        target: Datastore,
+    ) -> Result<Option<u32>, NetconfError> {
+        self.session.lock_or_kill_stale(target).await
+    }
 }
 
 /// Builder for `edit-config` operations.

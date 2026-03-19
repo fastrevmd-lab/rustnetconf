@@ -136,6 +136,22 @@ pub fn commit_xml(message_id: &str) -> String {
     )
 }
 
+/// Generate a confirmed `<commit>` RPC request (RFC 6241 §8.4).
+///
+/// The device will automatically rollback the commit if a confirming
+/// `<commit>` is not received within `confirm_timeout` seconds.
+pub fn confirmed_commit_xml(message_id: &str, confirm_timeout: u32) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+  <commit>
+    <confirmed/>
+    <confirm-timeout>{confirm_timeout}</confirm-timeout>
+  </commit>
+</rpc>"#,
+    )
+}
+
 /// Generate a `<validate>` RPC request.
 pub fn validate_xml(message_id: &str, source: Datastore) -> String {
     format!(
