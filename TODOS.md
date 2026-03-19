@@ -1,13 +1,17 @@
 # TODOS — rustnetconf
 
+## Backlog
+
+### Publish to crates.io
+**What:** Publish rustnetconf to crates.io for `cargo add rustnetconf` installation.
+**Why:** Makes the library discoverable and installable by the Rust ecosystem. Not blocking — library works as a git dependency today.
+**Depends on:** Finalize license choice (Apache-2.0/MIT dual-license), crates.io account setup
+**Added:** 2026-03-19
+
 ## v0.1 Implementation
 
-### TODO-001: Handle mid-RPC disconnect during commit (CommitUnknown error)
-**What:** Add a `CommitUnknown` error variant for when SSH drops after sending `<commit>` but before receiving the response.
-**Why:** The device may have committed the change but the client doesn't know. Without a distinct error type, users can't write recovery logic ("if CommitUnknown, verify device state"). This is the #1 trust issue in network automation libraries — ncclient has this gap and users complain.
-**Effort:** ~20 lines in session.rs + error.rs
-**Depends on:** Session state machine, layered error hierarchy
-**Added:** 2026-03-19 via /plan-eng-review
+### ~~TODO-001: Handle mid-RPC disconnect during commit (CommitUnknown error)~~ DONE
+**Completed:** 2026-03-19. Session tracks `pending_commit` flag, returns `RpcError::CommitUnknown` when connection drops mid-commit. 3 unit tests added.
 
 ### TODO-002: Stale commit lock recovery + confirmed-commit support
 **What:** Research and implement handling for stale datastore locks (from crashed sessions) and RFC 6241 §8.4 `confirmed-commit` with timeout rollback.

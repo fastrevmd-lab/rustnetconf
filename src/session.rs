@@ -55,6 +55,11 @@ pub struct Session {
     read_buffer: Vec<u8>,
     /// The negotiated NETCONF version.
     version: Option<NetconfVersion>,
+    /// True while a `<commit>` RPC has been sent but the reply hasn't arrived.
+    /// If the connection drops during this window, the device may have committed
+    /// the change — we surface `RpcError::CommitUnknown` instead of a generic
+    /// transport error so callers can verify device state.
+    pending_commit: bool,
 }
 
 impl Session {
@@ -72,6 +77,7 @@ impl Session {
             state: SessionState::Connected,
             read_buffer: Vec::new(),
             version: None,
+            pending_commit: false,
         }
     }
 
@@ -193,7 +199,10 @@ impl Session {
             // Read more data from transport
             let bytes_read = self.transport.read(&mut temp_buf).await?;
             if bytes_read == 0 {
-                // Check if we're in the middle of a commit — CommitUnknown
+                if self.pending_commit {
+                    self.pending_commit = false;
+                    return Err(crate::error::RpcError::CommitUnknown.into());
+                }
                 return Err(TransportError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,
                     "connection closed while waiting for RPC reply",
@@ -296,6 +305,10 @@ impl Session {
     /// Commit the candidate configuration.
     ///
     /// Requires the `:candidate` capability.
+    ///
+    /// If the connection drops after `<commit>` is sent but before the reply
+    /// arrives, returns [`RpcError::CommitUnknown`] — the device may have
+    /// committed the change. Callers should verify device state manually.
     pub async fn commit(&mut self) -> Result<(), NetconfError> {
         self.require_capability(
             crate::capability::uri::CANDIDATE,
@@ -303,7 +316,12 @@ impl Session {
         )?;
         let msg_id = self.next_message_id();
         let xml = operations::commit_xml(&msg_id);
-        self.send_rpc(&xml, &msg_id).await?;
+
+        self.pending_commit = true;
+        let result = self.send_rpc(&xml, &msg_id).await;
+        self.pending_commit = false;
+
+        result?;
         Ok(())
     }
 
@@ -341,5 +359,105 @@ impl Session {
         let xml = operations::kill_session_xml(&msg_id, session_id);
         self.send_rpc(&xml, &msg_id).await?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transport::mock::MockTransport;
+
+    /// Build a mock device hello response with EOM framing.
+    fn mock_device_hello() -> Vec<u8> {
+        let hello = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability>urn:ietf:params:netconf:base:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:candidate:1.0</capability>
+  </capabilities>
+  <session-id>1</session-id>
+</hello>"#;
+        let mut buf = hello.as_bytes().to_vec();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    /// Build a mock <ok/> RPC reply with EOM framing.
+    fn mock_ok_reply(message_id: &str) -> Vec<u8> {
+        let reply = format!(
+            r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}"><ok/></rpc-reply>"#
+        );
+        let mut buf = reply.into_bytes();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    #[tokio::test]
+    async fn test_commit_unknown_on_disconnect() {
+        // Mock transport: serves the hello, then the lock reply,
+        // but returns EOF during the commit (simulating connection drop).
+        let mut response_data = mock_device_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // lock reply
+        // No commit reply — EOF after lock reply simulates mid-commit disconnect
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // Lock succeeds
+        session.lock(Datastore::Candidate).await.expect("lock failed");
+
+        // Commit should return CommitUnknown because the transport returns EOF
+        let result = session.commit().await;
+        match result {
+            Err(NetconfError::Rpc(crate::error::RpcError::CommitUnknown)) => {
+                // This is the expected error
+            }
+            other => panic!("expected CommitUnknown, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_non_commit_disconnect_is_transport_error() {
+        // Mock transport: serves the hello, then EOF during get-config
+        let response_data = mock_device_hello();
+        // No get-config reply — EOF simulates connection drop
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // get-config should return a transport error, NOT CommitUnknown
+        let result = session.get_config(Datastore::Running, None).await;
+        match result {
+            Err(NetconfError::Transport(_)) => {
+                // Expected — generic transport error for non-commit operations
+            }
+            Err(NetconfError::Rpc(crate::error::RpcError::CommitUnknown)) => {
+                panic!("CommitUnknown should only happen during commit, not get-config");
+            }
+            other => panic!("expected TransportError, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_successful_commit_clears_pending_flag() {
+        // Mock transport: hello + lock reply + commit reply
+        let mut response_data = mock_device_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // lock
+        response_data.extend_from_slice(&mock_ok_reply("2")); // commit
+        response_data.extend_from_slice(&mock_ok_reply("3")); // unlock
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session.lock(Datastore::Candidate).await.expect("lock failed");
+        session.commit().await.expect("commit failed");
+
+        // pending_commit should be false after successful commit
+        assert!(!session.pending_commit, "pending_commit should be cleared after success");
+
+        session.unlock(Datastore::Candidate).await.expect("unlock failed");
     }
 }
