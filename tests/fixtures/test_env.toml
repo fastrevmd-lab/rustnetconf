@@ -1,0 +1,5 @@
+[device]
+host = "192.168.1.226"
+port = 830
+username = "rustnetconf"
+key_file = "~/.ssh/rustnetconf_test"

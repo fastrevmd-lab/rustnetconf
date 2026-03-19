@@ -6,6 +6,7 @@
 use async_trait::async_trait;
 use russh::*;
 use russh_keys::*;
+use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -67,7 +68,26 @@ struct ChannelStream {
 impl SshTransport {
     /// Connect to a NETCONF device over SSH and open the `netconf` subsystem.
     pub async fn connect(config: SshConfig) -> Result<Self, TransportError> {
-        let russh_config = client::Config::default();
+        // Build SSH config with broad algorithm support for network devices.
+        // Many devices (Juniper, Cisco) only support ECDH NIST or DH group
+        // key exchange — not Curve25519 which is russh's default preference.
+        let mut preferred = Preferred::default();
+        preferred.kex = Cow::Borrowed(&[
+            kex::CURVE25519,
+            kex::CURVE25519_PRE_RFC_8731,
+            kex::ECDH_SHA2_NISTP256,
+            kex::ECDH_SHA2_NISTP384,
+            kex::ECDH_SHA2_NISTP521,
+            kex::DH_G16_SHA512,
+            kex::DH_G14_SHA256,
+            kex::EXTENSION_SUPPORT_AS_CLIENT,
+            kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+        ]);
+
+        let russh_config = client::Config {
+            preferred,
+            ..Default::default()
+        };
 
         let handler = SshHandler;
         let mut handle = client::connect(Arc::new(russh_config), (&*config.host, config.port), handler)
@@ -132,7 +152,7 @@ impl SshTransport {
         }
 
         // Open a session channel and request the netconf subsystem
-        let channel = handle
+        let mut channel = handle
             .channel_open_session()
             .await
             .map_err(|e| TransportError::Channel(format!("failed to open SSH channel: {e}")))?;
@@ -141,6 +161,35 @@ impl SshTransport {
             .request_subsystem(true, "netconf")
             .await
             .map_err(|e| TransportError::Channel(format!("failed to request netconf subsystem: {e}")))?;
+
+        // Wait for the subsystem confirmation from the server.
+        // When `want_reply` is true, the server sends Success or Failure.
+        // We must consume channel messages (e.g., WindowAdjusted) until
+        // we see the confirmation, otherwise these messages interfere
+        // with the first data read (the hello exchange).
+        loop {
+            match channel.wait().await {
+                Some(ChannelMsg::Success) => break,
+                Some(ChannelMsg::Failure) => {
+                    return Err(TransportError::Channel(
+                        "server rejected netconf subsystem request".to_string(),
+                    ));
+                }
+                Some(ChannelMsg::WindowAdjusted { .. }) => {
+                    // Expected — the server adjusts the window; keep waiting.
+                    continue;
+                }
+                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                    return Err(TransportError::Channel(
+                        "channel closed before subsystem confirmation".to_string(),
+                    ));
+                }
+                Some(_other) => {
+                    // Other messages (e.g., ExtendedData) — skip.
+                    continue;
+                }
+            }
+        }
 
         let channel_stream = ChannelStream {
             channel,
@@ -177,21 +226,27 @@ impl Transport for SshTransport {
             return Ok(to_read);
         }
 
-        // Read from the SSH channel
-        match channel.channel.wait().await {
-            Some(ChannelMsg::Data { data: channel_data }) => {
-                let bytes = &channel_data[..];
-                let to_copy = std::cmp::min(buf.len(), bytes.len());
-                buf[..to_copy].copy_from_slice(&bytes[..to_copy]);
-                if bytes.len() > to_copy {
-                    channel.read_buffer.extend_from_slice(&bytes[to_copy..]);
+        // Read from the SSH channel, skipping non-data messages.
+        // Messages like WindowAdjusted, Success, ExtendedData (stderr)
+        // can arrive at any time and must not be treated as EOF.
+        loop {
+            match channel.channel.wait().await {
+                Some(ChannelMsg::Data { data: channel_data }) => {
+                    let bytes = &channel_data[..];
+                    let to_copy = std::cmp::min(buf.len(), bytes.len());
+                    buf[..to_copy].copy_from_slice(&bytes[..to_copy]);
+                    if bytes.len() > to_copy {
+                        channel.read_buffer.extend_from_slice(&bytes[to_copy..]);
+                    }
+                    return Ok(to_copy);
                 }
-                Ok(to_copy)
-            }
-            Some(ChannelMsg::Eof) | None => Ok(0),
-            Some(_) => {
-                // Other channel messages (e.g., extended data) — skip and retry
-                Ok(0)
+                Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
+                    return Ok(0);
+                }
+                Some(_other) => {
+                    // WindowAdjusted, Success, ExtendedData, etc. — skip and keep waiting.
+                    continue;
+                }
             }
         }
     }
