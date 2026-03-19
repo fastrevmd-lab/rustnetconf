@@ -1,0 +1,23 @@
+[package]
+name = "rustnetconf"
+version = "0.1.0"
+edition = "2021"
+authors = ["fastrevmd-lab"]
+description = "An async-first NETCONF 1.0/1.1 client library for Rust"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/fastrevmd-lab/rustnetconf"
+keywords = ["netconf", "network", "automation", "ssh", "async"]
+categories = ["network-programming"]
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+russh = "0.48"
+russh-keys = "0.48"
+quick-xml = { version = "0.37", features = ["serialize"] }
+thiserror = "2"
+tracing = "0.1"
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
