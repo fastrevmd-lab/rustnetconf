@@ -54,6 +54,15 @@ impl Framer for ChunkedFramer {
 
             // Check for \n# prefix
             if buffer[pos] != b'\n' || buffer[pos + 1] != b'#' {
+                // Detect EOM-framed data arriving when chunked was negotiated.
+                // This is a known firmware bug on some devices (e.g., certain Junos versions)
+                // that advertise :base:1.1 but actually send EOM-framed responses.
+                if looks_like_eom_data(&buffer[pos..]) {
+                    return Err(FramingError::Mismatch {
+                        advertised: "1.1 (chunked)".to_string(),
+                        actual: "1.0 (EOM)".to_string(),
+                    });
+                }
                 return Err(FramingError::Invalid(format!(
                     "expected chunk header at position {pos}, got {:?}",
                     &buffer[pos..std::cmp::min(pos + 4, buffer.len())]
@@ -123,6 +132,28 @@ impl Framer for ChunkedFramer {
             pos += chunk_len;
         }
     }
+}
+
+/// Heuristic: does this buffer look like EOM-framed data rather than chunked?
+/// Checks for XML start (`<?xml` or `<rpc`) or the EOM delimiter `]]>]]>`.
+fn looks_like_eom_data(data: &[u8]) -> bool {
+    if data.is_empty() {
+        return false;
+    }
+    // Skip leading whitespace
+    let trimmed = match data.iter().position(|&b| !b.is_ascii_whitespace()) {
+        Some(pos) => &data[pos..],
+        None => return false,
+    };
+    // XML document or element start
+    if trimmed.starts_with(b"<?xml") || trimmed.starts_with(b"<rpc") || trimmed.starts_with(b"<!--") {
+        return true;
+    }
+    // EOM delimiter anywhere in the buffer
+    if data.windows(6).any(|w| w == b"]]>]]>") {
+        return true;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -232,5 +263,64 @@ mod tests {
         let encoded = framer.encode(&large_body);
         let (decoded, _) = framer.decode(&encoded).unwrap().unwrap();
         assert_eq!(decoded, large_body);
+    }
+
+    #[test]
+    fn test_decode_detects_eom_xml_as_framing_mismatch() {
+        let framer = ChunkedFramer::new();
+        // Device advertised 1.1 but sent an EOM-framed XML response
+        let input = b"<?xml version=\"1.0\"?><rpc-reply><ok/></rpc-reply>]]>]]>";
+        let err = framer.decode(input).unwrap_err();
+        assert!(
+            matches!(err, FramingError::Mismatch { .. }),
+            "expected FramingError::Mismatch, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_decode_detects_eom_rpc_reply_as_framing_mismatch() {
+        let framer = ChunkedFramer::new();
+        let input = b"<rpc-reply xmlns=\"urn:ietf:params:xml:ns:netconf:base:1.0\" message-id=\"1\"><ok/></rpc-reply>]]>]]>";
+        let err = framer.decode(input).unwrap_err();
+        assert!(
+            matches!(err, FramingError::Mismatch { .. }),
+            "expected FramingError::Mismatch, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_decode_detects_eom_comment_as_framing_mismatch() {
+        let framer = ChunkedFramer::new();
+        // Junos-style comment prefix before hello
+        let input = b"<!-- No zombies -->\n<hello><capabilities></capabilities></hello>]]>]]>";
+        let err = framer.decode(input).unwrap_err();
+        assert!(
+            matches!(err, FramingError::Mismatch { .. }),
+            "expected FramingError::Mismatch, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_decode_eom_delimiter_in_buffer_detected() {
+        let framer = ChunkedFramer::new();
+        // Random data containing the EOM delimiter
+        let input = b"some garbage ]]>]]> more stuff";
+        let err = framer.decode(input).unwrap_err();
+        assert!(
+            matches!(err, FramingError::Mismatch { .. }),
+            "expected FramingError::Mismatch, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_decode_plain_garbage_is_invalid_not_mismatch() {
+        let framer = ChunkedFramer::new();
+        // Random binary garbage — not EOM data, just invalid
+        let input = b"\x00\x01\x02\x03";
+        let err = framer.decode(input).unwrap_err();
+        assert!(
+            matches!(err, FramingError::Invalid(_)),
+            "expected FramingError::Invalid for non-EOM garbage, got: {err:?}"
+        );
     }
 }

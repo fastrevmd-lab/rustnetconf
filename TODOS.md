@@ -24,9 +24,5 @@
 **Depends on:** Session state machine, kill-session RPC, capability detection
 **Added:** 2026-03-19 via /plan-eng-review
 
-### TODO-003: Framing mismatch detection (device says 1.1, sends EOM)
-**What:** Detect when a device advertises `:base:1.1` but sends EOM-framed responses. Surface a clear `FramingMismatch` error with actionable message: "Device advertised NETCONF 1.1 but sent EOM-framed response. Try forcing 1.0 mode."
-**Why:** Known Junos firmware bug in some versions. Chunked decoder gets garbage input and produces cryptic errors. Dedicated detection saves engineers hours of debugging.
-**Effort:** ~30 lines in framing layer
-**Depends on:** Framing layer, session-managed framing switch
-**Added:** 2026-03-19 via /plan-eng-review
+### ~~TODO-003: Framing mismatch detection (device says 1.1, sends EOM)~~ DONE
+**Completed:** 2026-03-19. ChunkedFramer detects EOM-framed data (XML start, `<!--` comments, `]]>]]>` delimiter) and returns `FramingError::Mismatch` with actionable message. 5 unit tests added.
