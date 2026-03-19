@@ -1342,6 +1342,7 @@ name = "rustnetconf"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures",
  "quick-xml",
  "russh",
  "russh-keys",

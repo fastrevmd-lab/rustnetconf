@@ -29,6 +29,7 @@ use crate::rpc::operations::{self, EditConfigParams};
 use crate::rpc::RpcReply;
 use crate::transport::Transport;
 use crate::types::{Datastore, DefaultOperation, ErrorOption, TestOption};
+use crate::vendor::{self, CloseSequence, VendorProfile};
 
 /// Read buffer size for transport reads.
 const READ_BUF_SIZE: usize = 65536;
@@ -56,10 +57,10 @@ pub struct Session {
     /// The negotiated NETCONF version.
     version: Option<NetconfVersion>,
     /// True while a `<commit>` RPC has been sent but the reply hasn't arrived.
-    /// If the connection drops during this window, the device may have committed
-    /// the change — we surface `RpcError::CommitUnknown` instead of a generic
-    /// transport error so callers can verify device state.
     pending_commit: bool,
+    /// Vendor-specific behavior profile. Set during establish() via auto-detection,
+    /// or overridden by the user via Client::vendor() / Client::vendor_profile().
+    vendor_profile: Box<dyn VendorProfile>,
 }
 
 impl Session {
@@ -78,7 +79,16 @@ impl Session {
             read_buffer: Vec::new(),
             version: None,
             pending_commit: false,
+            vendor_profile: Box::new(crate::vendor::generic::GenericVendor),
         }
+    }
+
+    /// Set an explicit vendor profile, overriding auto-detection.
+    ///
+    /// Must be called before `establish()`. After establish, the vendor
+    /// profile is locked in.
+    pub fn set_vendor_profile(&mut self, profile: Box<dyn VendorProfile>) {
+        self.vendor_profile = profile;
     }
 
     /// Perform the NETCONF `<hello>` exchange and establish the session.
@@ -114,12 +124,18 @@ impl Session {
             self.framer = Box::new(ChunkedFramer::new());
         }
 
+        // Auto-detect vendor from capabilities (unless explicitly overridden)
+        if self.vendor_profile.name() == "generic" {
+            self.vendor_profile = vendor::detect_vendor(&caps);
+        }
+
         self.version = Some(version);
         self.capabilities = Some(caps);
         self.state = SessionState::Established;
 
         tracing::info!(
             version = ?version,
+            vendor = self.vendor_profile.name(),
             session_id = ?self.capabilities.as_ref().and_then(|c| c.session_id()),
             "NETCONF session established"
         );
@@ -148,6 +164,11 @@ impl Session {
     /// Get the current session state.
     pub fn state(&self) -> SessionState {
         self.state
+    }
+
+    /// Get the vendor profile name (e.g., "junos", "generic").
+    pub fn vendor_name(&self) -> &str {
+        self.vendor_profile.name()
     }
 
     /// Send an RPC and wait for the reply.
@@ -239,6 +260,9 @@ impl Session {
     // ── RPC Operations ──────────────────────────────────────────────
 
     /// Fetch the running, candidate, or startup configuration.
+    ///
+    /// The response is passed through the vendor profile's `unwrap_config()`
+    /// to strip vendor-specific wrapper elements.
     pub async fn get_config(
         &mut self,
         source: Datastore,
@@ -248,7 +272,7 @@ impl Session {
         let xml = operations::get_config_xml(&msg_id, source, filter);
         let reply = self.send_rpc(&xml, &msg_id).await?;
         match reply {
-            RpcReply::Data(data) => Ok(data),
+            RpcReply::Data(data) => Ok(self.vendor_profile.unwrap_config(&data)),
             RpcReply::Ok => Ok(String::new()),
         }
     }
@@ -265,6 +289,9 @@ impl Session {
     }
 
     /// Edit the configuration of a datastore.
+    ///
+    /// The config payload is passed through the vendor profile's `wrap_config()`
+    /// to add vendor-specific elements/namespaces if needed.
     pub async fn edit_config(
         &mut self,
         target: Datastore,
@@ -273,10 +300,11 @@ impl Session {
         test_option: Option<TestOption>,
         error_option: Option<ErrorOption>,
     ) -> Result<(), NetconfError> {
+        let wrapped_config = self.vendor_profile.wrap_config(config);
         let msg_id = self.next_message_id();
         let params = EditConfigParams {
             target,
-            config,
+            config: &wrapped_config,
             default_operation,
             test_option,
             error_option,
@@ -335,10 +363,28 @@ impl Session {
         Ok(())
     }
 
+    /// Discard uncommitted candidate configuration changes.
+    pub async fn discard_changes(&mut self) -> Result<(), NetconfError> {
+        let msg_id = self.next_message_id();
+        let xml = operations::discard_changes_xml(&msg_id);
+        self.send_rpc(&xml, &msg_id).await?;
+        Ok(())
+    }
+
     /// Close the NETCONF session gracefully.
+    ///
+    /// Respects the vendor profile's close sequence. For example, Junos
+    /// discards uncommitted candidate changes before closing to avoid
+    /// leaving dirty state.
     pub async fn close_session(&mut self) -> Result<(), NetconfError> {
         if self.state == SessionState::Closed {
             return Ok(());
+        }
+
+        // Vendor-specific pre-close actions
+        if self.vendor_profile.close_sequence() == CloseSequence::DiscardThenClose {
+            // Best-effort discard — don't fail the close if this errors
+            let _ = self.discard_changes().await;
         }
 
         let msg_id = self.next_message_id();
@@ -349,7 +395,7 @@ impl Session {
         let _ = self.transport.close().await;
         self.state = SessionState::Closed;
 
-        tracing::info!("NETCONF session closed");
+        tracing::info!(vendor = self.vendor_profile.name(), "NETCONF session closed");
         Ok(())
     }
 

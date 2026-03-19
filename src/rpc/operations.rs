@@ -126,6 +126,18 @@ pub fn unlock_xml(message_id: &str, target: Datastore) -> String {
     )
 }
 
+/// Generate a `<discard-changes>` RPC request.
+///
+/// Reverts the candidate configuration to match running.
+pub fn discard_changes_xml(message_id: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+  <discard-changes/>
+</rpc>"#,
+    )
+}
+
 /// Generate a `<commit>` RPC request.
 pub fn commit_xml(message_id: &str) -> String {
     format!(

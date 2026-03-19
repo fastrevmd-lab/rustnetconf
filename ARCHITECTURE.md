@@ -2,28 +2,34 @@
 
 This document describes the internal architecture of rustnetconf. It serves as the implementation guide and contributor reference.
 
-**Design doc:** `~/.gstack/projects/rustnetconf/mharman-main-design-20260319-130037.md`
-**Eng review:** Completed 2026-03-19, all decisions locked in.
+**Design docs:**
+- v0.1: `~/.gstack/projects/rustnetconf/mharman-main-design-20260319-130037.md`
+- v0.2: `~/.gstack/projects/rustnetconf/mharman-main-design-20260319-170927.md`
 
 ## System Overview
 
 ```
-┌─────────────────────────────────────┐
-│         Client (thin wrapper)       │  Ergonomic API, builder patterns
-│  .connect() .edit_config() .lock()  │  NO protocol state
-└──────────────┬──────────────────────┘
+┌─────────────────────────────────────────────┐
+│              DevicePool                      │  Async connection pool
+│  Semaphore(max) + HashMap<name, Vec<Client>>│  checkout() → PoolGuard
+└──────────────┬──────────────────────────────┘
                │
-┌──────────────▼──────────────────────┐
-│      Session (owns ALL state)       │  msg-id counter, capabilities,
-│                                     │  framing strategy, RPC dispatch
-│  ┌─────────┐ ┌────────────────────┐ │
-│  │ msg-id  │ │ capabilities:      │ │
-│  │ counter │ │ base:1.0/1.1       │ │
-│  │         │ │ :candidate         │ │
-│  │         │ │ :confirmed-commit  │ │
-│  └─────────┘ └────────────────────┘ │
-│  Framing switch after hello ──────► │
-└──────┬──────────────────────┬───────┘
+┌──────────────▼──────────────────────────────┐
+│         Client (thin wrapper)                │  Ergonomic API, builder patterns
+│  .connect() .edit_config() .lock()           │  .vendor_profile() for explicit vendor
+│  .vendor_name() → "junos" / "generic"        │  NO protocol state
+└──────────────┬──────────────────────────────┘
+               │
+┌──────────────▼──────────────────────────────┐
+│      Session (owns ALL state)                │  msg-id counter, capabilities,
+│                                              │  framing strategy, vendor profile,
+│  ┌─────────┐ ┌───────────┐ ┌──────────────┐ │  RPC dispatch
+│  │ msg-id  │ │capabilities│ │vendor_profile│ │
+│  │ counter │ │ base:1.0   │ │ JunosVendor  │ │
+│  └─────────┘ │ :candidate │ │ GenericVendor│ │
+│              └───────────┘ └──────────────┘ │
+│  Framing switch + vendor detect after hello │
+└──────┬──────────────────────┬───────────────┘
        │                      │
 ┌──────▼──────┐    ┌──────────▼────────┐
 │ RPC Layer   │    │  Framing Layer    │
@@ -51,113 +57,113 @@ This document describes the internal architecture of rustnetconf. It serves as t
 src/
 ├── lib.rs              # Public API re-exports
 ├── client.rs           # Client — thin ergonomic wrapper over Session
-├── session.rs          # Session — owns msg-id, capabilities, framing, RPC dispatch
+├── session.rs          # Session — owns msg-id, capabilities, vendor, framing, RPC dispatch
 ├── transport/
-│   ├── mod.rs          # Transport trait (AsyncRead + AsyncWrite)
+│   ├── mod.rs          # Transport trait + MockTransport (for tests)
 │   └── ssh.rs          # SshTransport — russh-based SSH implementation
 ├── rpc/
-│   ├── mod.rs          # RPC types and serialization
-│   ├── operations.rs   # get, get-config, edit-config, lock, unlock, commit, etc.
+│   ├── mod.rs          # RPC types, response parsing (all 7 rpc-error fields)
+│   ├── operations.rs   # XML generation: get, get-config, edit-config, lock, unlock,
+│   │                   # commit, confirmed-commit, discard-changes, validate, etc.
 │   └── filter.rs       # Subtree and XPath filter builders
 ├── framing/
 │   ├── mod.rs          # Framing trait
 │   ├── eom.rs          # NETCONF 1.0 end-of-message framing (]]>]]>)
-│   └── chunked.rs      # NETCONF 1.1 chunked framing (RFC 6242)
-├── error.rs            # Layered error hierarchy
-├── capability.rs       # Capability URIs and negotiation logic
+│   └── chunked.rs      # NETCONF 1.1 chunked framing + mismatch detection
+├── vendor/
+│   ├── mod.rs          # VendorProfile trait + auto-detection
+│   ├── junos.rs        # Juniper Junos — config wrapping, capability normalization
+│   └── generic.rs      # Default RFC 6241 behavior (passthrough)
+├── pool/
+│   └── mod.rs          # DevicePool + PoolGuard — async connection pooling
+├── error.rs            # Layered error hierarchy (Transport/Framing/Rpc/Protocol)
+├── capability.rs       # Capability URIs, negotiation, well-known constants
 └── types.rs            # Datastore, DefaultOperation, TestOption, ErrorSeverity, etc.
 ```
 
 ## Key Design Decisions
 
 ### 1. Transport Trait = Byte Stream
-The `Transport` trait provides `AsyncRead + AsyncWrite` — raw bytes, not messages. Framing sits *above* transport. This means:
-- Framing logic is written once, shared by all transports (DRY)
-- Framing is independently testable without SSH
+The `Transport` trait provides raw byte read/write. Framing sits *above* transport:
+- Framing logic written once, shared by all transports (DRY)
+- Independently testable without SSH
 - Future transports (TLS, RESTCONF) plug in without reimplementing framing
 
 ### 2. Thin Client + Fat Session
-`Client` is an ergonomic wrapper with builder methods. `Session` owns all protocol state:
+`Client` is an ergonomic wrapper. `Session` owns all protocol state:
 - `message_id: AtomicU32` — incremented per RPC
-- `capabilities: HashSet<String>` — device capabilities from `<hello>`
+- `capabilities: Capabilities` — device capabilities from `<hello>`
 - `framer: Box<dyn Framer>` — selected during hello exchange
-- No split-brain: all state in one place
+- `vendor_profile: Box<dyn VendorProfile>` — auto-detected or explicit
+- `pending_commit: bool` — for CommitUnknown detection
 
 ### 3. Session-Managed Framing Switch
 ```
-Hello exchange flow:
-  Client sends <hello> with EOM framing (always — per RFC)
+Hello exchange:
+  Client sends <hello> with EOM framing (always)
        │
        ▼
-  Device responds with <hello> + capability list
+  Device responds with <hello> + capabilities
        │
        ▼
   Session parses capabilities:
-    Both advertise :base:1.1? → switch to chunked framing
-    Otherwise                 → stay on EOM framing
+    Both advertise :base:1.1? → switch to chunked
+    Otherwise                 → stay on EOM
+       │
+       ▼
+  Auto-detect vendor from capabilities:
+    Junos capability URI? → JunosVendor
+    Otherwise             → GenericVendor
 ```
-The framing switch is a one-time event during session setup. After the switch, all subsequent RPCs use the negotiated framing.
 
-### 4. Layered Error Hierarchy
+### 4. Vendor Profiles
+```
+trait VendorProfile
+├── wrap_config()           — add vendor-specific XML wrapping for edit-config
+├── unwrap_config()         — strip vendor wrapper from get-config responses
+├── normalize_capability()  — normalize legacy/vendor URIs to standard form
+└── close_sequence()        — Standard or DiscardThenClose
+
+Built-in:
+├── GenericVendor  — passthrough, standard RFC 6241
+├── JunosVendor    — auto-detected via http://xml.juniper.net/netconf/junos/1.0
+│   Wraps bare config in <configuration>, strips Junos attributes on read,
+│   normalizes legacy urn:ietf:params:xml:ns:netconf: URIs,
+│   discards uncommitted changes before session close
+└── [IosXeVendor]  — planned, deferred until Cisco test device available
+```
+
+### 5. Layered Error Hierarchy
 ```
 NetconfError
 ├── Transport(TransportError)
-│   ├── Connect       — TCP/SSH connection failed
-│   ├── Auth          — authentication rejected
-│   ├── Channel       — SSH channel/subsystem error
-│   └── Io            — general I/O error
+│   ├── Connect, Auth, Channel, Io, Ssh
 ├── Framing(FramingError)
-│   ├── Invalid       — malformed frame data
-│   ├── Incomplete    — partial frame (connection dropped?)
-│   └── Mismatch      — device sent wrong framing type (TODO-003)
+│   ├── Invalid, Incomplete, Mismatch (firmware bug detection)
 ├── Rpc(RpcError)
-│   ├── ServerError   — parsed <rpc-error> with all 7 RFC 6241 §4.3 fields:
-│   │     error_type, error_tag, error_severity, error_app_tag,
-│   │     error_path, error_message, error_info
-│   ├── Timeout       — RPC response not received within deadline
-│   └── CommitUnknown — connection lost after <commit> sent (TODO-001)
+│   ├── ServerError{7 fields}, Timeout, CommitUnknown, ParseError, MessageIdMismatch
 └── Protocol(ProtocolError)
-    ├── CapabilityMissing — operation requires unsupported capability
-    ├── SessionClosed     — operation on closed session
-    └── HelloFailed       — capability exchange failed
+    ├── CapabilityMissing, SessionClosed, HelloFailed, Xml
 ```
 
-### 5. SSH Authentication
-Three methods supported via `russh`, all in v0.1:
-- Password authentication
-- Key file (Ed25519, RSA, ECDSA)
-- SSH agent forwarding
-
-## Data Flow: edit-config Round Trip
-
+### 6. Connection Pool
 ```
-User code                    Client           Session          Framing     Transport
-    │                          │                 │                │            │
-    │ edit_config(Candidate)   │                 │                │            │
-    │ .config("<xml>")         │                 │                │            │
-    │ .send().await            │                 │                │            │
-    │─────────────────────────►│                 │                │            │
-    │                          │ rpc(EditConfig) │                │            │
-    │                          │────────────────►│                │            │
-    │                          │                 │ serialize XML  │            │
-    │                          │                 │ assign msg-id  │            │
-    │                          │                 │ frame(xml)     │            │
-    │                          │                 │───────────────►│            │
-    │                          │                 │                │ write bytes│
-    │                          │                 │                │───────────►│
-    │                          │                 │                │            │──► Device
-    │                          │                 │                │            │
-    │                          │                 │                │ read bytes │
-    │                          │                 │                │◄───────────│
-    │                          │                 │ deframe(bytes) │            │
-    │                          │                 │◄───────────────│            │
-    │                          │                 │ parse XML      │            │
-    │                          │                 │ check msg-id   │            │
-    │                          │ Ok/Err          │ return result  │            │
-    │                          │◄────────────────│                │            │
-    │ Result<RpcReply>         │                 │                │            │
-    │◄─────────────────────────│                 │                │            │
+DevicePool
+├── Semaphore(max_connections)  — global concurrency limit
+├── devices: HashMap<name, DeviceConfig>
+└── connections: HashMap<name, Vec<Client>>  — idle pool
+
+checkout("spine-01") → PoolGuard
+  - Acquires semaphore permit (with timeout)
+  - Reuses idle connection or creates new one
+  - PoolGuard derefs to Client
+  - Auto-returns to pool on drop (if healthy)
+  - Discard broken connections
 ```
+
+### 7. SSH Authentication
+Three methods via `russh` (pure Rust, no OpenSSL):
+- Password, Key file (Ed25519/RSA/ECDSA), SSH agent
 
 ## Dependencies
 
@@ -168,11 +174,11 @@ User code                    Client           Session          Framing     Trans
 | `quick-xml` | XML parsing | Streaming parser, low memory footprint |
 | `thiserror` | Error types | Ergonomic derive macros for error enums |
 | `tracing` | Logging | Structured, async-aware, composable |
+| `futures` | Async utilities | join_all for concurrent pool operations |
 
 ## Testing Strategy
 
-Two layers:
-1. **Mock Transport** — in-memory `AsyncRead + AsyncWrite` with canned NETCONF exchanges. Tests framing, session, RPC serialization/parsing without any network. Runs in CI in milliseconds.
-2. **vSRX Integration** — real Juniper vSRX devices for end-to-end testing. Catches vendor quirks, validates protocol correctness against production firmware.
-
-See `TODOS.md` for tracked implementation items.
+Three layers:
+1. **Unit tests** — pure logic: framing, RPC serialization, capability parsing, vendor wrapping
+2. **Mock Transport** — session and vendor integration with canned NETCONF exchanges
+3. **vSRX Integration** — real Juniper vSRX for end-to-end validation including vendor auto-detection and pool operations

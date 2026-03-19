@@ -8,6 +8,7 @@ use crate::error::NetconfError;
 use crate::session::Session;
 use crate::transport::ssh::{SshAuth, SshConfig, SshTransport};
 use crate::types::{Datastore, DefaultOperation, ErrorOption, TestOption};
+use crate::vendor::VendorProfile;
 
 /// Builder for establishing a NETCONF client connection.
 ///
@@ -32,6 +33,7 @@ pub struct ClientBuilder {
     key_file: Option<String>,
     key_passphrase: Option<String>,
     use_agent: bool,
+    vendor_profile: Option<Box<dyn VendorProfile>>,
 }
 
 impl ClientBuilder {
@@ -62,6 +64,15 @@ impl ClientBuilder {
     /// Use the SSH agent for authentication.
     pub fn ssh_agent(mut self) -> Self {
         self.use_agent = true;
+        self
+    }
+
+    /// Set an explicit vendor profile, overriding auto-detection.
+    ///
+    /// Use this when auto-detection doesn't work for your device, or
+    /// when using a custom vendor implementation.
+    pub fn vendor_profile(mut self, profile: Box<dyn VendorProfile>) -> Self {
+        self.vendor_profile = Some(profile);
         self
     }
 
@@ -98,6 +109,12 @@ impl ClientBuilder {
 
         let transport = SshTransport::connect(config).await?;
         let mut session = Session::new(Box::new(transport));
+
+        // Set explicit vendor profile if provided (overrides auto-detection)
+        if let Some(profile) = self.vendor_profile {
+            session.set_vendor_profile(profile);
+        }
+
         session.establish().await?;
 
         Ok(Client { session })
@@ -126,12 +143,18 @@ impl Client {
             key_file: None,
             key_passphrase: None,
             use_agent: false,
+            vendor_profile: None,
         }
     }
 
     /// Check if the device supports a specific capability URI.
     pub fn supports(&self, capability_uri: &str) -> bool {
         self.session.supports(capability_uri)
+    }
+
+    /// Get the detected or configured vendor name (e.g., "junos", "generic").
+    pub fn vendor_name(&self) -> &str {
+        self.session.vendor_name()
     }
 
     /// Get the device's capabilities.

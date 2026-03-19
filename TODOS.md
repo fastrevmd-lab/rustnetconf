@@ -2,6 +2,12 @@
 
 ## Backlog
 
+### IOS-XE vendor profile
+**What:** Implement `IosXeVendor` profile for Cisco IOS-XE NETCONF devices — config namespace wrapping, capability normalization, session termination quirks.
+**Why:** IOS-XE is the second most common NETCONF implementation. Without it, Cisco users must use GenericVendor and handle quirks manually.
+**Depends on:** VendorProfile trait (v0.2), access to a Cisco IOS-XE NETCONF device (CSR1000v or Cat8000v) for integration testing. Deferred from v0.2 — ship what we can test.
+**Added:** 2026-03-19 via /plan-eng-review
+
 ### Publish to crates.io
 **What:** Publish rustnetconf to crates.io for `cargo add rustnetconf` installation.
 **Why:** Makes the library discoverable and installable by the Rust ecosystem. Not blocking — library works as a git dependency today.

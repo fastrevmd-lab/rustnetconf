@@ -39,10 +39,12 @@ pub mod capability;
 pub mod client;
 pub mod error;
 pub mod framing;
+pub mod pool;
 pub mod rpc;
 pub mod session;
 pub mod transport;
 pub mod types;
+pub mod vendor;
 
 // Re-export the primary public API types
 pub use client::{Client, ClientBuilder, EditConfigBuilder};

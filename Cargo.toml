@@ -17,6 +17,7 @@ quick-xml = { version = "0.37", features = ["serialize"] }
 thiserror = "2"
 tracing = "0.1"
 async-trait = "0.1"
+futures = "0.3.32"
 
 [dev-dependencies]
 tokio-test = "0.4"
