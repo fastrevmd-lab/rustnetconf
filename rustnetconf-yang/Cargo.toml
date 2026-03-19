@@ -1,0 +1,25 @@
+[package]
+name = "rustnetconf-yang"
+version = "0.1.0"
+edition = "2021"
+authors = ["fastrevmd-lab"]
+description = "YANG model code generation for rustnetconf — compile-time config validation"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/fastrevmd-lab/rustnetconf"
+keywords = ["yang", "netconf", "network", "codegen"]
+categories = ["network-programming"]
+
+[features]
+generated = []
+
+[dependencies]
+rustnetconf = { path = ".." }
+serde = { version = "1", features = ["derive"] }
+quick-xml = { version = "0.37", features = ["serialize"] }
+thiserror = "2"
+
+[dev-dependencies]
+serde_json = "1"
+
+[build-dependencies]
+yang2 = { version = "0.18", features = ["bundled"] }
