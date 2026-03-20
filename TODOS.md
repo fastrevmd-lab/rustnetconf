@@ -2,6 +2,18 @@
 
 ## Backlog
 
+### YAML config file support (CLI v2.0)
+**What:** Add YAML as an alternative desired-state format alongside XML for the CLI tool.
+**Why:** YAML is more ergonomic than XML. Most DevOps engineers prefer it.
+**Depends on:** CLI v1.0 (XML-native), rustnetconf-yang for YAML→XML conversion with namespace/type awareness.
+**Added:** 2026-03-19 via /plan-eng-review
+
+### Multi-device orchestration (CLI v2.0)
+**What:** `netconf plan --all` and `netconf apply --all` for concurrent fleet operations across all inventory devices.
+**Why:** The payoff of async Rust + DevicePool. Single-device is the foundation; multi-device is the product.
+**Depends on:** CLI v1.0, DevicePool from v0.2.
+**Added:** 2026-03-19 via /plan-eng-review
+
 ### IOS-XE vendor profile
 **What:** Implement `IosXeVendor` profile for Cisco IOS-XE NETCONF devices — config namespace wrapping, capability normalization, session termination quirks.
 **Why:** IOS-XE is the second most common NETCONF implementation. Without it, Cisco users must use GenericVendor and handle quirks manually.

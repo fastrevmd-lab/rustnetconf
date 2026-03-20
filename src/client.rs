@@ -203,6 +203,11 @@ impl Client {
         self.session.unlock(target).await
     }
 
+    /// Discard uncommitted candidate changes.
+    pub async fn discard_changes(&mut self) -> Result<(), NetconfError> {
+        self.session.discard_changes().await
+    }
+
     /// Commit the candidate configuration.
     pub async fn commit(&mut self) -> Result<(), NetconfError> {
         self.session.commit().await

@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "rustnetconf-yang"]
+members = [".", "rustnetconf-yang", "rustnetconf-cli"]
 resolver = "2"
 
 [package]

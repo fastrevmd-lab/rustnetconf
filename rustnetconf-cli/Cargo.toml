@@ -1,0 +1,24 @@
+[package]
+name = "rustnetconf-cli"
+version = "0.1.0"
+edition = "2021"
+authors = ["fastrevmd-lab"]
+description = "Terraform-like CLI for declarative NETCONF network config management"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/fastrevmd-lab/rustnetconf"
+keywords = ["netconf", "network", "cli", "automation", "declarative"]
+
+[[bin]]
+name = "netconf"
+path = "src/main.rs"
+
+[dependencies]
+rustnetconf = { path = ".." }
+clap = { version = "4", features = ["derive"] }
+colored = "3"
+toml = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+quick-xml = "0.37"
+tokio = { version = "1", features = ["full"] }
+dialoguer = "0.11"
