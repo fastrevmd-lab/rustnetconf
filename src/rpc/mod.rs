@@ -251,6 +251,15 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
         return Ok(RpcReply::Ok);
     }
 
+    // Junos custom RPCs return content directly under <rpc-reply> without a
+    // <data> wrapper (e.g. <software-information>, <route-engine-information>).
+    // Re-parse to extract any non-error, non-ok child elements as data.
+    if in_rpc_reply || found_message_id.is_some() {
+        if let Some(inner) = extract_rpc_reply_inner_content(xml) {
+            return Ok(RpcReply::Data(inner));
+        }
+    }
+
     Err(RpcError::ParseError(
         "rpc-reply contained no <ok/>, <data>, or <rpc-error>".to_string(),
     ))
@@ -357,6 +366,103 @@ impl RpcErrorBuilder {
     }
 }
 
+/// Extract inner content from `<rpc-reply>` for Junos custom RPC responses.
+///
+/// Junos custom RPCs (e.g., `<get-software-information>`) return their data
+/// directly under `<rpc-reply>` without a `<data>` wrapper. This function
+/// extracts all child element content from the reply.
+fn extract_rpc_reply_inner_content(xml: &str) -> Option<String> {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let mut reader = Reader::from_str(xml);
+    let mut buf = Vec::new();
+
+    let mut in_rpc_reply = false;
+    let mut depth: u32 = 0;
+    let mut content = String::new();
+    let mut has_content = false;
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(ref tag)) => {
+                let local = tag.local_name();
+                let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
+
+                if name == "rpc-reply" {
+                    in_rpc_reply = true;
+                } else if in_rpc_reply {
+                    if depth > 0 || (name != "ok" && name != "rpc-error") {
+                        if depth == 0 {
+                            has_content = true;
+                        }
+                        depth += 1;
+                        content.push('<');
+                        content.push_str(name);
+                        for attr in tag.attributes().flatten() {
+                            content.push(' ');
+                            content.push_str(
+                                std::str::from_utf8(attr.key.as_ref()).unwrap_or(""),
+                            );
+                            content.push_str("=\"");
+                            content.push_str(
+                                &String::from_utf8_lossy(&attr.value),
+                            );
+                            content.push('"');
+                        }
+                        content.push('>');
+                    }
+                }
+            }
+            Ok(Event::Empty(ref tag)) if in_rpc_reply && depth > 0 => {
+                let local = tag.local_name();
+                let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
+                content.push('<');
+                content.push_str(name);
+                for attr in tag.attributes().flatten() {
+                    content.push(' ');
+                    content.push_str(
+                        std::str::from_utf8(attr.key.as_ref()).unwrap_or(""),
+                    );
+                    content.push_str("=\"");
+                    content.push_str(
+                        &String::from_utf8_lossy(&attr.value),
+                    );
+                    content.push('"');
+                }
+                content.push_str("/>");
+            }
+            Ok(Event::Text(ref text)) if in_rpc_reply && depth > 0 => {
+                let value = text.unescape().unwrap_or_default().to_string();
+                content.push_str(&value);
+            }
+            Ok(Event::End(ref tag)) => {
+                let local = tag.local_name();
+                let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
+                if name == "rpc-reply" {
+                    break;
+                }
+                if in_rpc_reply && depth > 0 {
+                    depth -= 1;
+                    content.push_str("</");
+                    content.push_str(name);
+                    content.push('>');
+                }
+            }
+            Ok(Event::Eof) => break,
+            Err(_) => return None,
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    if has_content {
+        Some(content)
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +550,49 @@ mod tests {
                 assert!(info.unwrap().contains("42"));
             }
             _ => panic!("expected ServerError"),
+        }
+    }
+
+    #[test]
+    fn test_parse_junos_custom_rpc_reply() {
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="7">
+  <software-information>
+    <host-name>vsrx1</host-name>
+    <product-model>vSRX</product-model>
+    <product-name>vsrx</product-name>
+    <junos-version>21.4R3.15</junos-version>
+  </software-information>
+</rpc-reply>"#;
+        let result = parse_rpc_reply(xml, "7").unwrap();
+        match result {
+            RpcReply::Data(data) => {
+                assert!(data.contains("<software-information>"));
+                assert!(data.contains("vsrx1"));
+                assert!(data.contains("21.4R3.15"));
+            }
+            _ => panic!("expected Data reply for Junos custom RPC"),
+        }
+    }
+
+    #[test]
+    fn test_parse_junos_multi_re_reply() {
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="8">
+  <multi-routing-engine-results>
+    <multi-routing-engine-item>
+      <re-name>node0</re-name>
+      <software-information>
+        <host-name>vsrx-node0</host-name>
+      </software-information>
+    </multi-routing-engine-item>
+  </multi-routing-engine-results>
+</rpc-reply>"#;
+        let result = parse_rpc_reply(xml, "8").unwrap();
+        match result {
+            RpcReply::Data(data) => {
+                assert!(data.contains("<multi-routing-engine-results>"));
+                assert!(data.contains("node0"));
+            }
+            _ => panic!("expected Data reply for multi-RE response"),
         }
     }
 }

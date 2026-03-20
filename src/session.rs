@@ -259,6 +259,27 @@ impl Session {
         Ok(())
     }
 
+    // ── Raw RPC ─────────────────────────────────────────────────────
+
+    /// Send an arbitrary RPC and return the raw XML response content.
+    ///
+    /// The `rpc_content` is wrapped in `<rpc>` tags with a message-id,
+    /// sent to the device, and the inner content of `<rpc-reply>` is returned.
+    ///
+    /// Use this for vendor-specific RPCs not covered by the standard
+    /// NETCONF operations (get-config, edit-config, etc.).
+    pub async fn rpc(&mut self, rpc_content: &str) -> Result<String, NetconfError> {
+        let msg_id = self.next_message_id();
+        let xml = format!(
+            r#"<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{msg_id}">{rpc_content}</rpc>"#
+        );
+        let reply = self.send_rpc(&xml, &msg_id).await?;
+        match reply {
+            RpcReply::Data(data) => Ok(data),
+            RpcReply::Ok => Ok(String::new()),
+        }
+    }
+
     // ── RPC Operations ──────────────────────────────────────────────
 
     /// Fetch the running, candidate, or startup configuration.
