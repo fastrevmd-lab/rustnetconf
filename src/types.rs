@@ -140,6 +140,7 @@ pub enum ErrorTag {
 
 impl ErrorTag {
     /// Parse an error tag from its XML string representation.
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(tag: &str) -> Self {
         match tag {
             "in-use" => ErrorTag::InUse,

@@ -111,7 +111,7 @@ impl Session {
         // Read device hello
         let device_hello = self.read_message().await?;
         let caps = capability::parse_device_hello(&device_hello)
-            .map_err(|e| ProtocolError::HelloFailed(e))?;
+            .map_err(ProtocolError::HelloFailed)?;
 
         // Negotiate version and switch framing
         let version = caps
@@ -235,6 +235,7 @@ impl Session {
     }
 
     /// Ensure the session is established before sending RPCs.
+    #[allow(clippy::result_large_err)]
     fn ensure_established(&self) -> Result<(), NetconfError> {
         match self.state {
             SessionState::Established => Ok(()),
@@ -247,6 +248,7 @@ impl Session {
     }
 
     /// Ensure the device supports a capability, or return an error.
+    #[allow(clippy::result_large_err)]
     fn require_capability(&self, uri: &str, operation: &str) -> Result<(), NetconfError> {
         if !self.supports(uri) {
             return Err(ProtocolError::CapabilityMissing(format!(
@@ -335,7 +337,7 @@ impl Session {
     /// Requires the `:candidate` capability.
     ///
     /// If the connection drops after `<commit>` is sent but before the reply
-    /// arrives, returns [`RpcError::CommitUnknown`] — the device may have
+    /// arrives, returns `RpcError::CommitUnknown` — the device may have
     /// committed the change. Callers should verify device state manually.
     pub async fn commit(&mut self) -> Result<(), NetconfError> {
         self.require_capability(
@@ -463,7 +465,7 @@ impl Session {
         target: Datastore,
     ) -> Result<Option<u32>, NetconfError> {
         match self.lock(target).await {
-            Ok(()) => return Ok(None),
+            Ok(()) => Ok(None),
             Err(NetconfError::Rpc(crate::error::RpcError::ServerError {
                 ref tag,
                 ref info,
@@ -486,13 +488,13 @@ impl Session {
                 }
 
                 // Couldn't parse session-id — return the original error
-                return Err(ProtocolError::CapabilityMissing(format!(
+                Err(ProtocolError::CapabilityMissing(format!(
                     "lock denied but could not extract stale session-id from error-info: {:?}",
                     info
                 ))
-                .into());
+                .into())
             }
-            Err(other) => return Err(other),
+            Err(other) => Err(other),
         }
     }
 }

@@ -178,7 +178,7 @@ fn build_element_map(nodes: &[XmlNode]) -> BTreeMap<String, Vec<&XmlNode>> {
     map
 }
 
-/// Find a <name> child element's text value (used as list key).
+/// Find a `<name>` child element's text value (used as list key).
 fn find_key_child(children: &[XmlNode]) -> Option<String> {
     for child in children {
         if let XmlNode::Element { name, children: grandchildren } = child {
@@ -203,35 +203,32 @@ fn diff_matched_elements(
 ) {
     // For simplicity, compare first desired vs first running
     if let (Some(d), Some(r)) = (desired.first(), running.first()) {
-        match (d, r) {
-            (
+        if let (
                 XmlNode::Element { children: dc, .. },
                 XmlNode::Element { children: rc, .. },
-            ) => {
-                // Check if these are leaf elements (contain only text)
-                let d_text = extract_text(dc);
-                let r_text = extract_text(rc);
+            ) = (d, r) {
+            // Check if these are leaf elements (contain only text)
+            let d_text = extract_text(dc);
+            let r_text = extract_text(rc);
 
-                match (d_text, r_text) {
-                    (Some(dt), Some(rt)) if dt != rt => {
-                        entries.push(DiffEntry {
-                            path: path.to_string(),
-                            kind: DiffKind::Modified {
-                                from: rt,
-                                to: dt,
-                            },
-                        });
-                    }
-                    (Some(_), Some(_)) => {
-                        // Same value — no diff
-                    }
-                    _ => {
-                        // Container elements — recurse
-                        diff_nodes(dc, rc, path, entries);
-                    }
+            match (d_text, r_text) {
+                (Some(dt), Some(rt)) if dt != rt => {
+                    entries.push(DiffEntry {
+                        path: path.to_string(),
+                        kind: DiffKind::Modified {
+                            from: rt,
+                            to: dt,
+                        },
+                    });
+                }
+                (Some(_), Some(_)) => {
+                    // Same value — no diff
+                }
+                _ => {
+                    // Container elements — recurse
+                    diff_nodes(dc, rc, path, entries);
                 }
             }
-            _ => {}
         }
     }
 }

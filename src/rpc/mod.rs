@@ -257,6 +257,7 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
 }
 
 /// Fields within an `<rpc-error>` element.
+#[allow(clippy::enum_variant_names)]
 enum ErrorField {
     ErrorType,
     ErrorTag,

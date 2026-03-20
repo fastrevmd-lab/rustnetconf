@@ -60,7 +60,6 @@ pub async fn run(
 
 /// Strip outer `<configuration ...>...</configuration>` wrapper from XML.
 /// Matches the vendor profile's unwrap_config behavior.
-/// Matches the vendor profile's unwrap_config behavior.
 pub fn strip_configuration_wrapper(xml: &str) -> String {
     let trimmed = xml.trim();
     if let Some(start) = trimmed.find("<configuration") {

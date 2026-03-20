@@ -93,12 +93,8 @@ impl VendorProfile for JunosVendor {
         const LEGACY_PREFIX: &str = "urn:ietf:params:xml:ns:netconf:";
         const STANDARD_PREFIX: &str = "urn:ietf:params:netconf:";
 
-        if uri.starts_with(LEGACY_PREFIX) {
-            let suffix = &uri[LEGACY_PREFIX.len()..];
-            Some(format!("{STANDARD_PREFIX}{suffix}"))
-        } else {
-            None
-        }
+        uri.strip_prefix(LEGACY_PREFIX)
+            .map(|suffix| format!("{STANDARD_PREFIX}{suffix}"))
     }
 
     fn close_sequence(&self) -> CloseSequence {

@@ -71,18 +71,20 @@ impl SshTransport {
         // Build SSH config with broad algorithm support for network devices.
         // Many devices (Juniper, Cisco) only support ECDH NIST or DH group
         // key exchange — not Curve25519 which is russh's default preference.
-        let mut preferred = Preferred::default();
-        preferred.kex = Cow::Borrowed(&[
-            kex::CURVE25519,
-            kex::CURVE25519_PRE_RFC_8731,
-            kex::ECDH_SHA2_NISTP256,
-            kex::ECDH_SHA2_NISTP384,
-            kex::ECDH_SHA2_NISTP521,
-            kex::DH_G16_SHA512,
-            kex::DH_G14_SHA256,
-            kex::EXTENSION_SUPPORT_AS_CLIENT,
-            kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
-        ]);
+        let preferred = Preferred {
+            kex: Cow::Borrowed(&[
+                kex::CURVE25519,
+                kex::CURVE25519_PRE_RFC_8731,
+                kex::ECDH_SHA2_NISTP256,
+                kex::ECDH_SHA2_NISTP384,
+                kex::ECDH_SHA2_NISTP521,
+                kex::DH_G16_SHA512,
+                kex::DH_G14_SHA256,
+                kex::EXTENSION_SUPPORT_AS_CLIENT,
+                kex::EXTENSION_OPENSSH_STRICT_KEX_AS_CLIENT,
+            ]),
+            ..Preferred::default()
+        };
 
         let russh_config = client::Config {
             preferred,
@@ -209,9 +211,9 @@ impl Transport for SshTransport {
         let channel = self.channel.lock().await;
         channel
             .channel
-            .data(&data[..])
+            .data(data)
             .await
-            .map_err(|e| TransportError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;
         Ok(())
     }
 
@@ -257,12 +259,12 @@ impl Transport for SshTransport {
             .channel
             .eof()
             .await
-            .map_err(|e| TransportError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;
         let handle = self.handle.lock().await;
         handle
             .disconnect(Disconnect::ByApplication, "closing session", "en")
             .await
-            .map_err(|e| TransportError::Io(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+            .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;
         Ok(())
     }
 }

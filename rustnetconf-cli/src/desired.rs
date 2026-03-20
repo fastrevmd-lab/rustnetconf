@@ -1,4 +1,4 @@
-//! Read desired state XML files from the desired/<device>/ directory.
+//! Read desired state XML files from the `desired/<device>/` directory.
 
 use std::path::{Path, PathBuf};
 
@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug)]
 pub struct DesiredConfig {
     /// Source file path.
+    #[allow(dead_code)]
     pub path: PathBuf,
     /// File name without extension (e.g., "interfaces").
     pub name: String,
@@ -157,7 +158,13 @@ mod tests {
     }
 
     fn tempdir() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("rustnetconf-test-{}", std::process::id()));
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "rustnetconf-test-{}-{id}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

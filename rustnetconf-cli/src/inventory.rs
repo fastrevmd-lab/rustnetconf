@@ -74,6 +74,7 @@ pub struct ResolvedDevice {
     pub username: String,
     pub password: Option<String>,
     pub key_file: Option<String>,
+    #[allow(dead_code)]
     pub vendor: Option<String>,
     pub confirm_timeout: u32,
 }
@@ -82,7 +83,9 @@ pub struct ResolvedDevice {
 fn resolve_home(path: &str) -> String {
     if path.starts_with("~/") {
         if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{}", &path[2..]);
+            if let Some(rest) = path.strip_prefix("~/") {
+                return format!("{home}/{rest}");
+            }
         }
     }
     path.to_string()

@@ -25,6 +25,7 @@ impl SubtreeFilter {
     }
 
     /// Add an XML element to the filter.
+    #[allow(clippy::should_implement_trait)]
     pub fn add(mut self, xml: &str) -> Self {
         self.elements.push(xml.to_string());
         self
