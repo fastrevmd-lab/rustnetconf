@@ -391,12 +391,11 @@ fn extract_rpc_reply_inner_content(xml: &str) -> Option<String> {
 
                 if name == "rpc-reply" {
                     in_rpc_reply = true;
-                } else if in_rpc_reply {
-                    if depth > 0 || (name != "ok" && name != "rpc-error") {
-                        if depth == 0 {
-                            has_content = true;
-                        }
-                        depth += 1;
+                } else if in_rpc_reply && (depth > 0 || (name != "ok" && name != "rpc-error")) {
+                    if depth == 0 {
+                        has_content = true;
+                    }
+                    depth += 1;
                         content.push('<');
                         content.push_str(name);
                         for attr in tag.attributes().flatten() {
@@ -410,8 +409,7 @@ fn extract_rpc_reply_inner_content(xml: &str) -> Option<String> {
                             );
                             content.push('"');
                         }
-                        content.push('>');
-                    }
+                    content.push('>');
                 }
             }
             Ok(Event::Empty(ref tag)) if in_rpc_reply && depth > 0 => {
