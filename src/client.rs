@@ -147,6 +147,17 @@ impl Client {
         }
     }
 
+    /// Send an arbitrary RPC and return the raw XML response content.
+    ///
+    /// The `rpc_content` is wrapped in `<rpc>` tags with a message-id,
+    /// sent to the device, and the inner content of `<rpc-reply>` is returned.
+    ///
+    /// Use this for vendor-specific RPCs not covered by the standard
+    /// NETCONF operations (get-config, edit-config, etc.).
+    pub async fn rpc(&mut self, rpc_content: &str) -> Result<String, NetconfError> {
+        self.session.rpc(rpc_content).await
+    }
+
     /// Check if the device supports a specific capability URI.
     pub fn supports(&self, capability_uri: &str) -> bool {
         self.session.supports(capability_uri)
