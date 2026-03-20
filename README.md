@@ -210,6 +210,23 @@ cargo test --test integration_vsrx        # Run vSRX integration tests only
 SKIP_INTEGRATION=1 cargo test             # Skip tests requiring a device
 ```
 
+## Security
+
+### Known Issues
+
+- **RSA timing sidechannel (RUSTSEC-2023-0071)** — The `rsa` crate (transitive dependency via `russh → ssh-key → rsa`) has a known timing sidechannel that could theoretically allow RSA key recovery. No upstream fix is available. **Mitigation:** Use Ed25519 or ECDSA keys instead of RSA for SSH authentication. All Ed25519 and ECDSA keys are unaffected.
+
+- **SSH host key verification disabled** — The SSH transport accepts all host keys by default, which means connections are vulnerable to man-in-the-middle attacks on untrusted networks. This is consistent with most network automation tools (Python's ncclient has the same default). **Mitigation:** Use rustnetconf on trusted management networks. Host key verification support is planned.
+
+### Security Best Practices
+
+- Use Ed25519 SSH keys (not RSA) for device authentication
+- Store credentials in inventory.toml with restricted file permissions (`chmod 600`)
+- Run the CLI on trusted management networks with direct device connectivity
+- Use `confirmed-commit` (the default for `netconf apply`) so the device auto-reverts if something goes wrong
+
+To report a security vulnerability, please open an issue on GitHub.
+
 ## License
 
 MIT OR Apache-2.0
