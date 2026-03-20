@@ -13,7 +13,7 @@ categories = ["network-programming"]
 generated = []
 
 [dependencies]
-rustnetconf = { path = ".." }
+rustnetconf = { version = "0.2", path = ".." }
 serde = { version = "1", features = ["derive"] }
 quick-xml = { version = "0.37", features = ["serialize"] }
 thiserror = "2"

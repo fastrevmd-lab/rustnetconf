@@ -13,7 +13,7 @@ name = "netconf"
 path = "src/main.rs"
 
 [dependencies]
-rustnetconf = { path = ".." }
+rustnetconf = { version = "0.2", path = ".." }
 clap = { version = "4", features = ["derive"] }
 colored = "3"
 toml = "0.8"
