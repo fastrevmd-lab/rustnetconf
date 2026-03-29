@@ -21,6 +21,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 
 use crate::capability::{self, Capabilities, NetconfVersion};
 use crate::error::{FramingError, NetconfError, ProtocolError, TransportError};
+use crate::facts::Facts;
 use crate::framing::chunked::ChunkedFramer;
 use crate::framing::eom::EomFramer;
 use crate::framing::Framer;
@@ -61,6 +62,8 @@ pub struct Session {
     /// Vendor-specific behavior profile. Set during establish() via auto-detection,
     /// or overridden by the user via Client::vendor() / Client::vendor_profile().
     vendor_profile: Box<dyn VendorProfile>,
+    /// Device facts gathered after session establishment.
+    facts: Facts,
 }
 
 impl Session {
@@ -80,6 +83,7 @@ impl Session {
             version: None,
             pending_commit: false,
             vendor_profile: Box::new(crate::vendor::generic::GenericVendor),
+            facts: Facts::default(),
         }
     }
 
@@ -169,6 +173,43 @@ impl Session {
     /// Get the vendor profile name (e.g., "junos", "generic").
     pub fn vendor_name(&self) -> &str {
         self.vendor_profile.name()
+    }
+
+    /// Get the device facts.
+    pub fn facts(&self) -> &Facts {
+        &self.facts
+    }
+
+    /// Gather device facts by sending the vendor-specific facts RPC.
+    ///
+    /// This is called automatically during connection when `gather_facts(true)`
+    /// is set (the default). It can also be called manually after connecting
+    /// with `gather_facts(false)` to populate facts on demand.
+    ///
+    /// If the vendor has no facts-gathering RPC, this is a no-op and facts
+    /// remain empty.
+    pub async fn gather_facts(&mut self) -> Result<(), NetconfError> {
+        let rpc_content = match self.vendor_profile.facts_rpc() {
+            Some(rpc) => rpc.to_string(),
+            None => return Ok(()),
+        };
+
+        match self.rpc(&rpc_content).await {
+            Ok(response) => {
+                self.facts = self.vendor_profile.parse_facts(&response);
+                tracing::info!(
+                    hostname = ?self.facts.hostname,
+                    model = ?self.facts.model,
+                    version = ?self.facts.version,
+                    "device facts gathered"
+                );
+                Ok(())
+            }
+            Err(err) => {
+                tracing::warn!(%err, "failed to gather device facts");
+                Err(err)
+            }
+        }
     }
 
     /// Send an RPC and wait for the reply.

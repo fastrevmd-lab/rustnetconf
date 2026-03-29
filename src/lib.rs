@@ -38,6 +38,7 @@
 pub mod capability;
 pub mod client;
 pub mod error;
+pub mod facts;
 pub mod framing;
 pub mod pool;
 pub mod rpc;
@@ -49,4 +50,5 @@ pub mod vendor;
 // Re-export the primary public API types
 pub use client::{Client, ClientBuilder, EditConfigBuilder};
 pub use error::NetconfError;
+pub use facts::Facts;
 pub use types::{Datastore, DefaultOperation, ErrorOption, TestOption};

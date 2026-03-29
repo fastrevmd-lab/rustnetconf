@@ -10,6 +10,7 @@
 
 use super::{CloseSequence, VendorProfile};
 use crate::capability::Capabilities;
+use crate::facts::{self, Facts};
 
 /// Junos capability URI used for auto-detection.
 const JUNOS_CAPABILITY: &str = "http://xml.juniper.net/netconf/junos/1.0";
@@ -101,6 +102,14 @@ impl VendorProfile for JunosVendor {
         // Junos may have uncommitted candidate changes. Discard before closing
         // to avoid leaving dirty state that blocks the next session's lock.
         CloseSequence::DiscardThenClose
+    }
+
+    fn facts_rpc(&self) -> Option<&str> {
+        Some("<get-system-information/>")
+    }
+
+    fn parse_facts(&self, response: &str) -> Facts {
+        facts::parse_junos_system_information(response)
     }
 }
 

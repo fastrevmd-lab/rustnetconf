@@ -38,6 +38,7 @@ pub mod generic;
 pub mod junos;
 
 use crate::capability::Capabilities;
+use crate::facts::Facts;
 
 /// How the session should be closed for this vendor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -82,6 +83,21 @@ pub trait VendorProfile: Send + Sync {
 
     /// The session close sequence for this vendor.
     fn close_sequence(&self) -> CloseSequence;
+
+    /// Return the RPC content for gathering device facts, if supported.
+    ///
+    /// The returned string is the inner XML to be wrapped in `<rpc>` tags.
+    /// Return `None` if this vendor has no standard facts-gathering RPC.
+    fn facts_rpc(&self) -> Option<&str> {
+        None
+    }
+
+    /// Parse a facts-gathering RPC response into [`Facts`].
+    ///
+    /// Called with the raw XML response from the RPC returned by [`facts_rpc()`].
+    fn parse_facts(&self, _response: &str) -> Facts {
+        Facts::default()
+    }
 }
 
 /// Auto-detect the vendor from the device's hello capabilities.

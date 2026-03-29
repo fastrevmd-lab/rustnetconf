@@ -5,6 +5,7 @@
 
 use crate::capability::Capabilities;
 use crate::error::NetconfError;
+use crate::facts::Facts;
 use crate::session::Session;
 use crate::transport::ssh::{SshAuth, SshConfig, SshTransport};
 use crate::types::{Datastore, DefaultOperation, ErrorOption, TestOption};
@@ -34,6 +35,7 @@ pub struct ClientBuilder {
     key_passphrase: Option<String>,
     use_agent: bool,
     vendor_profile: Option<Box<dyn VendorProfile>>,
+    gather_facts: bool,
 }
 
 impl ClientBuilder {
@@ -73,6 +75,21 @@ impl ClientBuilder {
     /// when using a custom vendor implementation.
     pub fn vendor_profile(mut self, profile: Box<dyn VendorProfile>) -> Self {
         self.vendor_profile = Some(profile);
+        self
+    }
+
+    /// Control whether device facts are gathered after connecting.
+    ///
+    /// When `true` (the default), the client sends a vendor-specific RPC
+    /// (e.g., `<get-system-information/>` on Junos) to populate
+    /// [`Client::facts()`] with the device's hostname, model, version, and
+    /// serial number.
+    ///
+    /// Set to `false` to skip facts gathering — useful for clustered devices
+    /// where the facts RPC may fail if a peer node is unreachable. Facts can
+    /// be gathered later via [`Client::gather_facts()`].
+    pub fn gather_facts(mut self, gather: bool) -> Self {
+        self.gather_facts = gather;
         self
     }
 
@@ -117,6 +134,10 @@ impl ClientBuilder {
 
         session.establish().await?;
 
+        if self.gather_facts {
+            session.gather_facts().await?;
+        }
+
         Ok(Client { session })
     }
 }
@@ -144,6 +165,7 @@ impl Client {
             key_passphrase: None,
             use_agent: false,
             vendor_profile: None,
+            gather_facts: true,
         }
     }
 
@@ -171,6 +193,23 @@ impl Client {
     /// Get the device's capabilities.
     pub fn capabilities(&self) -> Option<&Capabilities> {
         self.session.capabilities()
+    }
+
+    /// Get the device facts (hostname, model, version, serial number).
+    ///
+    /// Returns an empty [`Facts`] if `gather_facts(false)` was used during
+    /// connection and [`gather_facts()`](Self::gather_facts) hasn't been
+    /// called yet.
+    pub fn facts(&self) -> &Facts {
+        self.session.facts()
+    }
+
+    /// Gather device facts by sending the vendor-specific facts RPC.
+    ///
+    /// Use this to manually populate facts after connecting with
+    /// `gather_facts(false)`. Can also be called to refresh facts.
+    pub async fn gather_facts(&mut self) -> Result<(), NetconfError> {
+        self.session.gather_facts().await
     }
 
     /// Fetch configuration from a datastore.
