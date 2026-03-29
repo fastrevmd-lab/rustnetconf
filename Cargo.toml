@@ -15,13 +15,11 @@ categories = ["network-programming"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-russh = "0.48"
-russh-keys = "0.48"
+russh = { version = "0.58", default-features = false, features = ["flate2", "aws-lc-rs"] }
 quick-xml = { version = "0.37", features = ["serialize"] }
 thiserror = "2"
 tracing = "0.1"
 async-trait = "0.1"
-ssh-key = "0.6"
 futures = "0.3.32"
 
 [dev-dependencies]

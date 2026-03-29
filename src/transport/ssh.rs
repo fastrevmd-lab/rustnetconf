@@ -4,8 +4,9 @@
 //! and provides byte-stream read/write access to the SSH channel.
 
 use async_trait::async_trait;
+use russh::client::AuthResult;
+use russh::keys::{self, PrivateKeyWithHashAlg};
 use russh::*;
-use russh_keys::*;
 use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
@@ -75,15 +76,14 @@ struct SshHandler {
     host_key_verification: HostKeyVerification,
 }
 
-#[async_trait]
 impl client::Handler for SshHandler {
     type Error = russh::Error;
 
-    async fn check_server_key(
+    fn check_server_key(
         &mut self,
-        server_public_key: &ssh_key::PublicKey,
-    ) -> Result<bool, Self::Error> {
-        match &self.host_key_verification {
+        server_public_key: &keys::PublicKey,
+    ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
+        let result = match &self.host_key_verification {
             HostKeyVerification::AcceptAll => {
                 tracing::warn!(
                     "accepting SSH host key without verification — \
@@ -92,7 +92,7 @@ impl client::Handler for SshHandler {
                 Ok(true)
             }
             HostKeyVerification::Fingerprint(expected) => {
-                let fingerprint = server_public_key.fingerprint(ssh_key::HashAlg::Sha256);
+                let fingerprint = server_public_key.fingerprint(keys::HashAlg::Sha256);
                 let actual = fingerprint.to_string();
                 // Allow comparison with or without "SHA256:" prefix
                 let matches = actual == *expected
@@ -115,7 +115,8 @@ impl client::Handler for SshHandler {
                 tracing::error!("SSH host key rejected (RejectAll policy)");
                 Ok(false)
             }
-        }
+        };
+        std::future::ready(result)
     }
 }
 
@@ -170,7 +171,7 @@ impl SshTransport {
             SshAuth::KeyFile { path, passphrase } => {
                 let key_path = Path::new(path);
                 let key_pair = if let Some(pass) = passphrase {
-                    decode_secret_key(&std::fs::read_to_string(key_path)
+                    keys::decode_secret_key(&std::fs::read_to_string(key_path)
                         .map_err(|e| {
                             tracing::debug!(path, %e, "failed to read key file");
                             TransportError::Auth("failed to read SSH key file".to_string())
@@ -180,7 +181,7 @@ impl SshTransport {
                             TransportError::Auth("failed to decode SSH key".to_string())
                         })?
                 } else {
-                    decode_secret_key(&std::fs::read_to_string(key_path)
+                    keys::decode_secret_key(&std::fs::read_to_string(key_path)
                         .map_err(|e| {
                             tracing::debug!(path, %e, "failed to read key file");
                             TransportError::Auth("failed to read SSH key file".to_string())
@@ -190,13 +191,20 @@ impl SshTransport {
                             TransportError::Auth("failed to decode SSH key".to_string())
                         })?
                 };
+                let hash_alg = handle.best_supported_rsa_hash().await
+                    .unwrap_or(None)
+                    .flatten();
+                let key_with_hash = PrivateKeyWithHashAlg::new(
+                    Arc::new(key_pair),
+                    hash_alg,
+                );
                 handle
-                    .authenticate_publickey(&config.username, Arc::new(key_pair))
+                    .authenticate_publickey(&config.username, key_with_hash)
                     .await
                     .map_err(|e| TransportError::Auth(format!("key auth failed: {e}")))?
             }
             SshAuth::Agent => {
-                let mut agent = russh_keys::agent::client::AgentClient::connect_env()
+                let mut agent = keys::agent::client::AgentClient::connect_env()
                     .await
                     .map_err(|e| TransportError::Auth(format!("SSH agent connect failed: {e}")))?;
                 let identities = agent
@@ -204,24 +212,37 @@ impl SshTransport {
                     .await
                     .map_err(|e| TransportError::Auth(format!("SSH agent identities failed: {e}")))?;
 
-                let mut authenticated = false;
+                let mut auth_success = false;
                 for identity in identities {
+                    let public_key = match &identity {
+                        keys::agent::AgentIdentity::PublicKey { key, .. } => key.clone(),
+                        keys::agent::AgentIdentity::Certificate { certificate, .. } => {
+                            keys::PublicKey::from(certificate.public_key().clone())
+                        }
+                    };
                     match handle
-                        .authenticate_publickey_with(&config.username, identity, &mut agent)
+                        .authenticate_publickey_with(&config.username, public_key, None, &mut agent)
                         .await
                     {
-                        Ok(true) => {
-                            authenticated = true;
+                        Ok(AuthResult::Success) => {
+                            auth_success = true;
                             break;
                         }
                         _ => continue,
                     }
                 }
-                authenticated
+                if auth_success {
+                    AuthResult::Success
+                } else {
+                    AuthResult::Failure {
+                        remaining_methods: russh::MethodSet::empty(),
+                        partial_success: false,
+                    }
+                }
             }
         };
 
-        if !auth_result {
+        if !matches!(auth_result, AuthResult::Success) {
             return Err(TransportError::Auth(format!(
                 "authentication failed for user '{}'",
                 config.username
