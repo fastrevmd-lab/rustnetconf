@@ -5,7 +5,29 @@
 
 use crate::types::{Datastore, DefaultOperation, ErrorOption, TestOption};
 
+/// Escape a string for safe inclusion in an XML attribute value.
+///
+/// Replaces `&`, `<`, `>`, `"`, and `'` with their XML entity equivalents.
+fn escape_xml_attr(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 /// Generate a `<get-config>` RPC request.
+///
+/// The `filter` parameter, if provided, must be well-formed XML (a subtree
+/// filter element). It is inserted verbatim — do not pass untrusted user
+/// input without validation.
 pub fn get_config_xml(message_id: &str, source: Datastore, filter: Option<&str>) -> String {
     let filter_xml = match filter {
         Some(f) => format!(
@@ -14,9 +36,10 @@ pub fn get_config_xml(message_id: &str, source: Datastore, filter: Option<&str>)
         None => String::new(),
     };
 
+    let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
   <get-config>
     <source>
       <{source}/>
@@ -28,6 +51,10 @@ pub fn get_config_xml(message_id: &str, source: Datastore, filter: Option<&str>)
 }
 
 /// Generate a `<get>` RPC request.
+///
+/// The `filter` parameter, if provided, must be well-formed XML (a subtree
+/// filter element). It is inserted verbatim — do not pass untrusted user
+/// input without validation.
 pub fn get_xml(message_id: &str, filter: Option<&str>) -> String {
     let filter_xml = match filter {
         Some(f) => format!(
@@ -36,9 +63,10 @@ pub fn get_xml(message_id: &str, filter: Option<&str>) -> String {
         None => String::new(),
     };
 
+    let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
   <get>{filter_xml}
   </get>
 </rpc>"#,
@@ -55,6 +83,9 @@ pub struct EditConfigParams<'a> {
 }
 
 /// Generate an `<edit-config>` RPC request.
+///
+/// The `config` field in `params` must be well-formed XML. It is inserted
+/// verbatim — do not pass untrusted user input without validation.
 pub fn edit_config_xml(message_id: &str, params: &EditConfigParams<'_>) -> String {
     let mut options = String::new();
 
@@ -79,9 +110,10 @@ pub fn edit_config_xml(message_id: &str, params: &EditConfigParams<'_>) -> Strin
         ));
     }
 
+    let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
   <edit-config>
     <target>
       <{target}/>
@@ -98,9 +130,10 @@ pub fn edit_config_xml(message_id: &str, params: &EditConfigParams<'_>) -> Strin
 
 /// Generate a `<lock>` RPC request.
 pub fn lock_xml(message_id: &str, target: Datastore) -> String {
+    let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
   <lock>
     <target>
       <{target}/>
@@ -113,9 +146,10 @@ pub fn lock_xml(message_id: &str, target: Datastore) -> String {
 
 /// Generate an `<unlock>` RPC request.
 pub fn unlock_xml(message_id: &str, target: Datastore) -> String {
+    let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
   <unlock>
     <target>
       <{target}/>
@@ -130,9 +164,10 @@ pub fn unlock_xml(message_id: &str, target: Datastore) -> String {
 ///
 /// Reverts the candidate configuration to match running.
 pub fn discard_changes_xml(message_id: &str) -> String {
+    let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
   <discard-changes/>
 </rpc>"#,
     )
@@ -140,9 +175,10 @@ pub fn discard_changes_xml(message_id: &str) -> String {
 
 /// Generate a `<commit>` RPC request.
 pub fn commit_xml(message_id: &str) -> String {
+    let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
   <commit/>
 </rpc>"#,
     )
@@ -153,9 +189,10 @@ pub fn commit_xml(message_id: &str) -> String {
 /// The device will automatically rollback the commit if a confirming
 /// `<commit>` is not received within `confirm_timeout` seconds.
 pub fn confirmed_commit_xml(message_id: &str, confirm_timeout: u32) -> String {
+    let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
   <commit>
     <confirmed/>
     <confirm-timeout>{confirm_timeout}</confirm-timeout>
@@ -166,9 +203,10 @@ pub fn confirmed_commit_xml(message_id: &str, confirm_timeout: u32) -> String {
 
 /// Generate a `<validate>` RPC request.
 pub fn validate_xml(message_id: &str, source: Datastore) -> String {
+    let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
   <validate>
     <source>
       <{source}/>
@@ -181,9 +219,10 @@ pub fn validate_xml(message_id: &str, source: Datastore) -> String {
 
 /// Generate a `<close-session>` RPC request.
 pub fn close_session_xml(message_id: &str) -> String {
+    let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
   <close-session/>
 </rpc>"#,
     )
@@ -191,9 +230,10 @@ pub fn close_session_xml(message_id: &str) -> String {
 
 /// Generate a `<kill-session>` RPC request.
 pub fn kill_session_xml(message_id: &str, session_id: u32) -> String {
+    let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
   <kill-session>
     <session-id>{session_id}</session-id>
   </kill-session>

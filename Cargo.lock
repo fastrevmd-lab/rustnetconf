@@ -1621,6 +1621,7 @@ dependencies = [
  "quick-xml",
  "russh",
  "russh-keys",
+ "ssh-key",
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",

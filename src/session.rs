@@ -41,6 +41,11 @@ const READ_BUF_SIZE: usize = 65536;
 /// response in the transport buffer.
 const MAX_STALE_DRAIN: usize = 10;
 
+/// Maximum read buffer size (100 MB). If the device sends more data than this
+/// without completing a framed message, the read is aborted to prevent memory
+/// exhaustion from a malformed or malicious device response.
+const MAX_READ_BUFFER: usize = 100 * 1024 * 1024;
+
 /// Session states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
@@ -390,6 +395,17 @@ impl Session {
                 .into());
             }
             self.read_buffer.extend_from_slice(&temp_buf[..bytes_read]);
+
+            if self.read_buffer.len() > MAX_READ_BUFFER {
+                return Err(TransportError::Io(std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory,
+                    format!(
+                        "read buffer exceeded {} MB without completing a message",
+                        MAX_READ_BUFFER / (1024 * 1024)
+                    ),
+                ))
+                .into());
+            }
         }
     }
 
@@ -427,6 +443,12 @@ impl Session {
     ///
     /// Use this for vendor-specific RPCs not covered by the standard
     /// NETCONF operations (get-config, edit-config, etc.).
+    ///
+    /// # Safety
+    ///
+    /// `rpc_content` must be well-formed XML. It is inserted verbatim into
+    /// the `<rpc>` wrapper — do not pass untrusted user input without
+    /// validation.
     pub async fn rpc(&mut self, rpc_content: &str) -> Result<String, NetconfError> {
         let msg_id = self.next_message_id();
         let xml = format!(

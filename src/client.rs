@@ -9,7 +9,7 @@ use crate::capability::Capabilities;
 use crate::error::NetconfError;
 use crate::facts::Facts;
 use crate::session::Session;
-use crate::transport::ssh::{SshAuth, SshConfig, SshTransport};
+use crate::transport::ssh::{HostKeyVerification, SshAuth, SshConfig, SshTransport};
 use crate::types::{Datastore, DefaultOperation, ErrorOption, TestOption};
 use crate::vendor::VendorProfile;
 
@@ -39,6 +39,7 @@ pub struct ClientBuilder {
     vendor_profile: Option<Box<dyn VendorProfile>>,
     gather_facts: bool,
     keepalive_interval: Option<Duration>,
+    host_key_verification: HostKeyVerification,
 }
 
 impl ClientBuilder {
@@ -109,6 +110,35 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the SSH host key verification policy.
+    ///
+    /// Controls how the client validates the device's SSH host key during
+    /// connection to protect against man-in-the-middle attacks.
+    ///
+    /// Default: [`HostKeyVerification::AcceptAll`] (a warning is logged).
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// use rustnetconf::Client;
+    /// use rustnetconf::transport::ssh::HostKeyVerification;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = Client::connect("10.0.0.1:830")
+    ///     .username("admin")
+    ///     .password("secret")
+    ///     .host_key_verification(HostKeyVerification::Fingerprint(
+    ///         "SHA256:abc123...".to_string(),
+    ///     ))
+    ///     .connect()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn host_key_verification(mut self, policy: HostKeyVerification) -> Self {
+        self.host_key_verification = policy;
+        self
+    }
+
     /// Establish the SSH connection and perform the NETCONF hello exchange.
     pub async fn connect(self) -> Result<Client, NetconfError> {
         let username = self
@@ -138,6 +168,7 @@ impl ClientBuilder {
             port: self.port,
             username,
             auth,
+            host_key_verification: self.host_key_verification,
         };
 
         let transport = SshTransport::connect(config.clone()).await?;
@@ -198,6 +229,7 @@ impl Client {
             vendor_profile: None,
             gather_facts: true,
             keepalive_interval: None,
+            host_key_verification: HostKeyVerification::default(),
         }
     }
 

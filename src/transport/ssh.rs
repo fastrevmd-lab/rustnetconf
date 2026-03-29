@@ -34,6 +34,31 @@ pub enum SshAuth {
     Agent,
 }
 
+/// SSH host key verification policy.
+///
+/// Controls how the client validates the device's SSH host key during
+/// connection. Use this to protect against man-in-the-middle attacks.
+#[derive(Clone, Debug, Default)]
+pub enum HostKeyVerification {
+    /// Accept all host keys without verification (**INSECURE**).
+    ///
+    /// Suitable for lab environments, testing, or initial device provisioning.
+    /// A warning is logged when this mode is used.
+    #[default]
+    AcceptAll,
+
+    /// Accept only a host key matching a specific SHA-256 fingerprint.
+    ///
+    /// The fingerprint can be provided with or without the `SHA256:` prefix
+    /// (e.g., `"SHA256:abc123..."` or just `"abc123..."`).
+    ///
+    /// Obtain the fingerprint with: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
+    Fingerprint(String),
+
+    /// Reject all host keys (useful for testing error paths).
+    RejectAll,
+}
+
 /// Configuration for establishing an SSH transport.
 #[derive(Clone)]
 pub struct SshConfig {
@@ -41,10 +66,14 @@ pub struct SshConfig {
     pub port: u16,
     pub username: String,
     pub auth: SshAuth,
+    /// Host key verification policy.
+    pub host_key_verification: HostKeyVerification,
 }
 
 /// Internal SSH client handler for russh callbacks.
-struct SshHandler;
+struct SshHandler {
+    host_key_verification: HostKeyVerification,
+}
 
 #[async_trait]
 impl client::Handler for SshHandler {
@@ -52,11 +81,41 @@ impl client::Handler for SshHandler {
 
     async fn check_server_key(
         &mut self,
-        _server_public_key: &ssh_key::PublicKey,
+        server_public_key: &ssh_key::PublicKey,
     ) -> Result<bool, Self::Error> {
-        // Accept all host keys for now.
-        // TODO: Add host key verification (known_hosts support).
-        Ok(true)
+        match &self.host_key_verification {
+            HostKeyVerification::AcceptAll => {
+                tracing::warn!(
+                    "accepting SSH host key without verification — \
+                     set host_key_verification() for production use"
+                );
+                Ok(true)
+            }
+            HostKeyVerification::Fingerprint(expected) => {
+                let fingerprint = server_public_key.fingerprint(ssh_key::HashAlg::Sha256);
+                let actual = fingerprint.to_string();
+                // Allow comparison with or without "SHA256:" prefix
+                let matches = actual == *expected
+                    || actual
+                        .strip_prefix("SHA256:")
+                        .is_some_and(|stripped| stripped == expected);
+                if matches {
+                    tracing::debug!("SSH host key fingerprint verified");
+                    Ok(true)
+                } else {
+                    tracing::error!(
+                        expected = %expected,
+                        actual = %actual,
+                        "SSH host key fingerprint mismatch — possible MITM attack"
+                    );
+                    Ok(false)
+                }
+            }
+            HostKeyVerification::RejectAll => {
+                tracing::error!("SSH host key rejected (RejectAll policy)");
+                Ok(false)
+            }
+        }
     }
 }
 
@@ -93,7 +152,9 @@ impl SshTransport {
             ..Default::default()
         };
 
-        let handler = SshHandler;
+        let handler = SshHandler {
+            host_key_verification: config.host_key_verification.clone(),
+        };
         let mut handle = client::connect(Arc::new(russh_config), (&*config.host, config.port), handler)
             .await
             .map_err(|e| TransportError::Connect(format!("SSH connect to {}:{} failed: {e}", config.host, config.port)))?;
@@ -110,12 +171,24 @@ impl SshTransport {
                 let key_path = Path::new(path);
                 let key_pair = if let Some(pass) = passphrase {
                     decode_secret_key(&std::fs::read_to_string(key_path)
-                        .map_err(|e| TransportError::Auth(format!("failed to read key file {path}: {e}")))?, Some(pass))
-                        .map_err(|e| TransportError::Auth(format!("failed to decode key: {e}")))?
+                        .map_err(|e| {
+                            tracing::debug!(path, %e, "failed to read key file");
+                            TransportError::Auth("failed to read SSH key file".to_string())
+                        })?, Some(pass))
+                        .map_err(|e| {
+                            tracing::debug!(%e, "failed to decode key");
+                            TransportError::Auth("failed to decode SSH key".to_string())
+                        })?
                 } else {
                     decode_secret_key(&std::fs::read_to_string(key_path)
-                        .map_err(|e| TransportError::Auth(format!("failed to read key file {path}: {e}")))?, None)
-                        .map_err(|e| TransportError::Auth(format!("failed to decode key: {e}")))?
+                        .map_err(|e| {
+                            tracing::debug!(path, %e, "failed to read key file");
+                            TransportError::Auth("failed to read SSH key file".to_string())
+                        })?, None)
+                        .map_err(|e| {
+                            tracing::debug!(%e, "failed to decode key");
+                            TransportError::Auth("failed to decode SSH key".to_string())
+                        })?
                 };
                 handle
                     .authenticate_publickey(&config.username, Arc::new(key_pair))
