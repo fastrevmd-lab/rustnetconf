@@ -21,6 +21,7 @@ pub struct SshTransport {
 }
 
 /// SSH authentication method.
+#[derive(Clone)]
 pub enum SshAuth {
     /// Password authentication.
     Password(String),
@@ -34,6 +35,7 @@ pub enum SshAuth {
 }
 
 /// Configuration for establishing an SSH transport.
+#[derive(Clone)]
 pub struct SshConfig {
     pub host: String,
     pub port: u16,

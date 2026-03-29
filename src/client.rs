@@ -3,6 +3,8 @@
 //! `Client` provides builder-pattern connection setup and delegates all
 //! protocol operations to the underlying `Session`. It owns no protocol state.
 
+use std::time::Duration;
+
 use crate::capability::Capabilities;
 use crate::error::NetconfError;
 use crate::facts::Facts;
@@ -36,6 +38,7 @@ pub struct ClientBuilder {
     use_agent: bool,
     vendor_profile: Option<Box<dyn VendorProfile>>,
     gather_facts: bool,
+    keepalive_interval: Option<Duration>,
 }
 
 impl ClientBuilder {
@@ -93,6 +96,19 @@ impl ClientBuilder {
         self
     }
 
+    /// Set a keepalive interval for automatic session health checks.
+    ///
+    /// When set, the client tracks the time since the last successful RPC.
+    /// Before each RPC, if more than `interval` has elapsed, a lightweight
+    /// probe is sent first. If the probe fails, the session is marked dead
+    /// and the caller can [`reconnect()`](Client::reconnect).
+    ///
+    /// Default: no keepalive (disabled).
+    pub fn keepalive_interval(mut self, interval: Duration) -> Self {
+        self.keepalive_interval = Some(interval);
+        self
+    }
+
     /// Establish the SSH connection and perform the NETCONF hello exchange.
     pub async fn connect(self) -> Result<Client, NetconfError> {
         let username = self
@@ -124,8 +140,12 @@ impl ClientBuilder {
             auth,
         };
 
-        let transport = SshTransport::connect(config).await?;
+        let transport = SshTransport::connect(config.clone()).await?;
         let mut session = Session::new(Box::new(transport));
+
+        if let Some(interval) = self.keepalive_interval {
+            session.set_keepalive_interval(interval);
+        }
 
         // Set explicit vendor profile if provided (overrides auto-detection)
         if let Some(profile) = self.vendor_profile {
@@ -138,7 +158,12 @@ impl ClientBuilder {
             session.gather_facts().await?;
         }
 
-        Ok(Client { session })
+        Ok(Client {
+            session,
+            ssh_config: config,
+            gather_facts: self.gather_facts,
+            keepalive_interval: self.keepalive_interval,
+        })
     }
 }
 
@@ -148,6 +173,12 @@ impl ClientBuilder {
 /// underlying [`Session`] which owns all protocol state.
 pub struct Client {
     session: Session,
+    /// Stored SSH config for reconnect support.
+    ssh_config: SshConfig,
+    /// Whether to gather facts on connect/reconnect.
+    gather_facts: bool,
+    /// Keepalive interval (None = disabled).
+    keepalive_interval: Option<Duration>,
 }
 
 impl Client {
@@ -166,6 +197,7 @@ impl Client {
             use_agent: false,
             vendor_profile: None,
             gather_facts: true,
+            keepalive_interval: None,
         }
     }
 
@@ -210,6 +242,58 @@ impl Client {
     /// `gather_facts(false)`. Can also be called to refresh facts.
     pub async fn gather_facts(&mut self) -> Result<(), NetconfError> {
         self.session.gather_facts().await
+    }
+
+    /// Check if the session is alive (established and not closed).
+    ///
+    /// This is a fast in-memory check — it does not send any RPC to the
+    /// device. Use this to detect sessions that have been explicitly closed
+    /// or marked dead by a failed keepalive probe.
+    ///
+    /// For a thorough check that verifies the transport is responsive,
+    /// see [`probe_session()`](Self::probe_session).
+    pub fn session_alive(&self) -> bool {
+        self.session.is_alive()
+    }
+
+    /// Probe the session by sending a lightweight RPC to verify the
+    /// transport is responsive.
+    ///
+    /// Returns `true` if the device responded, `false` if the probe failed
+    /// (in which case the session is marked dead).
+    pub async fn probe_session(&mut self) -> bool {
+        self.session.probe().await
+    }
+
+    /// Re-establish the NETCONF session using the original connection
+    /// parameters.
+    ///
+    /// Closes the current session (if still open) and creates a fresh SSH
+    /// connection, performs the hello exchange, and optionally gathers facts
+    /// (matching the original `gather_facts` setting).
+    ///
+    /// This is idempotent — safe to call even if the session is already dead.
+    pub async fn reconnect(&mut self) -> Result<(), NetconfError> {
+        // Best-effort close of the old session
+        let _ = self.session.close_session().await;
+
+        let transport = SshTransport::connect(self.ssh_config.clone()).await?;
+        let mut session = Session::new(Box::new(transport));
+
+        if let Some(interval) = self.keepalive_interval {
+            session.set_keepalive_interval(interval);
+        }
+
+        session.establish().await?;
+
+        if self.gather_facts {
+            session.gather_facts().await?;
+        }
+
+        self.session = session;
+
+        tracing::info!("NETCONF session reconnected");
+        Ok(())
     }
 
     /// Fetch configuration from a datastore.

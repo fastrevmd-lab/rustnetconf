@@ -18,6 +18,7 @@
 //! ```
 
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use crate::capability::{self, Capabilities, NetconfVersion};
 use crate::error::{FramingError, NetconfError, ProtocolError, TransportError};
@@ -69,6 +70,11 @@ pub struct Session {
     vendor_profile: Box<dyn VendorProfile>,
     /// Device facts gathered after session establishment.
     facts: Facts,
+    /// Keepalive interval — if set, a probe is sent before RPCs when idle
+    /// longer than this duration.
+    keepalive_interval: Option<Duration>,
+    /// Timestamp of the last successful RPC or session establishment.
+    last_activity: Option<Instant>,
 }
 
 impl Session {
@@ -89,6 +95,8 @@ impl Session {
             pending_commit: false,
             vendor_profile: Box::new(crate::vendor::generic::GenericVendor),
             facts: Facts::default(),
+            keepalive_interval: None,
+            last_activity: None,
         }
     }
 
@@ -141,6 +149,7 @@ impl Session {
         self.version = Some(version);
         self.capabilities = Some(caps);
         self.state = SessionState::Established;
+        self.last_activity = Some(Instant::now());
 
         tracing::info!(
             version = ?version,
@@ -217,12 +226,79 @@ impl Session {
         }
     }
 
+    /// Set the keepalive interval.
+    ///
+    /// Must be called before `establish()` or after reconnect. When set,
+    /// [`send_rpc()`] checks elapsed time and probes first if idle too long.
+    pub fn set_keepalive_interval(&mut self, interval: Duration) {
+        self.keepalive_interval = Some(interval);
+    }
+
+    /// Check if the session is alive (established and not closed).
+    ///
+    /// Fast in-memory check — does not send any RPC.
+    pub fn is_alive(&self) -> bool {
+        self.state == SessionState::Established
+    }
+
+    /// Probe the session by sending a lightweight RPC.
+    ///
+    /// Sends `<get><filter/></get>` (returns empty data) to verify the
+    /// transport is responsive. If the probe fails, the session is marked
+    /// as closed.
+    ///
+    /// Returns `true` if the device responded.
+    pub async fn probe(&mut self) -> bool {
+        let msg_id = self.next_message_id();
+        let xml = operations::get_xml(&msg_id, Some(""));
+        match self.send_rpc_raw(&xml, &msg_id).await {
+            Ok(_) => true,
+            Err(err) => {
+                tracing::warn!(%err, "session probe failed — marking session dead");
+                self.state = SessionState::Closed;
+                false
+            }
+        }
+    }
+
+    /// If a keepalive interval is configured and the idle time exceeds it,
+    /// probe the session. Returns an error if the probe fails.
+    async fn keepalive_check(&mut self) -> Result<(), NetconfError> {
+        let interval = match self.keepalive_interval {
+            Some(interval) => interval,
+            None => return Ok(()),
+        };
+
+        let needs_probe = match self.last_activity {
+            Some(last) => last.elapsed() >= interval,
+            None => false,
+        };
+
+        if needs_probe {
+            tracing::debug!("keepalive: idle timeout exceeded, probing session");
+            if !self.probe().await {
+                return Err(crate::error::ProtocolError::SessionClosed.into());
+            }
+        }
+
+        Ok(())
+    }
+
     /// Send an RPC and wait for the reply.
+    ///
+    /// Runs a keepalive check first (if configured), then delegates to
+    /// [`send_rpc_raw`].
+    async fn send_rpc(&mut self, xml: &str, message_id: &str) -> Result<RpcReply, NetconfError> {
+        self.keepalive_check().await?;
+        self.send_rpc_raw(xml, message_id).await
+    }
+
+    /// Send an RPC without keepalive check.
     ///
     /// If a stale response from a previously cancelled RPC is received
     /// (message-id mismatch), it is drained and the next message is read.
     /// This repeats up to [`MAX_STALE_DRAIN`] times before returning an error.
-    async fn send_rpc(&mut self, xml: &str, message_id: &str) -> Result<RpcReply, NetconfError> {
+    async fn send_rpc_raw(&mut self, xml: &str, message_id: &str) -> Result<RpcReply, NetconfError> {
         self.ensure_established()?;
 
         let framed = self.framer.encode(xml);
@@ -236,6 +312,7 @@ impl Session {
             match rpc::parse_rpc_reply(&response, message_id) {
                 Ok(reply) => {
                     tracing::debug!(message_id, "received RPC reply");
+                    self.last_activity = Some(Instant::now());
                     return Ok(reply);
                 }
                 Err(crate::error::RpcError::MessageIdMismatch {
@@ -915,5 +992,79 @@ mod tests {
             }
             other => panic!("expected MessageIdMismatch after drain limit, got: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn test_session_alive_after_establish() {
+        let response_data = mock_device_hello();
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+
+        assert!(!session.is_alive(), "not alive before establish");
+        session.establish().await.expect("establish failed");
+        assert!(session.is_alive(), "alive after establish");
+    }
+
+    #[tokio::test]
+    async fn test_session_alive_false_after_close() {
+        let mut response_data = mock_device_hello();
+        // close_session sends discard_changes (best-effort) then close-session
+        response_data.extend_from_slice(&mock_ok_reply("1")); // discard_changes
+        response_data.extend_from_slice(&mock_ok_reply("2")); // close_session
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        assert!(session.is_alive());
+
+        session.close_session().await.expect("close failed");
+        assert!(!session.is_alive(), "not alive after close");
+    }
+
+    #[tokio::test]
+    async fn test_probe_success() {
+        let mut response_data = mock_device_hello();
+        // probe sends a <get> with empty filter
+        response_data.extend_from_slice(&mock_ok_reply("1")); // probe reply
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        assert!(session.probe().await, "probe should succeed");
+        assert!(session.is_alive(), "session should still be alive");
+    }
+
+    #[tokio::test]
+    async fn test_probe_failure_marks_session_dead() {
+        // Only hello, no probe reply — EOF during probe
+        let response_data = mock_device_hello();
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        assert!(!session.probe().await, "probe should fail (EOF)");
+        assert!(!session.is_alive(), "session should be marked dead");
+    }
+
+    #[tokio::test]
+    async fn test_last_activity_updated_after_rpc() {
+        let mut response_data = mock_device_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // lock reply
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let before = session.last_activity;
+        session.lock(Datastore::Candidate).await.expect("lock failed");
+        let after = session.last_activity;
+
+        assert!(after.is_some(), "last_activity should be set");
+        assert!(
+            after.unwrap() >= before.unwrap(),
+            "last_activity should advance after RPC"
+        );
     }
 }
