@@ -17,7 +17,7 @@
 //!              Transport (byte stream)
 //! ```
 
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::capability::{self, Capabilities, NetconfVersion};
@@ -62,7 +62,7 @@ pub struct Session {
     transport: Box<dyn Transport>,
     framer: Box<dyn Framer>,
     capabilities: Option<Capabilities>,
-    message_id: AtomicU32,
+    message_id: AtomicU64,
     state: SessionState,
     /// Buffer for accumulating incoming data from the transport.
     read_buffer: Vec<u8>,
@@ -93,7 +93,7 @@ impl Session {
             transport,
             framer: Box::new(EomFramer::new()),
             capabilities: None,
-            message_id: AtomicU32::new(1),
+            message_id: AtomicU64::new(1),
             state: SessionState::Connected,
             read_buffer: Vec::new(),
             version: None,
@@ -704,19 +704,46 @@ impl Session {
 /// Extract a session-id from `<error-info>` XML content.
 ///
 /// Handles both structured XML (`<session-id>42</session-id>`) and
-/// Junos-style text (`session-id: 42` or `(pid 12345)`).
+/// Junos-style text (`session-id: 42` or similar).
 fn parse_session_id_from_info(info: &str) -> Option<u32> {
-    // Try structured XML: <session-id>42</session-id>
-    if let Some(start) = info.find("<session-id>") {
-        let after = &info[start + "<session-id>".len()..];
-        if let Some(end) = after.find("</session-id>") {
-            if let Ok(id) = after[..end].trim().parse::<u32>() {
-                return Some(id);
+    // Try structured XML parsing with quick_xml
+    if info.contains('<') {
+        use quick_xml::events::Event;
+        use quick_xml::Reader;
+
+        let mut reader = Reader::from_str(info);
+        let mut buf = Vec::new();
+        let mut in_session_id = false;
+
+        loop {
+            match reader.read_event_into(&mut buf) {
+                Ok(Event::Start(ref tag)) => {
+                    let local = tag.local_name();
+                    let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
+                    if name == "session-id" {
+                        in_session_id = true;
+                    }
+                }
+                Ok(Event::Text(ref text)) if in_session_id => {
+                    if let Ok(value) = text.unescape() {
+                        if let Ok(id) = value.trim().parse::<u32>() {
+                            return Some(id);
+                        }
+                    }
+                    in_session_id = false;
+                }
+                Ok(Event::End(_)) => {
+                    in_session_id = false;
+                }
+                Ok(Event::Eof) => break,
+                Err(_) => break,
+                _ => {}
             }
+            buf.clear();
         }
     }
 
-    // Try Junos text format: "session-id: 42" or similar
+    // Fallback: Junos text format ("session-id: 42" or similar)
     for line in info.lines() {
         let trimmed = line.trim();
         if let Some(rest) = trimmed.strip_prefix("session-id:") {
