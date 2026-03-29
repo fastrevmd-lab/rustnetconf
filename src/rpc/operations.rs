@@ -8,7 +8,7 @@ use crate::types::{Datastore, DefaultOperation, ErrorOption, TestOption};
 /// Escape a string for safe inclusion in an XML attribute value.
 ///
 /// Replaces `&`, `<`, `>`, `"`, and `'` with their XML entity equivalents.
-fn escape_xml_attr(value: &str) -> String {
+pub(crate) fn escape_xml_attr(value: &str) -> String {
     let mut escaped = String::with_capacity(value.len());
     for ch in value.chars() {
         match ch {

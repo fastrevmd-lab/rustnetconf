@@ -451,8 +451,9 @@ impl Session {
     /// validation.
     pub async fn rpc(&mut self, rpc_content: &str) -> Result<String, NetconfError> {
         let msg_id = self.next_message_id();
+        let safe_id = crate::rpc::operations::escape_xml_attr(&msg_id);
         let xml = format!(
-            r#"<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{msg_id}">{rpc_content}</rpc>"#
+            r#"<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">{rpc_content}</rpc>"#
         );
         let reply = self.send_rpc(&xml, &msg_id).await?;
         match reply {

@@ -214,16 +214,29 @@ SKIP_INTEGRATION=1 cargo test             # Skip tests requiring a device
 
 ### Known Issues
 
-- **RSA timing sidechannel (RUSTSEC-2023-0071)** — The `rsa` crate (transitive dependency via `russh → ssh-key → rsa`) has a known timing sidechannel that could theoretically allow RSA key recovery. No upstream fix is available. **Mitigation:** Use Ed25519 or ECDSA keys instead of RSA for SSH authentication. All Ed25519 and ECDSA keys are unaffected.
+- **RSA timing sidechannel (RUSTSEC-2023-0071)** — The `rsa` crate (transitive dependency via `russh → internal-russh-forked-ssh-key → rsa`) has a known timing sidechannel that could theoretically allow RSA key recovery. No upstream fix is available. **Mitigation:** Use Ed25519 or ECDSA keys instead of RSA for SSH authentication.
 
-- **SSH host key verification disabled** — The SSH transport accepts all host keys by default, which means connections are vulnerable to man-in-the-middle attacks on untrusted networks. This is consistent with most network automation tools (Python's ncclient has the same default). **Mitigation:** Use rustnetconf on trusted management networks. Host key verification support is planned.
+- **Credentials not zeroized in memory** — Passwords and key passphrases are stored as `String`, which is not securely zeroed on drop. Credentials may persist in process memory until overwritten. **Mitigation:** Prefer SSH agent authentication (`ssh_agent()`) over inline passwords/passphrases, and avoid core dumps in production.
+
+- **Debug logs may contain file paths** — When SSH key file loading fails, the key file path is included in `tracing::debug!` output. This is not exposed at info/warn/error levels. **Mitigation:** Disable debug-level logging in production, or filter `rustnetconf::transport` logs.
+
+### Security Features
+
+- **SSH host key verification** — Use `host_key_verification(HostKeyVerification::Fingerprint("SHA256:..."))` to pin a device's host key and prevent MITM attacks. Default is `AcceptAll` (with a logged warning), consistent with most network automation tools.
+- **XML attribute escaping** — All message-id values are escaped to prevent XML attribute injection.
+- **Read buffer limits** — Session read buffers are capped at 100 MB to prevent memory exhaustion from malformed device responses.
+- **Typed error hierarchy** — Structured error types (`ChannelClosed`, `SessionExpired`, `MessageIdMismatch`) enable precise error handling without string matching.
+- **No unsafe code** — The entire codebase uses safe Rust.
 
 ### Security Best Practices
 
 - Use Ed25519 SSH keys (not RSA) for device authentication
+- Set `host_key_verification(HostKeyVerification::Fingerprint(...))` in production
+- Prefer SSH agent auth over inline passwords
 - Store credentials in inventory.toml with restricted file permissions (`chmod 600`)
 - Run the CLI on trusted management networks with direct device connectivity
 - Use `confirmed-commit` (the default for `netconf apply`) so the device auto-reverts if something goes wrong
+- Disable debug-level logging in production environments
 
 To report a security vulnerability, please open an issue on GitHub.
 
