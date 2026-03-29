@@ -35,6 +35,11 @@ use crate::vendor::{self, CloseSequence, VendorProfile};
 /// Read buffer size for transport reads.
 const READ_BUF_SIZE: usize = 65536;
 
+/// Maximum number of stale (mismatched message-id) responses to drain before
+/// giving up. This handles the case where a cancelled async RPC left its
+/// response in the transport buffer.
+const MAX_STALE_DRAIN: usize = 10;
+
 /// Session states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
@@ -213,6 +218,10 @@ impl Session {
     }
 
     /// Send an RPC and wait for the reply.
+    ///
+    /// If a stale response from a previously cancelled RPC is received
+    /// (message-id mismatch), it is drained and the next message is read.
+    /// This repeats up to [`MAX_STALE_DRAIN`] times before returning an error.
     async fn send_rpc(&mut self, xml: &str, message_id: &str) -> Result<RpcReply, NetconfError> {
         self.ensure_established()?;
 
@@ -220,12 +229,44 @@ impl Session {
         tracing::debug!(message_id, "sending RPC");
 
         self.transport.write_all(&framed).await?;
-        let response = self.read_message().await?;
 
-        tracing::debug!(message_id, "received RPC reply");
+        for drain_attempt in 0..=MAX_STALE_DRAIN {
+            let response = self.read_message().await?;
 
-        let reply = rpc::parse_rpc_reply(&response, message_id)?;
-        Ok(reply)
+            match rpc::parse_rpc_reply(&response, message_id) {
+                Ok(reply) => {
+                    tracing::debug!(message_id, "received RPC reply");
+                    return Ok(reply);
+                }
+                Err(crate::error::RpcError::MessageIdMismatch {
+                    ref expected,
+                    ref actual,
+                }) => {
+                    if drain_attempt == MAX_STALE_DRAIN {
+                        tracing::error!(
+                            expected,
+                            actual,
+                            "message-id mismatch: exceeded max drain attempts ({MAX_STALE_DRAIN})"
+                        );
+                        return Err(crate::error::RpcError::MessageIdMismatch {
+                            expected: expected.clone(),
+                            actual: actual.clone(),
+                        }
+                        .into());
+                    }
+                    tracing::warn!(
+                        expected,
+                        actual,
+                        attempt = drain_attempt + 1,
+                        "draining stale response with wrong message-id"
+                    );
+                    // Continue to read the next message
+                }
+                Err(other) => return Err(other.into()),
+            }
+        }
+
+        unreachable!()
     }
 
     /// Allocate the next message-id.
@@ -813,5 +854,66 @@ mod tests {
 
         let result = session.lock_or_kill_stale(Datastore::Candidate).await;
         assert_eq!(result.unwrap(), Some(42), "should have killed session 42");
+    }
+
+    #[tokio::test]
+    async fn test_stale_response_drained_and_correct_returned() {
+        // Simulate: stale response from msg-id "99" sitting in buffer,
+        // followed by the correct response for msg-id "1" (lock).
+        let mut response_data = mock_device_hello();
+        response_data.extend_from_slice(&mock_ok_reply("99")); // stale
+        response_data.extend_from_slice(&mock_ok_reply("1")); // correct
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // Should succeed by draining the stale "99" and reading "1"
+        session
+            .lock(Datastore::Candidate)
+            .await
+            .expect("lock should succeed after draining stale response");
+    }
+
+    #[tokio::test]
+    async fn test_multiple_stale_responses_drained() {
+        // Three stale responses before the correct one
+        let mut response_data = mock_device_hello();
+        response_data.extend_from_slice(&mock_ok_reply("50")); // stale
+        response_data.extend_from_slice(&mock_ok_reply("51")); // stale
+        response_data.extend_from_slice(&mock_ok_reply("52")); // stale
+        response_data.extend_from_slice(&mock_ok_reply("1")); // correct
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session
+            .lock(Datastore::Candidate)
+            .await
+            .expect("lock should succeed after draining multiple stale responses");
+    }
+
+    #[tokio::test]
+    async fn test_stale_drain_limit_exceeded() {
+        // More stale responses than MAX_STALE_DRAIN — should fail
+        let mut response_data = mock_device_hello();
+        for stale_id in 50..=50 + super::MAX_STALE_DRAIN {
+            response_data.extend_from_slice(&mock_ok_reply(&stale_id.to_string()));
+        }
+        // Correct response is beyond the drain limit
+        response_data.extend_from_slice(&mock_ok_reply("1"));
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let result = session.lock(Datastore::Candidate).await;
+        match result {
+            Err(NetconfError::Rpc(crate::error::RpcError::MessageIdMismatch { .. })) => {
+                // Expected — drain limit exceeded
+            }
+            other => panic!("expected MessageIdMismatch after drain limit, got: {other:?}"),
+        }
     }
 }
