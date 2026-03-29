@@ -184,7 +184,7 @@ impl SshTransport {
                     continue;
                 }
                 Some(ChannelMsg::Eof) | Some(ChannelMsg::Close) | None => {
-                    return Err(TransportError::Channel(
+                    return Err(TransportError::ChannelClosed(
                         "channel closed before subsystem confirmation".to_string(),
                     ));
                 }

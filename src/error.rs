@@ -54,6 +54,14 @@ pub enum TransportError {
     #[error("channel error: {0}")]
     Channel(String),
 
+    /// SSH channel was closed by the remote side (device reboot, SSH
+    /// timeout, network interruption).
+    ///
+    /// This is the most common transport failure during an active session.
+    /// Callers should [`reconnect()`](crate::Client::reconnect).
+    #[error("channel closed: {0}")]
+    ChannelClosed(String),
+
     /// General I/O error on the transport.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
@@ -140,6 +148,13 @@ pub enum ProtocolError {
     /// Operation attempted on a closed session.
     #[error("session is closed")]
     SessionClosed,
+
+    /// Session expired — a keepalive probe detected the connection is dead.
+    ///
+    /// Callers should [`reconnect()`](crate::Client::reconnect) to
+    /// re-establish the session.
+    #[error("session expired: keepalive probe failed")]
+    SessionExpired,
 
     /// The `<hello>` capability exchange failed.
     #[error("hello exchange failed: {0}")]

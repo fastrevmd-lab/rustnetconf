@@ -277,7 +277,7 @@ impl Session {
         if needs_probe {
             tracing::debug!("keepalive: idle timeout exceeded, probing session");
             if !self.probe().await {
-                return Err(crate::error::ProtocolError::SessionClosed.into());
+                return Err(crate::error::ProtocolError::SessionExpired.into());
             }
         }
 
