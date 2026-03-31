@@ -51,4 +51,8 @@ pub mod vendor;
 pub use client::{Client, ClientBuilder, EditConfigBuilder};
 pub use error::NetconfError;
 pub use facts::Facts;
-pub use types::{Datastore, DefaultOperation, ErrorOption, TestOption};
+pub use rpc::RpcErrorInfo;
+pub use types::{
+    Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,
+    TestOption,
+};

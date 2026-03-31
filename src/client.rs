@@ -10,7 +10,8 @@ use crate::error::NetconfError;
 use crate::facts::Facts;
 use crate::session::Session;
 use crate::transport::ssh::{HostKeyVerification, SshAuth, SshConfig, SshTransport};
-use crate::types::{Datastore, DefaultOperation, ErrorOption, TestOption};
+use crate::rpc::RpcErrorInfo;
+use crate::types::{Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode, TestOption};
 use crate::vendor::VendorProfile;
 
 /// Builder for establishing a NETCONF client connection.
@@ -423,6 +424,54 @@ impl Client {
         target: Datastore,
     ) -> Result<Option<u32>, NetconfError> {
         self.session.lock_or_kill_stale(target).await
+    }
+
+    // ── Junos-specific operations ────────────────────────────────────
+
+    /// Send an arbitrary RPC, returning both the response and any warnings.
+    ///
+    /// Like [`rpc()`](Self::rpc), but returns warnings alongside the data.
+    pub async fn rpc_with_warnings(
+        &mut self,
+        rpc_content: &str,
+    ) -> Result<(String, Vec<RpcErrorInfo>), NetconfError> {
+        self.session.rpc_with_warnings(rpc_content).await
+    }
+
+    /// Open a private or exclusive configuration database (Junos).
+    ///
+    /// Required on chassis-clustered Junos devices before loading
+    /// configuration. On standalone devices this is optional but harmless.
+    pub async fn open_configuration(
+        &mut self,
+        mode: OpenConfigurationMode,
+    ) -> Result<(), NetconfError> {
+        self.session.open_configuration(mode).await
+    }
+
+    /// Close a previously opened configuration database (Junos).
+    pub async fn close_configuration(&mut self) -> Result<(), NetconfError> {
+        self.session.close_configuration().await
+    }
+
+    /// Load configuration using the Junos `<load-configuration>` RPC.
+    ///
+    /// On chassis-clustered devices, call
+    /// [`open_configuration()`](Self::open_configuration) first.
+    pub async fn load_configuration(
+        &mut self,
+        action: LoadAction,
+        format: LoadFormat,
+        config: &str,
+    ) -> Result<String, NetconfError> {
+        self.session.load_configuration(action, format, config).await
+    }
+
+    /// Whether this device requires `<open-configuration>` before loading config.
+    ///
+    /// Returns `true` for Junos chassis-clustered devices.
+    pub fn requires_open_configuration(&self) -> bool {
+        self.session.requires_open_configuration()
     }
 }
 

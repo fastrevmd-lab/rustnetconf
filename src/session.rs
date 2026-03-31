@@ -30,7 +30,8 @@ use crate::rpc;
 use crate::rpc::operations::{self, EditConfigParams};
 use crate::rpc::RpcReply;
 use crate::transport::Transport;
-use crate::types::{Datastore, DefaultOperation, ErrorOption, TestOption};
+use crate::rpc::RpcErrorInfo;
+use crate::types::{Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode, TestOption};
 use crate::vendor::{self, CloseSequence, VendorProfile};
 
 /// Read buffer size for transport reads.
@@ -80,6 +81,8 @@ pub struct Session {
     keepalive_interval: Option<Duration>,
     /// Timestamp of the last successful RPC or session establishment.
     last_activity: Option<Instant>,
+    /// True when a Junos private/exclusive configuration database is open.
+    private_config_open: bool,
 }
 
 impl Session {
@@ -102,6 +105,7 @@ impl Session {
             facts: Facts::default(),
             keepalive_interval: None,
             last_activity: None,
+            private_config_open: false,
         }
     }
 
@@ -216,6 +220,7 @@ impl Session {
         match self.rpc(&rpc_content).await {
             Ok(response) => {
                 self.facts = self.vendor_profile.parse_facts(&response);
+                self.vendor_profile.post_facts_hook(&self.facts, &response);
                 tracing::info!(
                     hostname = ?self.facts.hostname,
                     model = ?self.facts.model,
@@ -457,8 +462,31 @@ impl Session {
         );
         let reply = self.send_rpc(&xml, &msg_id).await?;
         match reply {
-            RpcReply::Data(data) => Ok(data),
-            RpcReply::Ok => Ok(String::new()),
+            RpcReply::Data(data) | RpcReply::DataWithWarnings(data, _) => Ok(data),
+            RpcReply::Ok | RpcReply::OkWithWarnings(_) => Ok(String::new()),
+        }
+    }
+
+    /// Send an arbitrary RPC, returning both the response and any warnings.
+    ///
+    /// Like [`rpc()`](Self::rpc), but instead of discarding warnings, returns
+    /// them alongside the response data. Useful for Junos `<load-configuration>`
+    /// and other operations where warnings carry diagnostic value.
+    pub async fn rpc_with_warnings(
+        &mut self,
+        rpc_content: &str,
+    ) -> Result<(String, Vec<RpcErrorInfo>), NetconfError> {
+        let msg_id = self.next_message_id();
+        let safe_id = crate::rpc::operations::escape_xml_attr(&msg_id);
+        let xml = format!(
+            r#"<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">{rpc_content}</rpc>"#
+        );
+        let reply = self.send_rpc(&xml, &msg_id).await?;
+        match reply {
+            RpcReply::Data(data) => Ok((data, Vec::new())),
+            RpcReply::DataWithWarnings(data, warnings) => Ok((data, warnings)),
+            RpcReply::Ok => Ok((String::new(), Vec::new())),
+            RpcReply::OkWithWarnings(warnings) => Ok((String::new(), warnings)),
         }
     }
 
@@ -477,8 +505,10 @@ impl Session {
         let xml = operations::get_config_xml(&msg_id, source, filter);
         let reply = self.send_rpc(&xml, &msg_id).await?;
         match reply {
-            RpcReply::Data(data) => Ok(self.vendor_profile.unwrap_config(&data)),
-            RpcReply::Ok => Ok(String::new()),
+            RpcReply::Data(data) | RpcReply::DataWithWarnings(data, _) => {
+                Ok(self.vendor_profile.unwrap_config(&data))
+            }
+            RpcReply::Ok | RpcReply::OkWithWarnings(_) => Ok(String::new()),
         }
     }
 
@@ -488,8 +518,8 @@ impl Session {
         let xml = operations::get_xml(&msg_id, filter);
         let reply = self.send_rpc(&xml, &msg_id).await?;
         match reply {
-            RpcReply::Data(data) => Ok(data),
-            RpcReply::Ok => Ok(String::new()),
+            RpcReply::Data(data) | RpcReply::DataWithWarnings(data, _) => Ok(data),
+            RpcReply::Ok | RpcReply::OkWithWarnings(_) => Ok(String::new()),
         }
     }
 
@@ -576,6 +606,71 @@ impl Session {
         Ok(())
     }
 
+    // ── Junos-specific operations ────────────────────────────────────
+
+    /// Open a private or exclusive configuration database (Junos).
+    ///
+    /// Required on chassis-clustered Junos devices before loading
+    /// configuration. On standalone devices this is optional but harmless.
+    ///
+    /// Call [`close_configuration()`](Self::close_configuration) after committing.
+    pub async fn open_configuration(
+        &mut self,
+        mode: OpenConfigurationMode,
+    ) -> Result<(), NetconfError> {
+        let msg_id = self.next_message_id();
+        let xml = operations::open_configuration_xml(&msg_id, mode);
+        self.send_rpc(&xml, &msg_id).await?;
+        self.private_config_open = true;
+        Ok(())
+    }
+
+    /// Close a previously opened private/exclusive configuration database (Junos).
+    pub async fn close_configuration(&mut self) -> Result<(), NetconfError> {
+        let msg_id = self.next_message_id();
+        let xml = operations::close_configuration_xml(&msg_id);
+        self.send_rpc(&xml, &msg_id).await?;
+        self.private_config_open = false;
+        Ok(())
+    }
+
+    /// Load configuration using the Junos `<load-configuration>` RPC.
+    ///
+    /// This is the Junos-native way to apply configuration changes, supporting
+    /// set commands, curly-brace text format, and XML format.
+    ///
+    /// On chassis-clustered devices, call
+    /// [`open_configuration()`](Self::open_configuration) first.
+    ///
+    /// # Safety
+    ///
+    /// `config` is inserted verbatim into the XML — do not pass untrusted
+    /// user input without validation.
+    pub async fn load_configuration(
+        &mut self,
+        action: LoadAction,
+        format: LoadFormat,
+        config: &str,
+    ) -> Result<String, NetconfError> {
+        let msg_id = self.next_message_id();
+        let xml = operations::load_configuration_xml(&msg_id, action, format, config);
+        let reply = self.send_rpc(&xml, &msg_id).await?;
+        match reply {
+            RpcReply::Data(data) | RpcReply::DataWithWarnings(data, _) => Ok(data),
+            RpcReply::Ok | RpcReply::OkWithWarnings(_) => Ok(String::new()),
+        }
+    }
+
+    /// Whether this device requires `<open-configuration>` before loading config.
+    ///
+    /// Returns `true` for Junos chassis-clustered devices. Use this to decide
+    /// whether to call [`open_configuration()`](Self::open_configuration).
+    pub fn requires_open_configuration(&self) -> bool {
+        self.vendor_profile.requires_open_configuration()
+    }
+
+    // ── Session lifecycle ─────────────────────────────────────────────
+
     /// Close the NETCONF session gracefully.
     ///
     /// Respects the vendor profile's close sequence. For example, Junos
@@ -584,6 +679,12 @@ impl Session {
     pub async fn close_session(&mut self) -> Result<(), NetconfError> {
         if self.state == SessionState::Closed {
             return Ok(());
+        }
+
+        // Close private/exclusive config database if open
+        if self.private_config_open {
+            let _ = self.close_configuration().await;
+            self.private_config_open = false;
         }
 
         // Vendor-specific pre-close actions

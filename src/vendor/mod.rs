@@ -98,6 +98,21 @@ pub trait VendorProfile: Send + Sync {
     fn parse_facts(&self, _response: &str) -> Facts {
         Facts::default()
     }
+
+    /// Called after facts are gathered to allow vendor-specific post-processing.
+    ///
+    /// Receives the parsed facts and the raw XML response from the facts RPC.
+    /// Vendors can use this to detect device characteristics (e.g., chassis
+    /// cluster mode) that are only visible in the facts response.
+    fn post_facts_hook(&mut self, _facts: &Facts, _raw_response: &str) {}
+
+    /// Whether this device requires `<open-configuration>` before loading config.
+    ///
+    /// Returns `true` for Junos chassis-clustered devices, where configuration
+    /// changes silently no-op without a private or exclusive edit session.
+    fn requires_open_configuration(&self) -> bool {
+        false
+    }
 }
 
 /// Auto-detect the vendor from the device's hello capabilities.

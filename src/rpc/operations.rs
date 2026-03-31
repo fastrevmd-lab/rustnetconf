@@ -3,7 +3,10 @@
 //! Each function generates the XML for one NETCONF RPC operation,
 //! ready to be framed and sent over the transport.
 
-use crate::types::{Datastore, DefaultOperation, ErrorOption, TestOption};
+use crate::types::{
+    Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,
+    TestOption,
+};
 
 /// Escape a string for safe inclusion in an XML attribute value.
 ///
@@ -241,6 +244,75 @@ pub fn kill_session_xml(message_id: &str, session_id: u32) -> String {
     )
 }
 
+// ── Junos-specific operations ────────────────────────────────────────
+
+/// Generate a Junos `<open-configuration>` RPC request.
+///
+/// Opens a private or exclusive configuration database. Required on
+/// chassis-clustered Junos devices before loading configuration.
+pub fn open_configuration_xml(message_id: &str, mode: OpenConfigurationMode) -> String {
+    let mode_element = match mode {
+        OpenConfigurationMode::Private => "<private/>",
+        OpenConfigurationMode::Exclusive => "<exclusive/>",
+    };
+    let safe_id = escape_xml_attr(message_id);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <open-configuration>
+    {mode_element}
+  </open-configuration>
+</rpc>"#,
+    )
+}
+
+/// Generate a Junos `<close-configuration>` RPC request.
+///
+/// Closes a previously opened private or exclusive configuration database.
+pub fn close_configuration_xml(message_id: &str) -> String {
+    let safe_id = escape_xml_attr(message_id);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <close-configuration/>
+</rpc>"#,
+    )
+}
+
+/// Generate a Junos `<load-configuration>` RPC request.
+///
+/// The `config` parameter must be well-formed for the given format:
+/// - `Text` format: Junos set/delete commands or curly-brace config
+/// - `Xml` format: Junos XML configuration elements
+///
+/// `config` is inserted verbatim — do not pass untrusted user input
+/// without validation.
+pub fn load_configuration_xml(
+    message_id: &str,
+    action: LoadAction,
+    format: LoadFormat,
+    config: &str,
+) -> String {
+    let safe_id = escape_xml_attr(message_id);
+    let wrapper = match format {
+        LoadFormat::Text => match action {
+            LoadAction::Set => "configuration-set",
+            _ => "configuration-text",
+        },
+        LoadFormat::Xml => "configuration",
+    };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <load-configuration action="{action}" format="{format}">
+    <{wrapper}>{config}</{wrapper}>
+  </load-configuration>
+</rpc>"#,
+        action = action.as_str(),
+        format = format.as_str(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,5 +411,67 @@ mod tests {
     fn test_message_ids_are_correct() {
         let xml = get_config_xml("101", Datastore::Running, None);
         assert!(xml.contains("message-id=\"101\""));
+    }
+
+    // ── Junos-specific operation tests ──
+
+    #[test]
+    fn test_open_configuration_private() {
+        let xml = open_configuration_xml("20", OpenConfigurationMode::Private);
+        assert!(xml.contains("<open-configuration>"));
+        assert!(xml.contains("<private/>"));
+        assert!(xml.contains("message-id=\"20\""));
+    }
+
+    #[test]
+    fn test_open_configuration_exclusive() {
+        let xml = open_configuration_xml("21", OpenConfigurationMode::Exclusive);
+        assert!(xml.contains("<open-configuration>"));
+        assert!(xml.contains("<exclusive/>"));
+    }
+
+    #[test]
+    fn test_close_configuration() {
+        let xml = close_configuration_xml("22");
+        assert!(xml.contains("<close-configuration/>"));
+        assert!(xml.contains("message-id=\"22\""));
+    }
+
+    #[test]
+    fn test_load_configuration_set_text() {
+        let xml = load_configuration_xml(
+            "23",
+            LoadAction::Set,
+            LoadFormat::Text,
+            "set system host-name test123",
+        );
+        assert!(xml.contains(r#"action="set""#));
+        assert!(xml.contains(r#"format="text""#));
+        assert!(xml.contains("<configuration-set>set system host-name test123</configuration-set>"));
+    }
+
+    #[test]
+    fn test_load_configuration_merge_text() {
+        let xml = load_configuration_xml(
+            "24",
+            LoadAction::Merge,
+            LoadFormat::Text,
+            "system { host-name test123; }",
+        );
+        assert!(xml.contains(r#"action="merge""#));
+        assert!(xml.contains("<configuration-text>"));
+    }
+
+    #[test]
+    fn test_load_configuration_replace_xml() {
+        let xml = load_configuration_xml(
+            "25",
+            LoadAction::Replace,
+            LoadFormat::Xml,
+            "<system><host-name>test123</host-name></system>",
+        );
+        assert!(xml.contains(r#"action="replace""#));
+        assert!(xml.contains(r#"format="xml""#));
+        assert!(xml.contains("<configuration><system>"));
     }
 }

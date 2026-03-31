@@ -96,6 +96,64 @@ impl ErrorOption {
     }
 }
 
+// ── Junos-specific types ────────────────────────────────────────────
+
+/// Configuration database mode for Junos `<open-configuration>`.
+///
+/// Chassis-clustered Junos devices require a private or exclusive
+/// configuration database to be opened before loading configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpenConfigurationMode {
+    /// Open a private configuration database.
+    /// Each session gets an independent candidate; changes are merged on commit.
+    Private,
+    /// Open an exclusive configuration database.
+    /// Only one session can hold the exclusive lock.
+    Exclusive,
+}
+
+/// The `action` attribute for Junos `<load-configuration>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadAction {
+    Set,
+    Merge,
+    Replace,
+    Override,
+    Update,
+}
+
+impl LoadAction {
+    /// Returns the XML attribute value string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LoadAction::Set => "set",
+            LoadAction::Merge => "merge",
+            LoadAction::Replace => "replace",
+            LoadAction::Override => "override",
+            LoadAction::Update => "update",
+        }
+    }
+}
+
+/// The `format` attribute for Junos `<load-configuration>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadFormat {
+    Text,
+    Xml,
+}
+
+impl LoadFormat {
+    /// Returns the XML attribute value string.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LoadFormat::Text => "text",
+            LoadFormat::Xml => "xml",
+        }
+    }
+}
+
+// ── NETCONF error types ─────────────────────────────────────────────
+
 /// NETCONF error severity levels from `<rpc-error>` responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorSeverity {

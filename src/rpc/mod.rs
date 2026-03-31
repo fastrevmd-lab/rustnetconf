@@ -14,8 +14,12 @@ use crate::types::{ErrorSeverity, ErrorTag, RpcErrorType};
 pub enum RpcReply {
     /// Success with data (from `<get>`, `<get-config>`).
     Data(String),
+    /// Success with data, but the device also returned warnings.
+    DataWithWarnings(String, Vec<RpcErrorInfo>),
     /// Success with no data (`<ok/>`).
     Ok,
+    /// Success (`<ok/>`), but the device also returned warnings.
+    OkWithWarnings(Vec<RpcErrorInfo>),
 }
 
 /// A fully parsed `<rpc-error>` from the device.
@@ -229,8 +233,13 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
         }
     }
 
-    // Return errors if any
-    if let Some(first_error) = errors.into_iter().next() {
+    // Partition errors into hard errors and warnings
+    let (hard_errors, warnings): (Vec<_>, Vec<_>) = errors
+        .into_iter()
+        .partition(|e| e.severity != Some(ErrorSeverity::Warning));
+
+    // Hard errors always fail the RPC
+    if let Some(first_error) = hard_errors.into_iter().next() {
         return Err(RpcError::ServerError {
             error_type: first_error.error_type,
             tag: first_error.tag,
@@ -242,13 +251,26 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
         });
     }
 
-    // Return data or ok
+    // Log warnings so they're visible even when the caller ignores them
+    if !warnings.is_empty() {
+        for w in &warnings {
+            tracing::warn!(tag = ?w.tag, message = %w.message, "device returned RPC warning");
+        }
+    }
+
+    // Return data or ok, attaching any warnings
     if let Some(data) = data_content {
-        return Ok(RpcReply::Data(data));
+        if warnings.is_empty() {
+            return Ok(RpcReply::Data(data));
+        }
+        return Ok(RpcReply::DataWithWarnings(data, warnings));
     }
 
     if found_ok {
-        return Ok(RpcReply::Ok);
+        if warnings.is_empty() {
+            return Ok(RpcReply::Ok);
+        }
+        return Ok(RpcReply::OkWithWarnings(warnings));
     }
 
     // Junos custom RPCs return content directly under <rpc-reply> without a
@@ -591,6 +613,76 @@ mod tests {
                 assert!(data.contains("node0"));
             }
             _ => panic!("expected Data reply for multi-RE response"),
+        }
+    }
+
+    #[test]
+    fn test_parse_warning_with_ok() {
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="10">
+  <rpc-error>
+    <error-type>application</error-type>
+    <error-tag>operation-failed</error-tag>
+    <error-severity>warning</error-severity>
+    <error-message>statement not found</error-message>
+  </rpc-error>
+  <ok/>
+</rpc-reply>"#;
+        let result = parse_rpc_reply(xml, "10").unwrap();
+        match result {
+            RpcReply::OkWithWarnings(warnings) => {
+                assert_eq!(warnings.len(), 1);
+                assert_eq!(warnings[0].severity, Some(ErrorSeverity::Warning));
+                assert!(warnings[0].message.contains("statement not found"));
+            }
+            _ => panic!("expected OkWithWarnings, got {result:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_warning_with_data() {
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="11">
+  <rpc-error>
+    <error-type>application</error-type>
+    <error-tag>operation-failed</error-tag>
+    <error-severity>warning</error-severity>
+    <error-message>some warning</error-message>
+  </rpc-error>
+  <data><configuration><system/></configuration></data>
+</rpc-reply>"#;
+        let result = parse_rpc_reply(xml, "11").unwrap();
+        match result {
+            RpcReply::DataWithWarnings(data, warnings) => {
+                assert!(data.contains("<configuration>"));
+                assert_eq!(warnings.len(), 1);
+                assert!(warnings[0].message.contains("some warning"));
+            }
+            _ => panic!("expected DataWithWarnings, got {result:?}"),
+        }
+    }
+
+    #[test]
+    fn test_parse_mixed_warning_and_error() {
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="12">
+  <rpc-error>
+    <error-type>application</error-type>
+    <error-tag>operation-failed</error-tag>
+    <error-severity>warning</error-severity>
+    <error-message>just a warning</error-message>
+  </rpc-error>
+  <rpc-error>
+    <error-type>application</error-type>
+    <error-tag>invalid-value</error-tag>
+    <error-severity>error</error-severity>
+    <error-message>real error</error-message>
+  </rpc-error>
+</rpc-reply>"#;
+        let err = parse_rpc_reply(xml, "12").unwrap_err();
+        match err {
+            RpcError::ServerError { tag, message, .. } => {
+                assert_eq!(tag, ErrorTag::InvalidValue);
+                assert_eq!(message, "real error");
+            }
+            _ => panic!("expected ServerError for hard error, got {err:?}"),
         }
     }
 }
