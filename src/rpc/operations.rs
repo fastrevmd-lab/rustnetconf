@@ -259,7 +259,7 @@ pub fn open_configuration_xml(message_id: &str, mode: OpenConfigurationMode) -> 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <open-configuration>
+  <open-configuration xmlns="">
     {mode_element}
   </open-configuration>
 </rpc>"#,
@@ -274,7 +274,7 @@ pub fn close_configuration_xml(message_id: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <close-configuration/>
+  <close-configuration xmlns=""/>
 </rpc>"#,
     )
 }
@@ -289,7 +289,7 @@ pub fn commit_configuration_xml(message_id: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <commit-configuration/>
+  <commit-configuration xmlns=""/>
 </rpc>"#,
     )
 }
@@ -303,7 +303,7 @@ pub fn rollback_configuration_xml(message_id: &str, rollback: u32) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <load-configuration rollback="{rollback}"/>
+  <load-configuration xmlns="" rollback="{rollback}"/>
 </rpc>"#,
     )
 }
@@ -317,7 +317,7 @@ pub fn get_configuration_compare_xml(message_id: &str, rollback: u32) -> String 
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <get-configuration compare="rollback" rollback="{rollback}" format="text"/>
+  <get-configuration xmlns="" compare="rollback" rollback="{rollback}" format="text"/>
 </rpc>"#,
     )
 }
@@ -347,7 +347,7 @@ pub fn load_configuration_xml(
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <load-configuration action="{action}" format="{format}">
+  <load-configuration xmlns="" action="{action}" format="{format}">
     <{wrapper}>{config}</{wrapper}>
   </load-configuration>
 </rpc>"#,
@@ -461,7 +461,7 @@ mod tests {
     #[test]
     fn test_open_configuration_private() {
         let xml = open_configuration_xml("20", OpenConfigurationMode::Private);
-        assert!(xml.contains("<open-configuration>"));
+        assert!(xml.contains(r#"<open-configuration xmlns="">"#));
         assert!(xml.contains("<private/>"));
         assert!(xml.contains("message-id=\"20\""));
     }
@@ -469,14 +469,14 @@ mod tests {
     #[test]
     fn test_open_configuration_exclusive() {
         let xml = open_configuration_xml("21", OpenConfigurationMode::Exclusive);
-        assert!(xml.contains("<open-configuration>"));
+        assert!(xml.contains(r#"<open-configuration xmlns="">"#));
         assert!(xml.contains("<exclusive/>"));
     }
 
     #[test]
     fn test_close_configuration() {
         let xml = close_configuration_xml("22");
-        assert!(xml.contains("<close-configuration/>"));
+        assert!(xml.contains(r#"<close-configuration xmlns=""/>"#));
         assert!(xml.contains("message-id=\"22\""));
     }
 
@@ -488,7 +488,7 @@ mod tests {
             LoadFormat::Text,
             "set system host-name test123",
         );
-        assert!(xml.contains(r#"action="set""#));
+        assert!(xml.contains(r#"xmlns="" action="set""#));
         assert!(xml.contains(r#"format="text""#));
         assert!(xml.contains("<configuration-set>set system host-name test123</configuration-set>"));
     }
@@ -501,7 +501,7 @@ mod tests {
             LoadFormat::Text,
             "system { host-name test123; }",
         );
-        assert!(xml.contains(r#"action="merge""#));
+        assert!(xml.contains(r#"xmlns="" action="merge""#));
         assert!(xml.contains("<configuration-text>"));
     }
 
@@ -513,7 +513,7 @@ mod tests {
             LoadFormat::Xml,
             "<system><host-name>test123</host-name></system>",
         );
-        assert!(xml.contains(r#"action="replace""#));
+        assert!(xml.contains(r#"xmlns="" action="replace""#));
         assert!(xml.contains(r#"format="xml""#));
         assert!(xml.contains("<configuration><system>"));
     }
@@ -521,27 +521,27 @@ mod tests {
     #[test]
     fn test_commit_configuration() {
         let xml = commit_configuration_xml("30");
-        assert!(xml.contains("<commit-configuration/>"));
+        assert!(xml.contains(r#"<commit-configuration xmlns=""/>"#));
         assert!(xml.contains("message-id=\"30\""));
     }
 
     #[test]
     fn test_rollback_configuration() {
         let xml = rollback_configuration_xml("31", 0);
-        assert!(xml.contains(r#"<load-configuration rollback="0"/>"#));
+        assert!(xml.contains(r#"<load-configuration xmlns="" rollback="0"/>"#));
         assert!(xml.contains("message-id=\"31\""));
     }
 
     #[test]
     fn test_rollback_configuration_index() {
         let xml = rollback_configuration_xml("32", 3);
-        assert!(xml.contains(r#"<load-configuration rollback="3"/>"#));
+        assert!(xml.contains(r#"<load-configuration xmlns="" rollback="3"/>"#));
     }
 
     #[test]
     fn test_get_configuration_compare() {
         let xml = get_configuration_compare_xml("33", 0);
-        assert!(xml.contains(r#"compare="rollback""#));
+        assert!(xml.contains(r#"xmlns="" compare="rollback""#));
         assert!(xml.contains(r#"rollback="0""#));
         assert!(xml.contains(r#"format="text""#));
         assert!(xml.contains("message-id=\"33\""));
