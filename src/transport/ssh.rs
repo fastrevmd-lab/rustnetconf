@@ -213,13 +213,7 @@ impl SshTransport {
                     .map_err(|e| TransportError::Auth(format!("SSH agent identities failed: {e}")))?;
 
                 let mut auth_success = false;
-                for identity in identities {
-                    let public_key = match &identity {
-                        keys::agent::AgentIdentity::PublicKey { key, .. } => key.clone(),
-                        keys::agent::AgentIdentity::Certificate { certificate, .. } => {
-                            keys::PublicKey::from(certificate.public_key().clone())
-                        }
-                    };
+                for public_key in identities {
                     match handle
                         .authenticate_publickey_with(&config.username, public_key, None, &mut agent)
                         .await
