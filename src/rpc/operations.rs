@@ -279,6 +279,49 @@ pub fn close_configuration_xml(message_id: &str) -> String {
     )
 }
 
+/// Generate a Junos `<commit-configuration>` RPC request.
+///
+/// This is the Junos-native commit RPC. Use this instead of standard
+/// `<commit>` when working with Junos private/exclusive configuration
+/// databases opened via `<open-configuration>`.
+pub fn commit_configuration_xml(message_id: &str) -> String {
+    let safe_id = escape_xml_attr(message_id);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <commit-configuration/>
+</rpc>"#,
+    )
+}
+
+/// Generate a Junos `<load-configuration rollback="N"/>` RPC request.
+///
+/// Rolls back the candidate configuration to a previous commit.
+/// `rollback` is the rollback index (0 = most recent commit).
+pub fn rollback_configuration_xml(message_id: &str, rollback: u32) -> String {
+    let safe_id = escape_xml_attr(message_id);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <load-configuration rollback="{rollback}"/>
+</rpc>"#,
+    )
+}
+
+/// Generate a Junos `<get-configuration compare="rollback">` RPC request.
+///
+/// Returns the diff between the candidate configuration and a previous
+/// commit. `rollback` is the rollback index (0 = most recent commit).
+pub fn get_configuration_compare_xml(message_id: &str, rollback: u32) -> String {
+    let safe_id = escape_xml_attr(message_id);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <get-configuration compare="rollback" rollback="{rollback}" format="text"/>
+</rpc>"#,
+    )
+}
+
 /// Generate a Junos `<load-configuration>` RPC request.
 ///
 /// The `config` parameter must be well-formed for the given format:
@@ -473,5 +516,34 @@ mod tests {
         assert!(xml.contains(r#"action="replace""#));
         assert!(xml.contains(r#"format="xml""#));
         assert!(xml.contains("<configuration><system>"));
+    }
+
+    #[test]
+    fn test_commit_configuration() {
+        let xml = commit_configuration_xml("30");
+        assert!(xml.contains("<commit-configuration/>"));
+        assert!(xml.contains("message-id=\"30\""));
+    }
+
+    #[test]
+    fn test_rollback_configuration() {
+        let xml = rollback_configuration_xml("31", 0);
+        assert!(xml.contains(r#"<load-configuration rollback="0"/>"#));
+        assert!(xml.contains("message-id=\"31\""));
+    }
+
+    #[test]
+    fn test_rollback_configuration_index() {
+        let xml = rollback_configuration_xml("32", 3);
+        assert!(xml.contains(r#"<load-configuration rollback="3"/>"#));
+    }
+
+    #[test]
+    fn test_get_configuration_compare() {
+        let xml = get_configuration_compare_xml("33", 0);
+        assert!(xml.contains(r#"compare="rollback""#));
+        assert!(xml.contains(r#"rollback="0""#));
+        assert!(xml.contains(r#"format="text""#));
+        assert!(xml.contains("message-id=\"33\""));
     }
 }

@@ -454,6 +454,32 @@ impl Client {
         self.session.close_configuration().await
     }
 
+    /// Commit using the Junos-native `<commit-configuration/>` RPC.
+    ///
+    /// Use this instead of [`commit()`](Self::commit) on Junos devices,
+    /// especially when a private/exclusive configuration database is open.
+    pub async fn commit_configuration(&mut self) -> Result<(), NetconfError> {
+        self.session.commit_configuration().await
+    }
+
+    /// Rollback the candidate configuration to a previous commit (Junos).
+    ///
+    /// `rollback` is the rollback index (0 = most recent commit, up to 49).
+    pub async fn rollback_configuration(&mut self, rollback: u32) -> Result<(), NetconfError> {
+        self.session.rollback_configuration(rollback).await
+    }
+
+    /// Get the diff between candidate and a previous commit (Junos).
+    ///
+    /// Returns the text-format diff. `rollback` is the rollback index
+    /// (0 = most recent commit).
+    pub async fn get_configuration_compare(
+        &mut self,
+        rollback: u32,
+    ) -> Result<String, NetconfError> {
+        self.session.get_configuration_compare(rollback).await
+    }
+
     /// Load configuration using the Junos `<load-configuration>` RPC.
     ///
     /// On chassis-clustered devices, call

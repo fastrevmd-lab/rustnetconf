@@ -634,6 +634,44 @@ impl Session {
         Ok(())
     }
 
+    /// Commit using the Junos-native `<commit-configuration/>` RPC.
+    ///
+    /// Use this instead of [`commit()`](Self::commit) on Junos devices,
+    /// especially when a private/exclusive configuration database is open.
+    pub async fn commit_configuration(&mut self) -> Result<(), NetconfError> {
+        let msg_id = self.next_message_id();
+        let xml = operations::commit_configuration_xml(&msg_id);
+        self.send_rpc(&xml, &msg_id).await?;
+        Ok(())
+    }
+
+    /// Rollback the candidate configuration to a previous commit (Junos).
+    ///
+    /// `rollback` is the rollback index (0 = most recent commit, up to 49).
+    pub async fn rollback_configuration(&mut self, rollback: u32) -> Result<(), NetconfError> {
+        let msg_id = self.next_message_id();
+        let xml = operations::rollback_configuration_xml(&msg_id, rollback);
+        self.send_rpc(&xml, &msg_id).await?;
+        Ok(())
+    }
+
+    /// Get the diff between candidate and a previous commit (Junos).
+    ///
+    /// Returns the text-format diff. `rollback` is the rollback index
+    /// (0 = most recent commit).
+    pub async fn get_configuration_compare(
+        &mut self,
+        rollback: u32,
+    ) -> Result<String, NetconfError> {
+        let msg_id = self.next_message_id();
+        let xml = operations::get_configuration_compare_xml(&msg_id, rollback);
+        let reply = self.send_rpc(&xml, &msg_id).await?;
+        match reply {
+            RpcReply::Data(data) | RpcReply::DataWithWarnings(data, _) => Ok(data),
+            RpcReply::Ok | RpcReply::OkWithWarnings(_) => Ok(String::new()),
+        }
+    }
+
     /// Load configuration using the Junos `<load-configuration>` RPC.
     ///
     /// This is the Junos-native way to apply configuration changes, supporting
