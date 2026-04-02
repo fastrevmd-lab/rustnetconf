@@ -56,3 +56,8 @@ pub use types::{
     Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,
     TestOption,
 };
+
+#[cfg(feature = "tls")]
+pub use client::TlsClientBuilder;
+#[cfg(feature = "tls")]
+pub use transport::tls::TlsConfig;

@@ -13,6 +13,10 @@ repository = "https://github.com/fastrevmd-lab/rustnetconf"
 keywords = ["netconf", "network", "automation", "ssh", "async"]
 categories = ["network-programming"]
 
+[features]
+default = []
+tls = ["rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots"]
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 russh = { version = "0.58", default-features = false, features = ["flate2", "aws-lc-rs"] }
@@ -21,6 +25,10 @@ thiserror = "2"
 tracing = "0.1"
 async-trait = "0.1"
 futures = "0.3.32"
+rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
+tokio-rustls = { version = "0.26", optional = true }
+rustls-pemfile = { version = "2", optional = true }
+webpki-roots = { version = "0.26", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
