@@ -69,6 +69,11 @@ pub enum TransportError {
     /// SSH library error.
     #[error("SSH error: {0}")]
     Ssh(String),
+
+    /// TLS handshake or certificate error.
+    #[cfg(feature = "tls")]
+    #[error("TLS error: {0}")]
+    Tls(String),
 }
 
 /// Framing layer errors (EOM or chunked framing).

@@ -9,10 +9,21 @@ use crate::capability::Capabilities;
 use crate::error::NetconfError;
 use crate::facts::Facts;
 use crate::session::Session;
+use crate::transport::Transport;
 use crate::transport::ssh::{HostKeyVerification, SshAuth, SshConfig, SshTransport};
+#[cfg(feature = "tls")]
+use crate::transport::tls::{TlsConfig, TlsTransport};
 use crate::rpc::RpcErrorInfo;
 use crate::types::{Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode, TestOption};
 use crate::vendor::VendorProfile;
+
+/// Internal enum to store the transport configuration for reconnect support.
+#[derive(Clone)]
+enum TransportConfig {
+    Ssh(SshConfig),
+    #[cfg(feature = "tls")]
+    Tls(TlsConfig),
+}
 
 /// Builder for establishing a NETCONF client connection.
 ///
@@ -192,7 +203,7 @@ impl ClientBuilder {
 
         Ok(Client {
             session,
-            ssh_config: config,
+            transport_config: TransportConfig::Ssh(config),
             gather_facts: self.gather_facts,
             keepalive_interval: self.keepalive_interval,
         })
@@ -205,8 +216,8 @@ impl ClientBuilder {
 /// underlying [`Session`] which owns all protocol state.
 pub struct Client {
     session: Session,
-    /// Stored SSH config for reconnect support.
-    ssh_config: SshConfig,
+    /// Stored transport config for reconnect support.
+    transport_config: TransportConfig,
     /// Whether to gather facts on connect/reconnect.
     gather_facts: bool,
     /// Keepalive interval (None = disabled).
@@ -231,6 +242,35 @@ impl Client {
             gather_facts: true,
             keepalive_interval: None,
             host_key_verification: HostKeyVerification::default(),
+        }
+    }
+
+    /// Create a TLS connection builder for NETCONF over TLS (RFC 7589).
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// use rustnetconf::Client;
+    /// use rustnetconf::TlsConfig;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = TlsConfig {
+    ///     host: "10.0.0.1".into(),
+    ///     ca_cert: Some("ca.pem".into()),
+    ///     client_cert: Some("client.pem".into()),
+    ///     client_key: Some("client-key.pem".into()),
+    ///     ..Default::default()
+    /// };
+    /// let mut client = Client::connect_tls(config).connect().await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    #[cfg(feature = "tls")]
+    pub fn connect_tls(config: TlsConfig) -> TlsClientBuilder {
+        TlsClientBuilder {
+            tls_config: config,
+            vendor_profile: None,
+            gather_facts: true,
+            keepalive_interval: None,
         }
     }
 
@@ -310,8 +350,16 @@ impl Client {
         // Best-effort close of the old session
         let _ = self.session.close_session().await;
 
-        let transport = SshTransport::connect(self.ssh_config.clone()).await?;
-        let mut session = Session::new(Box::new(transport));
+        let transport: Box<dyn Transport> = match &self.transport_config {
+            TransportConfig::Ssh(config) => {
+                Box::new(SshTransport::connect(config.clone()).await?)
+            }
+            #[cfg(feature = "tls")]
+            TransportConfig::Tls(config) => {
+                Box::new(TlsTransport::connect(config).await?)
+            }
+        };
+        let mut session = Session::new(transport);
 
         if let Some(interval) = self.keepalive_interval {
             session.set_keepalive_interval(interval);
@@ -550,6 +598,66 @@ impl<'a> EditConfigBuilder<'a> {
                 self.error_option,
             )
             .await
+    }
+}
+
+/// Builder for establishing a NETCONF client connection over TLS (RFC 7589).
+///
+/// Created via [`Client::connect_tls()`]. Supports both server-only and
+/// mutual TLS authentication via certificate configuration in [`TlsConfig`].
+#[cfg(feature = "tls")]
+pub struct TlsClientBuilder {
+    tls_config: TlsConfig,
+    vendor_profile: Option<Box<dyn VendorProfile>>,
+    gather_facts: bool,
+    keepalive_interval: Option<Duration>,
+}
+
+#[cfg(feature = "tls")]
+impl TlsClientBuilder {
+    /// Set an explicit vendor profile, overriding auto-detection.
+    pub fn vendor_profile(mut self, profile: Box<dyn VendorProfile>) -> Self {
+        self.vendor_profile = Some(profile);
+        self
+    }
+
+    /// Control whether device facts are gathered after connecting.
+    pub fn gather_facts(mut self, gather: bool) -> Self {
+        self.gather_facts = gather;
+        self
+    }
+
+    /// Set a keepalive interval for automatic session health checks.
+    pub fn keepalive_interval(mut self, interval: Duration) -> Self {
+        self.keepalive_interval = Some(interval);
+        self
+    }
+
+    /// Establish the TLS connection and perform the NETCONF hello exchange.
+    pub async fn connect(self) -> Result<Client, NetconfError> {
+        let transport = TlsTransport::connect(&self.tls_config).await?;
+        let mut session = Session::new(Box::new(transport));
+
+        if let Some(interval) = self.keepalive_interval {
+            session.set_keepalive_interval(interval);
+        }
+
+        if let Some(profile) = self.vendor_profile {
+            session.set_vendor_profile(profile);
+        }
+
+        session.establish().await?;
+
+        if self.gather_facts {
+            session.gather_facts().await?;
+        }
+
+        Ok(Client {
+            session,
+            transport_config: TransportConfig::Tls(self.tls_config),
+            gather_facts: self.gather_facts,
+            keepalive_interval: self.keepalive_interval,
+        })
     }
 }
 

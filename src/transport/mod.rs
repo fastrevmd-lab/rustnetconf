@@ -7,6 +7,8 @@
 //! - Future transports (TLS, RESTCONF) plug in without reimplementing framing
 
 pub mod ssh;
+#[cfg(feature = "tls")]
+pub mod tls;
 
 use async_trait::async_trait;
 use crate::error::TransportError;
