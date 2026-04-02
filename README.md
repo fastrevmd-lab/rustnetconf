@@ -12,6 +12,20 @@ Built on [tokio](https://tokio.rs) and [russh](https://crates.io/crates/russh) �
 | **rustnetconf-yang** | YANG model code generation (compile-time config validation) |
 | **rustnetconf-cli** | Terraform-like CLI tool (`netconf` binary) |
 
+## RFC Support
+
+| RFC | Feature | Status |
+|-----|---------|--------|
+| RFC 6241 | Network Configuration Protocol (NETCONF) | ✅ supported |
+| RFC 6242 | NETCONF over SSH | ✅ supported |
+| RFC 7589 | NETCONF over TLS | 💡 planned |
+| RFC 5277 | Event Notifications | 💡 planned |
+| RFC 5717 | Partial Lock RPC | 💡 planned |
+| RFC 8071 | NETCONF Call Home | 💡 planned |
+| RFC 6243 | With-defaults Capability | 💡 planned |
+| RFC 4743 | NETCONF over SOAP | ❌ not planned |
+| RFC 4744 | NETCONF over BEEP | ❌ not planned |
+
 ## CLI Tool — `netconf`
 
 Declarative network config management. Write desired state as XML files, the CLI diffs against the device and applies changes with confirmed-commit safety.
