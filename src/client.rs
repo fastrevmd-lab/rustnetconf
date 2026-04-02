@@ -8,6 +8,7 @@ use std::time::Duration;
 use crate::capability::Capabilities;
 use crate::error::NetconfError;
 use crate::facts::Facts;
+use crate::notification::Notification;
 use crate::session::Session;
 use crate::transport::Transport;
 use crate::transport::ssh::{HostKeyVerification, SshAuth, SshConfig, SshTransport};
@@ -546,6 +547,50 @@ impl Client {
     /// Returns `true` for Junos chassis-clustered devices.
     pub fn requires_open_configuration(&self) -> bool {
         self.session.requires_open_configuration()
+    }
+
+    // ── Notification operations (RFC 5277) ───────────────────────────
+
+    /// Create a notification subscription (RFC 5277).
+    ///
+    /// Requires the `:notification` capability. After subscription, the device
+    /// sends `<notification>` messages asynchronously. Retrieve them with
+    /// [`drain_notifications()`](Self::drain_notifications) or
+    /// [`recv_notification()`](Self::recv_notification).
+    pub async fn create_subscription(
+        &mut self,
+        stream: Option<&str>,
+        filter: Option<&str>,
+        start_time: Option<&str>,
+        stop_time: Option<&str>,
+    ) -> Result<(), NetconfError> {
+        self.session
+            .create_subscription(stream, filter, start_time, stop_time)
+            .await
+    }
+
+    /// Drain all buffered notifications, returning them and clearing the buffer.
+    ///
+    /// Notifications are buffered when they arrive during RPC exchanges.
+    pub fn drain_notifications(&mut self) -> Vec<Notification> {
+        self.session.drain_notifications()
+    }
+
+    /// Wait for the next notification from the device.
+    ///
+    /// Returns `Ok(None)` if the connection is closed.
+    pub async fn recv_notification(&mut self) -> Result<Option<Notification>, NetconfError> {
+        self.session.recv_notification().await
+    }
+
+    /// Check if any notifications are buffered without blocking.
+    pub fn has_notifications(&self) -> bool {
+        self.session.has_notifications()
+    }
+
+    /// Whether this session has an active notification subscription.
+    pub fn has_subscription(&self) -> bool {
+        self.session.has_subscription()
     }
 }
 

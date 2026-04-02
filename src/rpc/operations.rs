@@ -11,6 +11,22 @@ use crate::types::{
     TestOption,
 };
 
+/// Escape a string for safe inclusion in XML text content.
+///
+/// Replaces `&`, `<`, and `>` with their XML entity equivalents.
+pub(crate) fn escape_xml_text(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
 /// Escape a string for safe inclusion in an XML attribute value.
 ///
 /// Replaces `&`, `<`, `>`, `"`, and `'` with their XML entity equivalents.
@@ -359,6 +375,57 @@ pub fn load_configuration_xml(
     )
 }
 
+/// Generate a `<create-subscription>` RPC request (RFC 5277).
+///
+/// All parameters are optional:
+/// - `stream`: event stream name (device default if omitted, typically "NETCONF")
+/// - `filter`: subtree filter XML (inserted verbatim)
+/// - `start_time`: RFC 3339 timestamp to start replay
+/// - `stop_time`: RFC 3339 timestamp to stop notifications
+pub fn create_subscription_xml(
+    message_id: &str,
+    stream: Option<&str>,
+    filter: Option<&str>,
+    start_time: Option<&str>,
+    stop_time: Option<&str>,
+) -> String {
+    let safe_id = escape_xml_attr(message_id);
+
+    let stream_xml = match stream {
+        Some(s) => {
+            let safe = escape_xml_text(s);
+            format!("\n    <stream>{safe}</stream>")
+        }
+        None => String::new(),
+    };
+    let filter_xml = match filter {
+        Some(f) => format!("\n    <filter type=\"subtree\">\n      {f}\n    </filter>"),
+        None => String::new(),
+    };
+    let start_xml = match start_time {
+        Some(t) => {
+            let safe = escape_xml_text(t);
+            format!("\n    <startTime>{safe}</startTime>")
+        }
+        None => String::new(),
+    };
+    let stop_xml = match stop_time {
+        Some(t) => {
+            let safe = escape_xml_text(t);
+            format!("\n    <stopTime>{safe}</stopTime>")
+        }
+        None => String::new(),
+    };
+
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <create-subscription xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0">{stream_xml}{filter_xml}{start_xml}{stop_xml}
+  </create-subscription>
+</nc:rpc>"#,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -548,6 +615,45 @@ mod tests {
         assert!(xml.contains(r#"rollback="0""#));
         assert!(xml.contains(r#"format="text""#));
         assert!(xml.contains("message-id=\"33\""));
+    }
+
+    #[test]
+    fn test_create_subscription_default() {
+        let xml = create_subscription_xml("10", None, None, None, None);
+        assert!(xml.contains("message-id=\"10\""));
+        assert!(xml.contains("<create-subscription xmlns=\"urn:ietf:params:xml:ns:netconf:notification:1.0\""));
+        assert!(xml.contains("</create-subscription>"));
+        assert!(!xml.contains("<stream>"));
+        assert!(!xml.contains("<filter"));
+    }
+
+    #[test]
+    fn test_create_subscription_with_stream() {
+        let xml = create_subscription_xml("11", Some("NETCONF"), None, None, None);
+        assert!(xml.contains("<stream>NETCONF</stream>"));
+    }
+
+    #[test]
+    fn test_create_subscription_with_all_params() {
+        let xml = create_subscription_xml(
+            "12",
+            Some("NETCONF"),
+            Some("<netconf-config-change/>"),
+            Some("2026-01-01T00:00:00Z"),
+            Some("2026-12-31T23:59:59Z"),
+        );
+        assert!(xml.contains("<stream>NETCONF</stream>"));
+        assert!(xml.contains("<filter type=\"subtree\">"));
+        assert!(xml.contains("<netconf-config-change/>"));
+        assert!(xml.contains("<startTime>2026-01-01T00:00:00Z</startTime>"));
+        assert!(xml.contains("<stopTime>2026-12-31T23:59:59Z</stopTime>"));
+    }
+
+    #[test]
+    fn test_create_subscription_replay() {
+        let xml = create_subscription_xml("13", None, None, Some("2026-01-01T00:00:00Z"), None);
+        assert!(xml.contains("<startTime>2026-01-01T00:00:00Z</startTime>"));
+        assert!(!xml.contains("<stopTime>"));
     }
 
     #[test]
