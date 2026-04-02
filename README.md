@@ -2,7 +2,7 @@
 
 A Rust network automation platform: async NETCONF client library, YANG code generation, vendor profiles, connection pooling, and a Terraform-like CLI for declarative network config management.
 
-Built on [tokio](https://tokio.rs) and [russh](https://crates.io/crates/russh) — pure Rust, no OpenSSL, no libssh2.
+Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
 ## Workspace
 
@@ -18,7 +18,7 @@ Built on [tokio](https://tokio.rs) and [russh](https://crates.io/crates/russh) �
 |-----|---------|--------|
 | RFC 6241 | Network Configuration Protocol (NETCONF) | ✅ supported |
 | RFC 6242 | NETCONF over SSH | ✅ supported |
-| RFC 7589 | NETCONF over TLS | 💡 planned |
+| RFC 7589 | NETCONF over TLS | ✅ supported (feature flag `tls`) |
 | RFC 5277 | Event Notifications | 💡 planned |
 | RFC 5717 | Partial Lock RPC | 💡 planned |
 | RFC 8071 | NETCONF Call Home | 💡 planned |
@@ -75,6 +75,13 @@ rustnetconf = { git = "https://github.com/fastrevmd-lab/rustnetconf.git" }
 tokio = { version = "1", features = ["full"] }
 ```
 
+For TLS transport (RFC 7589), enable the `tls` feature:
+
+```toml
+[dependencies]
+rustnetconf = { git = "https://github.com/fastrevmd-lab/rustnetconf.git", features = ["tls"] }
+```
+
 ### Fetch running config
 
 ```rust
@@ -126,6 +133,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Connect over TLS (RFC 7589)
+
+```rust
+use rustnetconf::{Client, TlsConfig, Datastore};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = TlsConfig {
+        host: "10.0.0.1".into(),
+        ca_cert: Some("ca.pem".into()),
+        client_cert: Some("client.pem".into()),
+        client_key: Some("client-key.pem".into()),
+        ..Default::default()
+    };
+
+    let mut client = Client::connect_tls(config).connect().await?;
+    let config = client.get_config(Datastore::Running).await?;
+    println!("{config}");
+
+    client.close_session().await?;
+    Ok(())
+}
+```
+
 ### Connection pooling
 
 ```rust
@@ -152,6 +183,7 @@ let config = conn.get_config(Datastore::Running).await?;
 
 ### NETCONF Client
 - **Async-first** — tokio-based, push config to 500 devices concurrently
+- **SSH + TLS transports** — SSH (RFC 6242) by default, TLS (RFC 7589) via `tls` feature flag
 - **NETCONF 1.0 + 1.1** — EOM and chunked framing with auto-negotiation
 - **All core RPCs** — get, get-config, edit-config, lock/unlock, commit, validate, close/kill-session, discard-changes
 - **Confirmed commit** — auto-rollback safety net (RFC 6241 §8.4)
@@ -178,11 +210,13 @@ let config = conn.get_config(Datastore::Running).await?;
 - Bundled IETF models: ietf-interfaces, ietf-ip, ietf-yang-types, ietf-inet-types
 
 ### Authentication
-| Method | Builder API |
-|--------|-------------|
-| Password | `.password("secret")` |
-| Key file | `.key_file("~/.ssh/id_ed25519")` |
-| SSH agent | `.ssh_agent()` |
+| Method | Transport | Builder API |
+|--------|-----------|-------------|
+| Password | SSH | `.password("secret")` |
+| Key file | SSH | `.key_file("~/.ssh/id_ed25519")` |
+| SSH agent | SSH | `.ssh_agent()` |
+| Server-only TLS | TLS | `TlsConfig { ca_cert, .. }` |
+| Mutual TLS (mTLS) | TLS | `TlsConfig { client_cert, client_key, .. }` |
 
 ### Error Handling
 
@@ -190,7 +224,7 @@ Layered errors matching the protocol stack:
 
 ```rust
 match result {
-    Err(NetconfError::Transport(e)) => { /* SSH connection issues */ }
+    Err(NetconfError::Transport(e)) => { /* SSH/TLS connection issues */ }
     Err(NetconfError::Framing(e))   => { /* Protocol framing errors */ }
     Err(NetconfError::Rpc(e))       => { /* Device rejected RPC (all 7 RFC fields parsed) */ }
     Err(NetconfError::Protocol(e))  => { /* Capability/session errors */ }
