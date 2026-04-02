@@ -23,8 +23,10 @@ Built on [tokio](https://tokio.rs) and [russh](https://crates.io/crates/russh) �
 | RFC 5717 | Partial Lock RPC | 💡 planned |
 | RFC 8071 | NETCONF Call Home | 💡 planned |
 | RFC 6243 | With-defaults Capability | 💡 planned |
-| RFC 4743 | NETCONF over SOAP | ❌ not planned |
-| RFC 4744 | NETCONF over BEEP | ❌ not planned |
+| RFC 6022 | YANG Module for NETCONF Monitoring | 💡 planned |
+| RFC 8526 | NETCONF Extensions for NMDA | 💡 planned |
+| RFC 6470 | NETCONF Base Notifications | 💡 planned |
+| RFC 8040 | RESTCONF | 💡 planned |
 
 ## CLI Tool — `netconf`
 

@@ -69,6 +69,52 @@
 - Test with devices that advertise the with-defaults capability
 **Added:** 2026-04-01
 
+### RFC 6022 — YANG Module for NETCONF Monitoring
+**What:** Investigate and implement the `get-schema` RPC and `netconf-state` monitoring data model.
+**Why:** `get-schema` lets the client pull YANG modules directly from a device — essential for auto-discovery of device capabilities and feeding into rustnetconf-yang code generation. The `netconf-state` data model exposes active sessions, supported schemas, datastores, and statistics.
+**Investigation:**
+- Implement `get-schema` RPC with identifier, version, and format parameters
+- Parse `get-schema` response to extract YANG/YIN module text
+- Determine integration path with rustnetconf-yang (fetch schema → generate types at runtime vs build-time)
+- Implement `netconf-state` queries (sessions, schemas, datastores, statistics) via standard `get` with subtree filter
+- Test with devices that advertise `:monitor` capability (urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring)
+**Added:** 2026-04-01
+
+### RFC 8526 — NETCONF Extensions for NMDA
+**What:** Investigate and implement `get-data` and `edit-data` RPCs for the Network Management Datastore Architecture.
+**Why:** Modern devices are moving to the NMDA model which splits datastores into running/intended/operational. `get-data`/`edit-data` are becoming the standard RPCs, replacing `get-config`/`edit-config` on NMDA-capable devices.
+**Investigation:**
+- Implement `get-data` RPC with datastore, subtree/xpath filter, config-filter, origin-filter, with-origin parameters
+- Implement `edit-data` RPC with datastore and config parameters
+- Add NMDA datastore types (operational, intended) alongside existing Running/Candidate/Startup
+- Parse `:nmda` capability URIs to detect NMDA-capable devices
+- Determine coexistence strategy — fall back to `get-config`/`edit-config` on non-NMDA devices
+- Test with devices that advertise `urn:ietf:params:netconf:capability:nmda:1.0`
+**Added:** 2026-04-01
+
+### RFC 6470 — NETCONF Base Notifications
+**What:** Investigate and implement base notification types for NETCONF session and configuration events.
+**Why:** Natural companion to RFC 5277 — defines the standard notification types (session start/end, config change, confirmed-commit, capability-change) that most devices emit. Minimal extra work once RFC 5277 notification infrastructure is in place.
+**Investigation:**
+- Define typed structs for base notification events: netconf-config-change, netconf-capability-change, netconf-session-start, netconf-session-end, netconf-confirmed-commit
+- Parse notification XML into typed events
+- Determine if these should be auto-subscribed or opt-in via `create-subscription` stream filter
+- Assess integration with the RFC 5277 notification stream design
+**Depends on:** RFC 5277 (Event Notifications)
+**Added:** 2026-04-01
+
+### RFC 8040 — RESTCONF
+**What:** Investigate and implement RESTCONF as an HTTP/REST interface to YANG-modeled data.
+**Why:** RESTCONF is the HTTP counterpart to NETCONF — many modern devices support both. The transport trait architecture is designed for pluggable transports, and RESTCONF would significantly broaden the library's reach.
+**Investigation:**
+- Evaluate HTTP client crate (`reqwest` with `rustls` to stay pure-Rust)
+- Design `RestconfTransport` — map NETCONF operations to RESTCONF HTTP methods (GET/POST/PUT/PATCH/DELETE)
+- Handle JSON and XML encoding (RESTCONF supports both via Accept/Content-Type headers)
+- Implement RESTCONF-specific features: YANG Patch (RFC 8072), event streams (SSE), discovery via `/.well-known/host-meta`
+- Determine how much of the existing `Client` API can be reused vs RESTCONF-specific client
+- Assess scope — this is a large effort, may warrant a separate `rustnetconf-restconf` crate
+**Added:** 2026-04-01
+
 ### IOS-XE vendor profile
 **What:** Implement `IosXeVendor` profile for Cisco IOS-XE NETCONF devices — config namespace wrapping, capability normalization, session termination quirks.
 **Why:** IOS-XE is the second most common NETCONF implementation. Without it, Cisco users must use GenericVendor and handle quirks manually.
