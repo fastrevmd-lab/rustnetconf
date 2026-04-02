@@ -2,6 +2,9 @@
 //!
 //! Each function generates the XML for one NETCONF RPC operation,
 //! ready to be framed and sent over the transport.
+//!
+//! All RPCs use a prefixed namespace (`nc:`) instead of a default namespace
+//! to avoid `xmlns=""` on child elements, which Junos 24.4 rejects.
 
 use crate::types::{
     Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,
@@ -34,7 +37,7 @@ pub(crate) fn escape_xml_attr(value: &str) -> String {
 pub fn get_config_xml(message_id: &str, source: Datastore, filter: Option<&str>) -> String {
     let filter_xml = match filter {
         Some(f) => format!(
-            "\n    <filter type=\"subtree\">\n      {f}\n    </filter>"
+            "\n    <nc:filter type=\"subtree\">\n      {f}\n    </nc:filter>"
         ),
         None => String::new(),
     };
@@ -42,13 +45,13 @@ pub fn get_config_xml(message_id: &str, source: Datastore, filter: Option<&str>)
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <get-config>
-    <source>
-      <{source}/>
-    </source>{filter_xml}
-  </get-config>
-</rpc>"#,
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:get-config>
+    <nc:source>
+      <nc:{source}/>
+    </nc:source>{filter_xml}
+  </nc:get-config>
+</nc:rpc>"#,
         source = source.as_xml_tag(),
     )
 }
@@ -61,7 +64,7 @@ pub fn get_config_xml(message_id: &str, source: Datastore, filter: Option<&str>)
 pub fn get_xml(message_id: &str, filter: Option<&str>) -> String {
     let filter_xml = match filter {
         Some(f) => format!(
-            "\n    <filter type=\"subtree\">\n      {f}\n    </filter>"
+            "\n    <nc:filter type=\"subtree\">\n      {f}\n    </nc:filter>"
         ),
         None => String::new(),
     };
@@ -69,10 +72,10 @@ pub fn get_xml(message_id: &str, filter: Option<&str>) -> String {
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <get>{filter_xml}
-  </get>
-</rpc>"#,
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:get>{filter_xml}
+  </nc:get>
+</nc:rpc>"#,
     )
 }
 
@@ -94,21 +97,21 @@ pub fn edit_config_xml(message_id: &str, params: &EditConfigParams<'_>) -> Strin
 
     if let Some(ref default_op) = params.default_operation {
         options.push_str(&format!(
-            "\n    <default-operation>{}</default-operation>",
+            "\n    <nc:default-operation>{}</nc:default-operation>",
             default_op.as_str()
         ));
     }
 
     if let Some(ref test_opt) = params.test_option {
         options.push_str(&format!(
-            "\n    <test-option>{}</test-option>",
+            "\n    <nc:test-option>{}</nc:test-option>",
             test_opt.as_str()
         ));
     }
 
     if let Some(ref error_opt) = params.error_option {
         options.push_str(&format!(
-            "\n    <error-option>{}</error-option>",
+            "\n    <nc:error-option>{}</nc:error-option>",
             error_opt.as_str()
         ));
     }
@@ -116,16 +119,16 @@ pub fn edit_config_xml(message_id: &str, params: &EditConfigParams<'_>) -> Strin
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <edit-config>
-    <target>
-      <{target}/>
-    </target>{options}
-    <config>
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:edit-config>
+    <nc:target>
+      <nc:{target}/>
+    </nc:target>{options}
+    <nc:config>
       {config}
-    </config>
-  </edit-config>
-</rpc>"#,
+    </nc:config>
+  </nc:edit-config>
+</nc:rpc>"#,
         target = params.target.as_xml_tag(),
         config = params.config,
     )
@@ -136,13 +139,13 @@ pub fn lock_xml(message_id: &str, target: Datastore) -> String {
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <lock>
-    <target>
-      <{target}/>
-    </target>
-  </lock>
-</rpc>"#,
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:lock>
+    <nc:target>
+      <nc:{target}/>
+    </nc:target>
+  </nc:lock>
+</nc:rpc>"#,
         target = target.as_xml_tag(),
     )
 }
@@ -152,13 +155,13 @@ pub fn unlock_xml(message_id: &str, target: Datastore) -> String {
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <unlock>
-    <target>
-      <{target}/>
-    </target>
-  </unlock>
-</rpc>"#,
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:unlock>
+    <nc:target>
+      <nc:{target}/>
+    </nc:target>
+  </nc:unlock>
+</nc:rpc>"#,
         target = target.as_xml_tag(),
     )
 }
@@ -170,9 +173,9 @@ pub fn discard_changes_xml(message_id: &str) -> String {
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <discard-changes/>
-</rpc>"#,
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:discard-changes/>
+</nc:rpc>"#,
     )
 }
 
@@ -181,9 +184,9 @@ pub fn commit_xml(message_id: &str) -> String {
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <commit/>
-</rpc>"#,
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:commit/>
+</nc:rpc>"#,
     )
 }
 
@@ -195,12 +198,12 @@ pub fn confirmed_commit_xml(message_id: &str, confirm_timeout: u32) -> String {
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <commit>
-    <confirmed/>
-    <confirm-timeout>{confirm_timeout}</confirm-timeout>
-  </commit>
-</rpc>"#,
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:commit>
+    <nc:confirmed/>
+    <nc:confirm-timeout>{confirm_timeout}</nc:confirm-timeout>
+  </nc:commit>
+</nc:rpc>"#,
     )
 }
 
@@ -209,13 +212,13 @@ pub fn validate_xml(message_id: &str, source: Datastore) -> String {
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <validate>
-    <source>
-      <{source}/>
-    </source>
-  </validate>
-</rpc>"#,
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:validate>
+    <nc:source>
+      <nc:{source}/>
+    </nc:source>
+  </nc:validate>
+</nc:rpc>"#,
         source = source.as_xml_tag(),
     )
 }
@@ -225,9 +228,9 @@ pub fn close_session_xml(message_id: &str) -> String {
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <close-session/>
-</rpc>"#,
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:close-session/>
+</nc:rpc>"#,
     )
 }
 
@@ -236,11 +239,11 @@ pub fn kill_session_xml(message_id: &str, session_id: u32) -> String {
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <kill-session>
-    <session-id>{session_id}</session-id>
-  </kill-session>
-</rpc>"#,
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:kill-session>
+    <nc:session-id>{session_id}</nc:session-id>
+  </nc:kill-session>
+</nc:rpc>"#,
     )
 }
 
@@ -252,17 +255,17 @@ pub fn kill_session_xml(message_id: &str, session_id: u32) -> String {
 /// chassis-clustered Junos devices before loading configuration.
 pub fn open_configuration_xml(message_id: &str, mode: OpenConfigurationMode) -> String {
     let mode_element = match mode {
-        OpenConfigurationMode::Private => "<private/>",
-        OpenConfigurationMode::Exclusive => "<exclusive/>",
+        OpenConfigurationMode::Private => "<nc:private/>",
+        OpenConfigurationMode::Exclusive => "<nc:exclusive/>",
     };
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <open-configuration xmlns="">
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:open-configuration>
     {mode_element}
-  </open-configuration>
-</rpc>"#,
+  </nc:open-configuration>
+</nc:rpc>"#,
     )
 }
 
@@ -273,9 +276,9 @@ pub fn close_configuration_xml(message_id: &str) -> String {
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <close-configuration xmlns=""/>
-</rpc>"#,
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:close-configuration/>
+</nc:rpc>"#,
     )
 }
 
@@ -288,9 +291,9 @@ pub fn commit_configuration_xml(message_id: &str) -> String {
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <commit-configuration xmlns=""/>
-</rpc>"#,
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:commit-configuration/>
+</nc:rpc>"#,
     )
 }
 
@@ -302,9 +305,9 @@ pub fn rollback_configuration_xml(message_id: &str, rollback: u32) -> String {
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <load-configuration xmlns="" rollback="{rollback}"/>
-</rpc>"#,
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:load-configuration rollback="{rollback}"/>
+</nc:rpc>"#,
     )
 }
 
@@ -316,9 +319,9 @@ pub fn get_configuration_compare_xml(message_id: &str, rollback: u32) -> String 
     let safe_id = escape_xml_attr(message_id);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <get-configuration xmlns="" compare="rollback" rollback="{rollback}" format="text"/>
-</rpc>"#,
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:get-configuration compare="rollback" rollback="{rollback}" format="text"/>
+</nc:rpc>"#,
     )
 }
 
@@ -346,11 +349,11 @@ pub fn load_configuration_xml(
     };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <load-configuration xmlns="" action="{action}" format="{format}">
-    <{wrapper}>{config}</{wrapper}>
-  </load-configuration>
-</rpc>"#,
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:load-configuration action="{action}" format="{format}">
+    <nc:{wrapper}>{config}</nc:{wrapper}>
+  </nc:load-configuration>
+</nc:rpc>"#,
         action = action.as_str(),
         format = format.as_str(),
     )
@@ -364,9 +367,9 @@ mod tests {
     fn test_get_config_running_no_filter() {
         let xml = get_config_xml("1", Datastore::Running, None);
         assert!(xml.contains("message-id=\"1\""));
-        assert!(xml.contains("<running/>"));
-        assert!(xml.contains("<get-config>"));
-        assert!(!xml.contains("<filter"));
+        assert!(xml.contains("<nc:running/>"));
+        assert!(xml.contains("<nc:get-config>"));
+        assert!(!xml.contains("<nc:filter"));
     }
 
     #[test]
@@ -376,7 +379,7 @@ mod tests {
             Datastore::Running,
             Some("<interfaces/>"),
         );
-        assert!(xml.contains("<filter type=\"subtree\">"));
+        assert!(xml.contains("<nc:filter type=\"subtree\">"));
         assert!(xml.contains("<interfaces/>"));
     }
 
@@ -390,8 +393,8 @@ mod tests {
             error_option: None,
         };
         let xml = edit_config_xml("3", &params);
-        assert!(xml.contains("<candidate/>"));
-        assert!(xml.contains("<default-operation>merge</default-operation>"));
+        assert!(xml.contains("<nc:candidate/>"));
+        assert!(xml.contains("<nc:default-operation>merge</nc:default-operation>"));
         assert!(xml.contains("ge-0/0/0"));
     }
 
@@ -405,49 +408,49 @@ mod tests {
             error_option: Some(ErrorOption::RollbackOnError),
         };
         let xml = edit_config_xml("4", &params);
-        assert!(xml.contains("<default-operation>replace</default-operation>"));
-        assert!(xml.contains("<test-option>test-then-set</test-option>"));
-        assert!(xml.contains("<error-option>rollback-on-error</error-option>"));
+        assert!(xml.contains("<nc:default-operation>replace</nc:default-operation>"));
+        assert!(xml.contains("<nc:test-option>test-then-set</nc:test-option>"));
+        assert!(xml.contains("<nc:error-option>rollback-on-error</nc:error-option>"));
     }
 
     #[test]
     fn test_lock_candidate() {
         let xml = lock_xml("5", Datastore::Candidate);
-        assert!(xml.contains("<lock>"));
-        assert!(xml.contains("<candidate/>"));
+        assert!(xml.contains("<nc:lock>"));
+        assert!(xml.contains("<nc:candidate/>"));
     }
 
     #[test]
     fn test_unlock_candidate() {
         let xml = unlock_xml("6", Datastore::Candidate);
-        assert!(xml.contains("<unlock>"));
-        assert!(xml.contains("<candidate/>"));
+        assert!(xml.contains("<nc:unlock>"));
+        assert!(xml.contains("<nc:candidate/>"));
     }
 
     #[test]
     fn test_commit() {
         let xml = commit_xml("7");
-        assert!(xml.contains("<commit/>"));
+        assert!(xml.contains("<nc:commit/>"));
     }
 
     #[test]
     fn test_validate() {
         let xml = validate_xml("8", Datastore::Candidate);
-        assert!(xml.contains("<validate>"));
-        assert!(xml.contains("<candidate/>"));
+        assert!(xml.contains("<nc:validate>"));
+        assert!(xml.contains("<nc:candidate/>"));
     }
 
     #[test]
     fn test_close_session() {
         let xml = close_session_xml("9");
-        assert!(xml.contains("<close-session/>"));
+        assert!(xml.contains("<nc:close-session/>"));
     }
 
     #[test]
     fn test_kill_session() {
         let xml = kill_session_xml("10", 42);
-        assert!(xml.contains("<kill-session>"));
-        assert!(xml.contains("<session-id>42</session-id>"));
+        assert!(xml.contains("<nc:kill-session>"));
+        assert!(xml.contains("<nc:session-id>42</nc:session-id>"));
     }
 
     #[test]
@@ -461,22 +464,22 @@ mod tests {
     #[test]
     fn test_open_configuration_private() {
         let xml = open_configuration_xml("20", OpenConfigurationMode::Private);
-        assert!(xml.contains(r#"<open-configuration xmlns="">"#));
-        assert!(xml.contains("<private/>"));
+        assert!(xml.contains("<nc:open-configuration>"));
+        assert!(xml.contains("<nc:private/>"));
         assert!(xml.contains("message-id=\"20\""));
     }
 
     #[test]
     fn test_open_configuration_exclusive() {
         let xml = open_configuration_xml("21", OpenConfigurationMode::Exclusive);
-        assert!(xml.contains(r#"<open-configuration xmlns="">"#));
-        assert!(xml.contains("<exclusive/>"));
+        assert!(xml.contains("<nc:open-configuration>"));
+        assert!(xml.contains("<nc:exclusive/>"));
     }
 
     #[test]
     fn test_close_configuration() {
         let xml = close_configuration_xml("22");
-        assert!(xml.contains(r#"<close-configuration xmlns=""/>"#));
+        assert!(xml.contains("<nc:close-configuration/>"));
         assert!(xml.contains("message-id=\"22\""));
     }
 
@@ -488,9 +491,9 @@ mod tests {
             LoadFormat::Text,
             "set system host-name test123",
         );
-        assert!(xml.contains(r#"xmlns="" action="set""#));
+        assert!(xml.contains(r#"action="set""#));
         assert!(xml.contains(r#"format="text""#));
-        assert!(xml.contains("<configuration-set>set system host-name test123</configuration-set>"));
+        assert!(xml.contains("<nc:configuration-set>set system host-name test123</nc:configuration-set>"));
     }
 
     #[test]
@@ -501,8 +504,8 @@ mod tests {
             LoadFormat::Text,
             "system { host-name test123; }",
         );
-        assert!(xml.contains(r#"xmlns="" action="merge""#));
-        assert!(xml.contains("<configuration-text>"));
+        assert!(xml.contains(r#"action="merge""#));
+        assert!(xml.contains("<nc:configuration-text>"));
     }
 
     #[test]
@@ -513,37 +516,60 @@ mod tests {
             LoadFormat::Xml,
             "<system><host-name>test123</host-name></system>",
         );
-        assert!(xml.contains(r#"xmlns="" action="replace""#));
+        assert!(xml.contains(r#"action="replace""#));
         assert!(xml.contains(r#"format="xml""#));
-        assert!(xml.contains("<configuration><system>"));
+        assert!(xml.contains("<nc:configuration><system>"));
     }
 
     #[test]
     fn test_commit_configuration() {
         let xml = commit_configuration_xml("30");
-        assert!(xml.contains(r#"<commit-configuration xmlns=""/>"#));
+        assert!(xml.contains("<nc:commit-configuration/>"));
         assert!(xml.contains("message-id=\"30\""));
     }
 
     #[test]
     fn test_rollback_configuration() {
         let xml = rollback_configuration_xml("31", 0);
-        assert!(xml.contains(r#"<load-configuration xmlns="" rollback="0"/>"#));
+        assert!(xml.contains(r#"<nc:load-configuration rollback="0"/>"#));
         assert!(xml.contains("message-id=\"31\""));
     }
 
     #[test]
     fn test_rollback_configuration_index() {
         let xml = rollback_configuration_xml("32", 3);
-        assert!(xml.contains(r#"<load-configuration xmlns="" rollback="3"/>"#));
+        assert!(xml.contains(r#"<nc:load-configuration rollback="3"/>"#));
     }
 
     #[test]
     fn test_get_configuration_compare() {
         let xml = get_configuration_compare_xml("33", 0);
-        assert!(xml.contains(r#"xmlns="" compare="rollback""#));
+        assert!(xml.contains(r#"compare="rollback""#));
         assert!(xml.contains(r#"rollback="0""#));
         assert!(xml.contains(r#"format="text""#));
         assert!(xml.contains("message-id=\"33\""));
+    }
+
+    #[test]
+    fn test_no_xmlns_empty() {
+        // Verify that no generated XML contains xmlns=""
+        let xml = load_configuration_xml("99", LoadAction::Set, LoadFormat::Text, "test");
+        assert!(!xml.contains(r#"xmlns="""#), "xmlns=\"\" must not appear in output");
+        let xml2 = open_configuration_xml("99", OpenConfigurationMode::Private);
+        assert!(!xml2.contains(r#"xmlns="""#), "xmlns=\"\" must not appear in output");
+        let xml3 = commit_configuration_xml("99");
+        assert!(!xml3.contains(r#"xmlns="""#), "xmlns=\"\" must not appear in output");
+        let xml4 = rollback_configuration_xml("99", 0);
+        assert!(!xml4.contains(r#"xmlns="""#), "xmlns=\"\" must not appear in output");
+        let xml5 = get_configuration_compare_xml("99", 0);
+        assert!(!xml5.contains(r#"xmlns="""#), "xmlns=\"\" must not appear in output");
+    }
+
+    #[test]
+    fn test_nc_prefix_on_rpc() {
+        // Verify all functions use nc: prefixed namespace
+        let xml = get_config_xml("1", Datastore::Running, None);
+        assert!(xml.contains(r#"<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0""#));
+        assert!(xml.contains("</nc:rpc>"));
     }
 }

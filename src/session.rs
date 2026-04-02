@@ -458,7 +458,7 @@ impl Session {
         let msg_id = self.next_message_id();
         let safe_id = crate::rpc::operations::escape_xml_attr(&msg_id);
         let xml = format!(
-            r#"<rpc message-id="{safe_id}">{rpc_content}</rpc>"#
+            r#"<?xml version="1.0" encoding="UTF-8"?><nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">{rpc_content}</nc:rpc>"#
         );
         let reply = self.send_rpc(&xml, &msg_id).await?;
         match reply {
@@ -479,7 +479,7 @@ impl Session {
         let msg_id = self.next_message_id();
         let safe_id = crate::rpc::operations::escape_xml_attr(&msg_id);
         let xml = format!(
-            r#"<rpc message-id="{safe_id}">{rpc_content}</rpc>"#
+            r#"<?xml version="1.0" encoding="UTF-8"?><nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">{rpc_content}</nc:rpc>"#
         );
         let reply = self.send_rpc(&xml, &msg_id).await?;
         match reply {
