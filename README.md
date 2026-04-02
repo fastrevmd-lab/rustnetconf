@@ -18,7 +18,7 @@ Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and
 |-----|---------|--------|
 | RFC 6241 | Network Configuration Protocol (NETCONF) | ✅ supported |
 | RFC 6242 | NETCONF over SSH | ✅ supported |
-| RFC 7589 | NETCONF over TLS | ✅ supported (feature flag `tls`) — **awaiting mTLS device test** |
+| RFC 7589 | NETCONF over TLS | ✅ supported (feature flag `tls`) — **needs physical SRX or non-vSRX for TLS test** |
 | RFC 5277 | Event Notifications | ✅ supported — tested on Junos 24.4 vSRX (subscription + capability; interleave limited by device) |
 | RFC 5717 | Partial Lock RPC | 💡 planned |
 | RFC 8071 | NETCONF Call Home | 💡 planned |
@@ -133,7 +133,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Connect over TLS (RFC 7589) — awaiting mTLS device test
+### Connect over TLS (RFC 7589)
+
+> **Note:** vSRX 24.4 has a known TLS handshake issue where the PKI engine cannot
+> present a self-signed certificate chain. TLS testing requires a physical SRX,
+> MX, or EX device with a CA-signed certificate. The code compiles and passes
+> unit tests but has not been validated against a live TLS-capable device.
 
 ```rust
 use rustnetconf::{Client, TlsConfig, Datastore};
