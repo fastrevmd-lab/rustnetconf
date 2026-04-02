@@ -18,7 +18,7 @@ Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and
 |-----|---------|--------|
 | RFC 6241 | Network Configuration Protocol (NETCONF) | ✅ supported |
 | RFC 6242 | NETCONF over SSH | ✅ supported |
-| RFC 7589 | NETCONF over TLS | ✅ supported (feature flag `tls`) |
+| RFC 7589 | NETCONF over TLS | ✅ supported (feature flag `tls`) — **untested** |
 | RFC 5277 | Event Notifications | 💡 planned |
 | RFC 5717 | Partial Lock RPC | 💡 planned |
 | RFC 8071 | NETCONF Call Home | 💡 planned |
@@ -133,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Connect over TLS (RFC 7589)
+### Connect over TLS (RFC 7589) — untested
 
 ```rust
 use rustnetconf::{Client, TlsConfig, Datastore};
