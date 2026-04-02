@@ -28,6 +28,10 @@ pub mod uri {
     pub const ROLLBACK_ON_ERROR: &str = "urn:ietf:params:netconf:capability:rollback-on-error:1.0";
     /// Writable running capability.
     pub const WRITABLE_RUNNING: &str = "urn:ietf:params:netconf:capability:writable-running:1.0";
+    /// Event notifications capability (RFC 5277).
+    pub const NOTIFICATION: &str = "urn:ietf:params:netconf:capability:notification:1.0";
+    /// Interleave capability — allows RPCs during an active notification subscription.
+    pub const INTERLEAVE: &str = "urn:ietf:params:netconf:capability:interleave:1.0";
 }
 
 /// The negotiated NETCONF version for the session.
@@ -99,6 +103,16 @@ impl Capabilities {
     /// Returns true if the `:confirmed-commit` capability is supported.
     pub fn has_confirmed_commit(&self) -> bool {
         self.supports(uri::CONFIRMED_COMMIT) || self.supports(uri::CONFIRMED_COMMIT_1_1)
+    }
+
+    /// Returns true if the `:notification` capability is supported (RFC 5277).
+    pub fn has_notification(&self) -> bool {
+        self.supports(uri::NOTIFICATION)
+    }
+
+    /// Returns true if the `:interleave` capability is supported.
+    pub fn has_interleave(&self) -> bool {
+        self.supports(uri::INTERLEAVE)
     }
 }
 

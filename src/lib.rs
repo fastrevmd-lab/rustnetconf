@@ -40,6 +40,7 @@ pub mod client;
 pub mod error;
 pub mod facts;
 pub mod framing;
+pub mod notification;
 pub mod pool;
 pub mod rpc;
 pub mod session;
@@ -51,6 +52,7 @@ pub mod vendor;
 pub use client::{Client, ClientBuilder, EditConfigBuilder};
 pub use error::NetconfError;
 pub use facts::Facts;
+pub use notification::Notification;
 pub use rpc::RpcErrorInfo;
 pub use types::{
     Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,

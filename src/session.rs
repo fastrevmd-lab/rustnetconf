@@ -17,6 +17,7 @@
 //!              Transport (byte stream)
 //! ```
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,7 @@ use crate::facts::Facts;
 use crate::framing::chunked::ChunkedFramer;
 use crate::framing::eom::EomFramer;
 use crate::framing::Framer;
+use crate::notification::{self, MessageKind, Notification};
 use crate::rpc;
 use crate::rpc::operations::{self, EditConfigParams};
 use crate::rpc::RpcReply;
@@ -41,6 +43,9 @@ const READ_BUF_SIZE: usize = 65536;
 /// giving up. This handles the case where a cancelled async RPC left its
 /// response in the transport buffer.
 const MAX_STALE_DRAIN: usize = 10;
+
+/// Maximum number of buffered notifications before oldest are dropped.
+const MAX_NOTIFICATION_BUFFER: usize = 10_000;
 
 /// Maximum read buffer size (100 MB). If the device sends more data than this
 /// without completing a framed message, the read is aborted to prevent memory
@@ -83,6 +88,10 @@ pub struct Session {
     last_activity: Option<Instant>,
     /// True when a Junos private/exclusive configuration database is open.
     private_config_open: bool,
+    /// Buffered notifications received during RPC exchanges.
+    notification_buffer: VecDeque<Notification>,
+    /// True after a successful `create-subscription` RPC.
+    has_subscription: bool,
 }
 
 impl Session {
@@ -106,6 +115,8 @@ impl Session {
             keepalive_interval: None,
             last_activity: None,
             private_config_open: false,
+            notification_buffer: VecDeque::new(),
+            has_subscription: false,
         }
     }
 
@@ -316,8 +327,27 @@ impl Session {
 
         self.transport.write_all(&framed).await?;
 
-        for drain_attempt in 0..=MAX_STALE_DRAIN {
+        let mut drain_attempt = 0;
+        loop {
             let response = self.read_message().await?;
+
+            // Demux: if a notification arrives during RPC exchange, buffer it
+            if notification::classify_message(&response) == Some(MessageKind::Notification) {
+                match notification::parse_notification(&response) {
+                    Ok(notif) => {
+                        tracing::debug!(
+                            event_time = %notif.event_time,
+                            "buffered notification during RPC exchange"
+                        );
+                        self.buffer_notification(notif);
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to parse notification: {e}");
+                    }
+                }
+                // Do NOT increment drain_attempt — notifications are expected
+                continue;
+            }
 
             match rpc::parse_rpc_reply(&response, message_id) {
                 Ok(reply) => {
@@ -329,7 +359,7 @@ impl Session {
                     ref expected,
                     ref actual,
                 }) => {
-                    if drain_attempt == MAX_STALE_DRAIN {
+                    if drain_attempt >= MAX_STALE_DRAIN {
                         tracing::error!(
                             expected,
                             actual,
@@ -347,13 +377,11 @@ impl Session {
                         attempt = drain_attempt + 1,
                         "draining stale response with wrong message-id"
                     );
-                    // Continue to read the next message
+                    drain_attempt += 1;
                 }
                 Err(other) => return Err(other.into()),
             }
         }
-
-        unreachable!()
     }
 
     /// Allocate the next message-id.
@@ -896,6 +924,145 @@ fn parse_session_id_from_info(info: &str) -> Option<u32> {
     None
 }
 
+// ── Notification methods (RFC 5277) ──────────────────────────────────
+
+impl Session {
+    /// Create a notification subscription (RFC 5277).
+    ///
+    /// Requires the `:notification` capability. After a successful subscription,
+    /// the device sends `<notification>` messages asynchronously. These are
+    /// buffered during RPC calls and can be retrieved via
+    /// [`drain_notifications()`](Self::drain_notifications) or
+    /// [`recv_notification()`](Self::recv_notification).
+    ///
+    /// # Parameters
+    /// - `stream`: event stream name (e.g., "NETCONF"). `None` uses the device default.
+    /// - `filter`: optional subtree filter XML
+    /// - `start_time`: optional RFC 3339 timestamp to start notification replay
+    /// - `stop_time`: optional RFC 3339 timestamp to stop notifications
+    pub async fn create_subscription(
+        &mut self,
+        stream: Option<&str>,
+        filter: Option<&str>,
+        start_time: Option<&str>,
+        stop_time: Option<&str>,
+    ) -> Result<(), NetconfError> {
+        self.require_capability(
+            capability::uri::NOTIFICATION,
+            "create-subscription",
+        )?;
+
+        if !self.supports(capability::uri::INTERLEAVE) {
+            tracing::info!(
+                "device does not advertise :interleave capability — \
+                 RPCs during active subscription may not be supported"
+            );
+        }
+
+        let message_id = self.next_message_id();
+        let xml = operations::create_subscription_xml(
+            &message_id,
+            stream,
+            filter,
+            start_time,
+            stop_time,
+        );
+
+        let reply = self.send_rpc(&xml, &message_id).await?;
+        match reply {
+            RpcReply::Ok | RpcReply::OkWithWarnings(_) => {
+                self.has_subscription = true;
+                tracing::info!(
+                    stream = stream.unwrap_or("(default)"),
+                    "notification subscription created"
+                );
+                Ok(())
+            }
+            _ => Err(ProtocolError::Xml(
+                "unexpected response to create-subscription".to_string(),
+            )
+            .into()),
+        }
+    }
+
+    /// Drain all buffered notifications, returning them and clearing the buffer.
+    ///
+    /// Notifications are buffered when they arrive during RPC exchanges.
+    /// Call this between RPCs to process accumulated notifications.
+    pub fn drain_notifications(&mut self) -> Vec<Notification> {
+        self.notification_buffer.drain(..).collect()
+    }
+
+    /// Wait for the next notification from the device.
+    ///
+    /// First checks the internal buffer. If empty, reads messages from the
+    /// transport until a notification arrives. Any `<rpc-reply>` messages
+    /// received while waiting are logged and discarded.
+    ///
+    /// Returns `Ok(None)` if the connection is closed (EOF).
+    pub async fn recv_notification(&mut self) -> Result<Option<Notification>, NetconfError> {
+        // Check buffer first
+        if let Some(notif) = self.notification_buffer.pop_front() {
+            return Ok(Some(notif));
+        }
+
+        // Read from transport until we get a notification or EOF
+        loop {
+            let response = match self.read_message().await {
+                Ok(msg) => msg,
+                Err(NetconfError::Transport(TransportError::Io(ref e)))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                {
+                    return Ok(None);
+                }
+                Err(e) => return Err(e),
+            };
+
+            match notification::classify_message(&response) {
+                Some(MessageKind::Notification) => {
+                    let notif = notification::parse_notification(&response)
+                        .map_err(NetconfError::Rpc)?;
+                    return Ok(Some(notif));
+                }
+                Some(MessageKind::RpcReply) => {
+                    tracing::warn!(
+                        "discarding unexpected rpc-reply while waiting for notification"
+                    );
+                    continue;
+                }
+                None => {
+                    tracing::warn!(
+                        "discarding unrecognized message while waiting for notification"
+                    );
+                    continue;
+                }
+            }
+        }
+    }
+
+    /// Check if any notifications are buffered without blocking.
+    pub fn has_notifications(&self) -> bool {
+        !self.notification_buffer.is_empty()
+    }
+
+    /// Whether this session has an active notification subscription.
+    pub fn has_subscription(&self) -> bool {
+        self.has_subscription
+    }
+
+    /// Buffer a notification, dropping the oldest if the buffer is full.
+    fn buffer_notification(&mut self, notif: Notification) {
+        if self.notification_buffer.len() >= MAX_NOTIFICATION_BUFFER {
+            tracing::warn!(
+                max = MAX_NOTIFICATION_BUFFER,
+                "notification buffer full, dropping oldest notification"
+            );
+            self.notification_buffer.pop_front();
+        }
+        self.notification_buffer.push_back(notif);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1255,5 +1422,173 @@ mod tests {
             after.unwrap() >= before.unwrap(),
             "last_activity should advance after RPC"
         );
+    }
+
+    // ── Notification tests ───────────────────────────────────────────
+
+    /// Build a mock device hello with notification capability.
+    fn mock_device_hello_with_notification() -> Vec<u8> {
+        let hello = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability>urn:ietf:params:netconf:base:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:candidate:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:notification:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:interleave:1.0</capability>
+  </capabilities>
+  <session-id>1</session-id>
+</hello>"#;
+        let mut buf = hello.as_bytes().to_vec();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    /// Build a mock notification with EOM framing.
+    fn mock_notification(event_time: &str, event_xml: &str) -> Vec<u8> {
+        let notif = format!(
+            r#"<notification xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0">
+  <eventTime>{event_time}</eventTime>
+  {event_xml}
+</notification>"#
+        );
+        let mut buf = notif.into_bytes();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    #[tokio::test]
+    async fn test_notification_buffered_during_rpc() {
+        let mut response_data = mock_device_hello_with_notification();
+        // notification arrives between lock request and reply
+        response_data.extend_from_slice(&mock_notification(
+            "2026-04-01T12:00:00Z",
+            "<config-change/>",
+        ));
+        response_data.extend_from_slice(&mock_ok_reply("1")); // lock reply
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // Lock should succeed despite interleaved notification
+        session.lock(Datastore::Candidate).await.expect("lock failed");
+
+        // Notification should be buffered
+        let notifications = session.drain_notifications();
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(notifications[0].event_time, "2026-04-01T12:00:00Z");
+        assert!(notifications[0].event_xml.contains("config-change"));
+    }
+
+    #[tokio::test]
+    async fn test_multiple_notifications_buffered_during_rpc() {
+        let mut response_data = mock_device_hello_with_notification();
+        response_data.extend_from_slice(&mock_notification("2026-04-01T12:00:00Z", "<event1/>"));
+        response_data.extend_from_slice(&mock_notification("2026-04-01T12:01:00Z", "<event2/>"));
+        response_data.extend_from_slice(&mock_notification("2026-04-01T12:02:00Z", "<event3/>"));
+        response_data.extend_from_slice(&mock_ok_reply("1")); // lock reply
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session.lock(Datastore::Candidate).await.expect("lock failed");
+
+        let notifications = session.drain_notifications();
+        assert_eq!(notifications.len(), 3);
+        assert_eq!(notifications[0].event_time, "2026-04-01T12:00:00Z");
+        assert_eq!(notifications[2].event_time, "2026-04-01T12:02:00Z");
+    }
+
+    #[tokio::test]
+    async fn test_notifications_dont_count_toward_stale_drain() {
+        // 15 notifications > MAX_STALE_DRAIN (10), but should NOT trigger drain limit
+        let mut response_data = mock_device_hello_with_notification();
+        for i in 0..15 {
+            response_data.extend_from_slice(&mock_notification(
+                &format!("2026-04-01T12:{i:02}:00Z"),
+                &format!("<event{i}/>"),
+            ));
+        }
+        response_data.extend_from_slice(&mock_ok_reply("1")); // lock reply
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // Should succeed — notifications are not stale replies
+        session.lock(Datastore::Candidate).await.expect("lock failed");
+
+        let notifications = session.drain_notifications();
+        assert_eq!(notifications.len(), 15);
+    }
+
+    #[tokio::test]
+    async fn test_create_subscription_requires_capability() {
+        // Hello WITHOUT notification capability
+        let response_data = mock_device_hello();
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let result = session.create_subscription(None, None, None, None).await;
+        match result {
+            Err(NetconfError::Protocol(ProtocolError::CapabilityMissing(_))) => {}
+            other => panic!("expected CapabilityMissing, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_recv_notification_returns_buffered_first() {
+        let mut response_data = mock_device_hello_with_notification();
+        // Two notifications then EOF
+        response_data.extend_from_slice(&mock_notification("2026-04-01T12:00:00Z", "<event1/>"));
+        response_data.extend_from_slice(&mock_ok_reply("1")); // for an RPC
+        response_data.extend_from_slice(&mock_notification("2026-04-01T12:01:00Z", "<event2/>"));
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // Lock buffers the first notification
+        session.lock(Datastore::Candidate).await.expect("lock failed");
+        assert!(session.has_notifications());
+
+        // recv_notification should return the buffered one first
+        let notif = session.recv_notification().await.unwrap().unwrap();
+        assert_eq!(notif.event_time, "2026-04-01T12:00:00Z");
+
+        // Next should read from transport
+        let notif2 = session.recv_notification().await.unwrap().unwrap();
+        assert_eq!(notif2.event_time, "2026-04-01T12:01:00Z");
+    }
+
+    #[tokio::test]
+    async fn test_recv_notification_eof_returns_none() {
+        let response_data = mock_device_hello_with_notification();
+        // No notifications, just EOF after hello
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let result = session.recv_notification().await.unwrap();
+        assert!(result.is_none(), "expected None on EOF");
+    }
+
+    #[tokio::test]
+    async fn test_drain_clears_buffer() {
+        let mut response_data = mock_device_hello_with_notification();
+        response_data.extend_from_slice(&mock_notification("2026-04-01T12:00:00Z", "<event/>"));
+        response_data.extend_from_slice(&mock_ok_reply("1"));
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session.lock(Datastore::Candidate).await.expect("lock failed");
+        assert_eq!(session.drain_notifications().len(), 1);
+        assert_eq!(session.drain_notifications().len(), 0); // buffer cleared
     }
 }

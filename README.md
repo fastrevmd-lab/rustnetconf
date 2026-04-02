@@ -19,7 +19,7 @@ Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and
 | RFC 6241 | Network Configuration Protocol (NETCONF) | ✅ supported |
 | RFC 6242 | NETCONF over SSH | ✅ supported |
 | RFC 7589 | NETCONF over TLS | ✅ supported (feature flag `tls`) — **untested** |
-| RFC 5277 | Event Notifications | 💡 planned |
+| RFC 5277 | Event Notifications | ✅ supported — **untested** |
 | RFC 5717 | Partial Lock RPC | 💡 planned |
 | RFC 8071 | NETCONF Call Home | 💡 planned |
 | RFC 6243 | With-defaults Capability | 💡 planned |
@@ -157,6 +157,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Event notifications (RFC 5277) — untested
+
+```rust
+use rustnetconf::{Client, Datastore};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut client = Client::connect("10.0.0.1:830")
+        .username("admin")
+        .password("secret")
+        .connect()
+        .await?;
+
+    // Subscribe to NETCONF event stream
+    client.create_subscription(Some("NETCONF"), None, None, None).await?;
+
+    // Notifications are buffered during RPCs
+    let config = client.get_config(Datastore::Running).await?;
+
+    // Drain buffered notifications
+    for notif in client.drain_notifications() {
+        println!("[{}] {}", notif.event_time, notif.event_xml);
+    }
+
+    // Or block waiting for the next notification
+    if let Some(notif) = client.recv_notification().await? {
+        println!("Got: {}", notif.event_time);
+    }
+
+    client.close_session().await?;
+    Ok(())
+}
+```
+
 ### Connection pooling
 
 ```rust
@@ -187,6 +221,7 @@ let config = conn.get_config(Datastore::Running).await?;
 - **NETCONF 1.0 + 1.1** — EOM and chunked framing with auto-negotiation
 - **All core RPCs** — get, get-config, edit-config, lock/unlock, commit, validate, close/kill-session, discard-changes
 - **Confirmed commit** — auto-rollback safety net (RFC 6241 §8.4)
+- **Event notifications** — `create-subscription`, inline notification demux, buffered drain/recv API (RFC 5277)
 - **CommitUnknown detection** — distinguishes "commit failed" from "maybe committed, connection lost"
 - **Stale lock recovery** — `lock_or_kill_stale()` kills crashed sessions holding locks
 - **Framing mismatch detection** — catches firmware bugs where devices send wrong framing
