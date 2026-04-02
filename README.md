@@ -18,8 +18,8 @@ Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and
 |-----|---------|--------|
 | RFC 6241 | Network Configuration Protocol (NETCONF) | ✅ supported |
 | RFC 6242 | NETCONF over SSH | ✅ supported |
-| RFC 7589 | NETCONF over TLS | ✅ supported (feature flag `tls`) — **untested** |
-| RFC 5277 | Event Notifications | ✅ supported — **untested** |
+| RFC 7589 | NETCONF over TLS | ✅ supported (feature flag `tls`) — **awaiting mTLS device test** |
+| RFC 5277 | Event Notifications | ✅ supported — tested on Junos 24.4 vSRX (subscription + capability; interleave limited by device) |
 | RFC 5717 | Partial Lock RPC | 💡 planned |
 | RFC 8071 | NETCONF Call Home | 💡 planned |
 | RFC 6243 | With-defaults Capability | 💡 planned |
@@ -133,7 +133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Connect over TLS (RFC 7589) — untested
+### Connect over TLS (RFC 7589) — awaiting mTLS device test
 
 ```rust
 use rustnetconf::{Client, TlsConfig, Datastore};
@@ -157,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-### Event notifications (RFC 5277) — untested
+### Event notifications (RFC 5277)
 
 ```rust
 use rustnetconf::{Client, Datastore};
@@ -173,23 +173,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Subscribe to NETCONF event stream
     client.create_subscription(Some("NETCONF"), None, None, None).await?;
 
-    // Notifications are buffered during RPCs
-    let config = client.get_config(Datastore::Running).await?;
-
-    // Drain buffered notifications
-    for notif in client.drain_notifications() {
+    // Block waiting for notifications
+    while let Some(notif) = client.recv_notification().await? {
         println!("[{}] {}", notif.event_time, notif.event_xml);
     }
 
-    // Or block waiting for the next notification
-    if let Some(notif) = client.recv_notification().await? {
-        println!("Got: {}", notif.event_time);
-    }
-
-    client.close_session().await?;
     Ok(())
 }
 ```
+
+> **Note:** Some devices (e.g., Junos vSRX 24.4) advertise `:interleave` but do not
+> respond to RPCs on a session with an active subscription. On these devices, use a
+> dedicated session for notifications and a separate session for RPCs. Notifications
+> arriving during RPCs on interleave-capable devices are automatically buffered and
+> available via `drain_notifications()`.
 
 ### Connection pooling
 
