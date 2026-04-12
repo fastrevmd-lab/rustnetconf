@@ -282,6 +282,11 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
         }
     }
 
+    // An empty <rpc-reply> with no errors is a success (RFC 6241 §4.3).
+    if in_rpc_reply || found_message_id.is_some() {
+        return Ok(RpcReply::Ok);
+    }
+
     Err(RpcError::ParseError(
         "rpc-reply contained no <ok/>, <data>, or <rpc-error>".to_string(),
     ))
@@ -684,5 +689,13 @@ mod tests {
             }
             _ => panic!("expected ServerError for hard error, got {err:?}"),
         }
+    }
+
+    #[test]
+    fn test_parse_empty_rpc_reply_returns_ok() {
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="42">
+</rpc-reply>"#;
+        let result = parse_rpc_reply(xml, "42").unwrap();
+        assert!(matches!(result, RpcReply::Ok));
     }
 }
