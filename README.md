@@ -327,6 +327,25 @@ SKIP_INTEGRATION=1 cargo test             # Skip tests requiring a device
 
 To report a security vulnerability, please open an issue on GitHub.
 
+## Dependencies
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `async-trait` | 0.1.89 | Async trait support |
+| `futures` | 0.3.32 | Async combinators |
+| `quick-xml` | 0.37.5 | XML parsing (NETCONF RPC encode/decode) |
+| `russh` | 0.60.0 | SSH transport (pure Rust, no libssh2) |
+| `thiserror` | 2.0.18 | Error derive macros |
+| `tokio` | 1.50.0 | Async runtime |
+| `tracing` | 0.1.44 | Structured logging/tracing |
+
+Dev-only:
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `tokio-test` | 0.4.5 | Async test utilities |
+| `tracing-subscriber` | 0.3.23 | Log subscriber for tests |
+
 ## License
 
 MIT OR Apache-2.0

@@ -19,7 +19,7 @@ tls = ["rustls", "tokio-rustls", "rustls-pemfile", "webpki-roots"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-russh = { version = "0.58", default-features = false, features = ["flate2", "aws-lc-rs"] }
+russh = { version = "0.60", default-features = false, features = ["flate2", "aws-lc-rs"] }
 quick-xml = { version = "0.37", features = ["serialize"] }
 thiserror = "2"
 tracing = "0.1"

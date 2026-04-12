@@ -213,9 +213,9 @@ impl SshTransport {
                     .map_err(|e| TransportError::Auth(format!("SSH agent identities failed: {e}")))?;
 
                 let mut auth_success = false;
-                for public_key in identities {
+                for identity in identities {
                     match handle
-                        .authenticate_publickey_with(&config.username, public_key, None, &mut agent)
+                        .authenticate_publickey_with(&config.username, identity.public_key().into_owned(), None, &mut agent)
                         .await
                     {
                         Ok(AuthResult::Success) => {
