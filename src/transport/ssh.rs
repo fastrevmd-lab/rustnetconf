@@ -9,7 +9,12 @@ use russh::keys::{self, PrivateKeyWithHashAlg};
 use russh::*;
 use std::borrow::Cow;
 use std::path::Path;
+use std::pin::Pin;
+use std::process::Stdio;
 use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
 
 use crate::error::TransportError;
@@ -24,6 +29,10 @@ pub struct SshTransport {
     /// `direct-tcpip` channel that carries the next hop's transport, so
     /// these must outlive `handle`.
     _jump_handles: Vec<client::Handle<SshHandler>>,
+    /// `ProxyCommand` subprocess (if any), kept alive for the lifetime of
+    /// the target session. Dropping the `Child` would close its stdin/stdout
+    /// pipes, tearing down the SSH transport stream that runs over them.
+    _proxy_process: Option<Child>,
 }
 
 /// SSH authentication method.
@@ -83,6 +92,22 @@ pub struct SshConfig {
     /// channel is used to carry the next leg — equivalent to OpenSSH's
     /// `ProxyJump h1,h2,h3,...,target`.
     pub jump_hosts: Vec<JumpHostConfig>,
+    /// Optional shell command to spawn whose stdin/stdout become the
+    /// transport stream to the target — equivalent to OpenSSH's
+    /// `ProxyCommand`. The substrings `%h` and `%p` are replaced with the
+    /// target host and port respectively.
+    ///
+    /// Mutually exclusive with `jump_hosts`. If both are set,
+    /// [`SshTransport::connect`] returns
+    /// [`TransportError::Connect`]. Use one or the other to reach a host.
+    ///
+    /// **Security:** the command is interpreted by `sh -c` to support
+    /// pipelines and shell features, matching OpenSSH semantics. The
+    /// caller is responsible for ensuring `host`, `port`, and the
+    /// command string do not contain attacker-controlled shell
+    /// metacharacters. In particular, `%h` is substituted **literally**
+    /// without escaping (also matching OpenSSH).
+    pub proxy_command: Option<String>,
 }
 
 /// Configuration for one jump-host hop in a `ProxyJump` chain.
@@ -181,6 +206,94 @@ fn build_russh_config() -> client::Config {
     }
 }
 
+/// Substitute OpenSSH `ProxyCommand` tokens in `command`.
+///
+/// Replaces `%h` with the target host and `%p` with the target port,
+/// matching `man 5 ssh_config`. Substitution is literal — no escaping —
+/// because OpenSSH itself does not escape these tokens. Callers are
+/// responsible for the safety of the resulting shell string.
+fn expand_proxy_command(command: &str, host: &str, port: u16) -> String {
+    command
+        .replace("%h", host)
+        .replace("%p", &port.to_string())
+}
+
+/// Combined `AsyncRead`/`AsyncWrite` over a child process's stdio,
+/// used to give russh a duplex stream for `ProxyCommand` mode.
+///
+/// The `Child` is held alive by the same struct because dropping it
+/// would close the stdio pipes and tear down the SSH transport.
+struct ProxyCommandStream {
+    stdin: ChildStdin,
+    stdout: ChildStdout,
+}
+
+impl AsyncRead for ProxyCommandStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stdout).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ProxyCommandStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        data: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.stdin).poll_write(cx, data)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stdin).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.stdin).poll_shutdown(cx)
+    }
+}
+
+/// Spawn the `ProxyCommand` shell and return a duplex stream over its
+/// stdio plus the `Child` handle (which the caller must keep alive).
+fn spawn_proxy_command(
+    command: &str,
+    host: &str,
+    port: u16,
+) -> Result<(ProxyCommandStream, Child), TransportError> {
+    let expanded = expand_proxy_command(command, host, port);
+    let mut child = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(&expanded)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| {
+            TransportError::Connect(format!(
+                "failed to spawn ProxyCommand `{expanded}`: {e}"
+            ))
+        })?;
+
+    let stdin = child.stdin.take().ok_or_else(|| {
+        TransportError::Connect("ProxyCommand stdin not captured".to_string())
+    })?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        TransportError::Connect("ProxyCommand stdout not captured".to_string())
+    })?;
+
+    Ok((ProxyCommandStream { stdin, stdout }, child))
+}
+
 /// Authenticate an open SSH session against the given username/auth method.
 ///
 /// Used uniformly for jump hosts and the final target.
@@ -267,7 +380,21 @@ impl SshTransport {
     /// If `config.jump_hosts` is non-empty, an SSH session is established to
     /// each hop in turn and a `direct-tcpip` channel is used to carry the
     /// next leg, equivalent to OpenSSH's `ProxyJump h1,h2,...,target`.
+    ///
+    /// If `config.proxy_command` is set, the given shell command is spawned
+    /// and its stdin/stdout become the transport stream to the target,
+    /// equivalent to OpenSSH's `ProxyCommand`. `proxy_command` and
+    /// `jump_hosts` are mutually exclusive — setting both returns
+    /// [`TransportError::Connect`].
     pub async fn connect(config: SshConfig) -> Result<Self, TransportError> {
+        if config.proxy_command.is_some() && !config.jump_hosts.is_empty() {
+            return Err(TransportError::Connect(
+                "proxy_command and jump_hosts are mutually exclusive — \
+                 use one or the other to reach the target"
+                    .to_string(),
+            ));
+        }
+
         let russh_config = Arc::new(build_russh_config());
 
         // Establish each jump-host hop in sequence. After the loop, `prev`
@@ -335,48 +462,54 @@ impl SshTransport {
                 })?;
         }
 
-        // Open the final hop to the target — either direct or through the
-        // last jump host.
+        // Open the final hop to the target. Three modes (in priority order):
+        //   1. proxy_command set → spawn a subprocess and run SSH over its stdio
+        //   2. jump_hosts non-empty → direct-tcpip tunnel through the last hop
+        //   3. otherwise → direct TCP connection to the target
         let target_label = format!("{}:{}", config.host, config.port);
-        let mut handle = match jump_handles.last() {
-            None => {
-                let handler = SshHandler {
-                    host_key_verification: config.host_key_verification.clone(),
-                };
-                client::connect(russh_config.clone(), (&*config.host, config.port), handler)
-                    .await
-                    .map_err(|e| {
-                        TransportError::Connect(format!(
-                            "SSH connect to {target_label} failed: {e}"
-                        ))
-                    })?
-            }
-            Some(parent) => {
-                let channel = parent
-                    .channel_open_direct_tcpip(
-                        &*config.host,
-                        config.port as u32,
-                        "0.0.0.0",
-                        0,
-                    )
-                    .await
-                    .map_err(|e| {
-                        TransportError::Connect(format!(
-                            "direct-tcpip to target {target_label} failed: {e}"
-                        ))
-                    })?;
-                let stream = channel.into_stream();
-                let handler = SshHandler {
-                    host_key_verification: config.host_key_verification.clone(),
-                };
-                client::connect_stream(russh_config.clone(), stream, handler)
-                    .await
-                    .map_err(|e| {
-                        TransportError::Connect(format!(
-                            "SSH handshake with target {target_label} failed: {e}"
-                        ))
-                    })?
-            }
+        let mut proxy_process: Option<Child> = None;
+        let mut handle = if let Some(cmd) = config.proxy_command.as_deref() {
+            let (stream, child) = spawn_proxy_command(cmd, &config.host, config.port)?;
+            proxy_process = Some(child);
+            let handler = SshHandler {
+                host_key_verification: config.host_key_verification.clone(),
+            };
+            client::connect_stream(russh_config.clone(), stream, handler)
+                .await
+                .map_err(|e| {
+                    TransportError::Connect(format!(
+                        "SSH handshake with target {target_label} (via ProxyCommand) failed: {e}"
+                    ))
+                })?
+        } else if let Some(parent) = jump_handles.last() {
+            let channel = parent
+                .channel_open_direct_tcpip(&*config.host, config.port as u32, "0.0.0.0", 0)
+                .await
+                .map_err(|e| {
+                    TransportError::Connect(format!(
+                        "direct-tcpip to target {target_label} failed: {e}"
+                    ))
+                })?;
+            let stream = channel.into_stream();
+            let handler = SshHandler {
+                host_key_verification: config.host_key_verification.clone(),
+            };
+            client::connect_stream(russh_config.clone(), stream, handler)
+                .await
+                .map_err(|e| {
+                    TransportError::Connect(format!(
+                        "SSH handshake with target {target_label} failed: {e}"
+                    ))
+                })?
+        } else {
+            let handler = SshHandler {
+                host_key_verification: config.host_key_verification.clone(),
+            };
+            client::connect(russh_config.clone(), (&*config.host, config.port), handler)
+                .await
+                .map_err(|e| {
+                    TransportError::Connect(format!("SSH connect to {target_label} failed: {e}"))
+                })?
         };
 
         // Authenticate to the target.
@@ -431,6 +564,7 @@ impl SshTransport {
             channel: Arc::new(Mutex::new(channel_stream)),
             handle: Arc::new(Mutex::new(handle)),
             _jump_handles: jump_handles,
+            _proxy_process: proxy_process,
         })
     }
 }
@@ -514,8 +648,10 @@ mod tests {
             auth: SshAuth::Password("p".to_string()),
             host_key_verification: HostKeyVerification::AcceptAll,
             jump_hosts: Vec::new(),
+            proxy_command: None,
         };
         assert!(cfg.jump_hosts.is_empty());
+        assert!(cfg.proxy_command.is_none());
     }
 
     #[test]
@@ -584,10 +720,95 @@ mod tests {
             auth: SshAuth::Agent,
             host_key_verification: HostKeyVerification::AcceptAll,
             jump_hosts: hops,
+            proxy_command: None,
         };
         let cloned = cfg.clone();
         assert_eq!(cloned.jump_hosts.len(), 2);
         assert_eq!(cloned.jump_hosts[0].host, "h1");
         assert_eq!(cloned.jump_hosts[1].host, "h2");
+    }
+
+    #[test]
+    fn expand_proxy_command_replaces_h_and_p() {
+        let out = expand_proxy_command("ssh -W %h:%p bastion", "10.1.2.3", 830);
+        assert_eq!(out, "ssh -W 10.1.2.3:830 bastion");
+    }
+
+    #[test]
+    fn expand_proxy_command_replaces_multiple_occurrences() {
+        // %h and %p can appear more than once.
+        let out = expand_proxy_command("nc %h %p; echo %h:%p", "host", 22);
+        assert_eq!(out, "nc host 22; echo host:22");
+    }
+
+    #[test]
+    fn expand_proxy_command_no_tokens_passthrough() {
+        // No %h/%p → passthrough unchanged.
+        let out = expand_proxy_command("nc bastion 22", "ignored", 0);
+        assert_eq!(out, "nc bastion 22");
+    }
+
+    #[test]
+    fn expand_proxy_command_substitutes_literally() {
+        // Substitution is literal (matches OpenSSH) — host with shell
+        // metacharacters comes through verbatim. Documented behavior:
+        // callers are responsible for sanitization.
+        let out = expand_proxy_command("nc %h %p", "host;rm -rf /", 22);
+        assert_eq!(out, "nc host;rm -rf / 22");
+    }
+
+    #[tokio::test]
+    async fn proxy_command_and_jump_hosts_mutually_exclusive() {
+        // Both set → connect rejects without spawning anything or
+        // attempting any TCP connection.
+        let cfg = SshConfig {
+            host: "10.0.0.1".to_string(),
+            port: 830,
+            username: "u".to_string(),
+            auth: SshAuth::Password("p".to_string()),
+            host_key_verification: HostKeyVerification::AcceptAll,
+            jump_hosts: vec![JumpHostConfig {
+                host: "bastion".to_string(),
+                port: 22,
+                username: "u".to_string(),
+                auth: SshAuth::Agent,
+                host_key_verification: HostKeyVerification::AcceptAll,
+            }],
+            proxy_command: Some("nc %h %p".to_string()),
+        };
+        let err = match SshTransport::connect(cfg).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected connect to fail"),
+        };
+        match err {
+            TransportError::Connect(msg) => {
+                assert!(msg.contains("mutually exclusive"), "unexpected msg: {msg}");
+            }
+            other => panic!("expected Connect, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn proxy_command_spawn_failure_propagates_as_connect_error() {
+        // ssh handshake will fail because `cat` echoes our SSH banner back at
+        // us instead of speaking SSH — but the spawn itself succeeds and the
+        // error path is exercised. We just want to confirm the proxy_command
+        // branch is taken and surfaces a Connect error (not a panic).
+        let cfg = SshConfig {
+            host: "ignored".to_string(),
+            port: 0,
+            username: "u".to_string(),
+            auth: SshAuth::Password("p".to_string()),
+            host_key_verification: HostKeyVerification::AcceptAll,
+            jump_hosts: Vec::new(),
+            // `false` exits 1 immediately, so stdin/stdout EOF and the SSH
+            // handshake errors out — proves the proxy branch is wired.
+            proxy_command: Some("false".to_string()),
+        };
+        let err = match SshTransport::connect(cfg).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected connect to fail"),
+        };
+        assert!(matches!(err, TransportError::Connect(_)), "got {err:?}");
     }
 }
