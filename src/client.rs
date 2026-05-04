@@ -12,6 +12,8 @@ use crate::notification::Notification;
 use crate::session::Session;
 use crate::transport::Transport;
 use crate::transport::ssh::{HostKeyVerification, JumpHostConfig, SshAuth, SshConfig, SshTransport};
+use crate::ssh_config::{SshConfigError, SshConfigFile};
+use std::path::Path;
 #[cfg(feature = "tls")]
 use crate::transport::tls::{TlsConfig, TlsTransport};
 use crate::rpc::RpcErrorInfo;
@@ -299,6 +301,67 @@ impl Client {
             jump_hosts: Vec::new(),
             proxy_command: None,
         }
+    }
+
+    /// Create a connection builder by resolving `alias` against the user's
+    /// default SSH config (`$HOME/.ssh/config`).
+    ///
+    /// Settings derived from the config:
+    ///
+    /// - `HostName` → connect target (falls back to `alias` if unset)
+    /// - `Port` → port (falls back to NETCONF default 830)
+    /// - `User` → [`ClientBuilder::username`]
+    /// - `IdentityFile` → [`ClientBuilder::key_file`]
+    /// - `ProxyJump` → [`ClientBuilder::jump_hosts`]
+    /// - `ProxyCommand` → [`ClientBuilder::proxy_command`]
+    ///
+    /// The returned builder is fully customisable — additional
+    /// `.username()`, `.password()`, `.host_key_verification(...)` calls
+    /// override what the config provided.
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// use rustnetconf::Client;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// // ~/.ssh/config has `Host edge-r1` block with HostName/User/ProxyJump.
+    /// let client = Client::connect_via_ssh_config("edge-r1")?
+    ///     .ssh_agent()
+    ///     .connect()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn connect_via_ssh_config(alias: &str) -> Result<ClientBuilder, SshConfigError> {
+        let path = default_ssh_config_path().ok_or_else(|| SshConfigError::Io {
+            path: std::path::PathBuf::from("~/.ssh/config"),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "$HOME is not set; cannot locate default ssh config",
+            ),
+        })?;
+        Self::connect_via_ssh_config_at(&path, alias)
+    }
+
+    /// Like [`Self::connect_via_ssh_config`] but reads from the explicit
+    /// `path` instead of `$HOME/.ssh/config`.
+    pub fn connect_via_ssh_config_at(
+        path: &Path,
+        alias: &str,
+    ) -> Result<ClientBuilder, SshConfigError> {
+        let cfg = SshConfigFile::load(path)?;
+        let resolved = cfg.resolve(alias);
+
+        let host = resolved.hostname.unwrap_or_else(|| alias.to_string());
+        // NETCONF default is 830, not 22.
+        let port = resolved.port.unwrap_or(830);
+
+        let mut builder = Self::connect(&format!("{host}:{port}"));
+        builder.username = resolved.user;
+        builder.key_file = resolved.identity_file;
+        builder.jump_hosts = resolved.jump_hosts;
+        builder.proxy_command = resolved.proxy_command;
+        Ok(builder)
     }
 
     /// Create a TLS connection builder for NETCONF over TLS (RFC 7589).
@@ -773,6 +836,14 @@ fn parse_address(address: &str) -> (String, u16) {
     (address.to_string(), 830)
 }
 
+/// Locate the user's default SSH config (`$HOME/.ssh/config`). Returns
+/// `None` if `$HOME` is unset.
+fn default_ssh_config_path() -> Option<std::path::PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|home| std::path::PathBuf::from(home).join(".ssh").join("config"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -796,5 +867,94 @@ mod tests {
         let (host, port) = parse_address("router.example.com:22830");
         assert_eq!(host, "router.example.com");
         assert_eq!(port, 22830);
+    }
+
+    #[test]
+    fn ssh_config_alias_populates_builder_fields() {
+        // End-to-end: write a config, load it via the public API, verify
+        // every config-derived field landed in the builder.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        std::fs::write(
+            &path,
+            "Host edge-r1\n  \
+               HostName 10.42.0.1\n  \
+               Port 2830\n  \
+               User netops\n  \
+               IdentityFile /tmp/keys/lab\n  \
+               ProxyJump admin@bastion:2222,h2\n",
+        )
+        .unwrap();
+
+        let builder = Client::connect_via_ssh_config_at(&path, "edge-r1").unwrap();
+        assert_eq!(builder.host, "10.42.0.1");
+        assert_eq!(builder.port, 2830);
+        assert_eq!(builder.username.as_deref(), Some("netops"));
+        assert_eq!(builder.key_file.as_deref(), Some("/tmp/keys/lab"));
+        assert_eq!(builder.jump_hosts.len(), 2);
+        assert_eq!(builder.jump_hosts[0].host, "bastion");
+        assert_eq!(builder.jump_hosts[0].username, "admin");
+        assert_eq!(builder.jump_hosts[0].port, 2222);
+        assert_eq!(builder.jump_hosts[1].host, "h2");
+        assert!(builder.proxy_command.is_none());
+    }
+
+    #[test]
+    fn ssh_config_alias_falls_back_to_alias_when_hostname_unset() {
+        // No HostName directive → fall back to the alias as the connect
+        // target. NETCONF default port (830) when no Port directive.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        std::fs::write(&path, "Host bare\n  User someone\n").unwrap();
+
+        let builder = Client::connect_via_ssh_config_at(&path, "bare").unwrap();
+        assert_eq!(builder.host, "bare");
+        assert_eq!(builder.port, 830);
+        assert_eq!(builder.username.as_deref(), Some("someone"));
+    }
+
+    #[test]
+    fn ssh_config_alias_unmatched_alias_yields_minimal_builder() {
+        // Alias not in config → still works, with bare alias as host and
+        // no auth settings derived. Caller must populate auth manually.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        std::fs::write(&path, "Host other\n  User x\n").unwrap();
+
+        let builder = Client::connect_via_ssh_config_at(&path, "unknown").unwrap();
+        assert_eq!(builder.host, "unknown");
+        assert_eq!(builder.port, 830);
+        assert!(builder.username.is_none());
+        assert!(builder.key_file.is_none());
+        assert!(builder.jump_hosts.is_empty());
+        assert!(builder.proxy_command.is_none());
+    }
+
+    #[test]
+    fn ssh_config_alias_proxy_command_passes_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config");
+        std::fs::write(
+            &path,
+            "Host r1\n  \
+               HostName 10.0.0.1\n  \
+               ProxyCommand ssh -W %h:%p bastion.example.com\n",
+        )
+        .unwrap();
+
+        let builder = Client::connect_via_ssh_config_at(&path, "r1").unwrap();
+        assert_eq!(
+            builder.proxy_command.as_deref(),
+            Some("ssh -W %h:%p bastion.example.com")
+        );
+    }
+
+    #[test]
+    fn ssh_config_alias_missing_file_returns_error() {
+        let err = match Client::connect_via_ssh_config_at(Path::new("/nonexistent/xyz"), "any") {
+            Err(e) => e,
+            Ok(_) => panic!("expected error for missing config file"),
+        };
+        assert!(matches!(err, SshConfigError::Io { .. }));
     }
 }

@@ -33,3 +33,4 @@ webpki-roots = { version = "0.26", optional = true }
 [dev-dependencies]
 tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tempfile = "3"

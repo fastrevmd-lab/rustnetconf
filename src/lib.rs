@@ -44,6 +44,7 @@ pub mod notification;
 pub mod pool;
 pub mod rpc;
 pub mod session;
+pub mod ssh_config;
 pub mod transport;
 pub mod types;
 pub mod vendor;
@@ -54,6 +55,7 @@ pub use error::NetconfError;
 pub use facts::Facts;
 pub use notification::Notification;
 pub use rpc::RpcErrorInfo;
+pub use ssh_config::{ResolvedHost, SshConfigError, SshConfigFile};
 pub use types::{
     Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,
     TestOption,
