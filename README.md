@@ -133,6 +133,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Connect through a jump host (`ProxyJump`)
+
+```rust
+use rustnetconf::{Client, Datastore};
+use rustnetconf::transport::ssh::{JumpHostConfig, SshAuth, HostKeyVerification};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let bastion = JumpHostConfig {
+        host: "bastion.example.com".into(),
+        port: 22,
+        username: "jumpuser".into(),
+        auth: SshAuth::Agent,
+        host_key_verification: HostKeyVerification::AcceptAll,
+    };
+
+    let mut client = Client::connect("10.0.0.1:830")
+        .username("admin")
+        .ssh_agent()
+        .jump_hosts(vec![bastion])
+        .connect()
+        .await?;
+
+    let config = client.get_config(Datastore::Running).await?;
+    println!("{config}");
+    client.close_session().await?;
+    Ok(())
+}
+```
+
+### Connect using your `~/.ssh/config`
+
+```rust
+use rustnetconf::{Client, Datastore};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Resolves `Host edge-r1` from ~/.ssh/config — picks up HostName, Port,
+    // User, IdentityFile, ProxyJump, ProxyCommand. NETCONF default port 830
+    // is used when the config doesn't pin Port.
+    let mut client = Client::connect_via_ssh_config("edge-r1")?
+        .ssh_agent()
+        .connect()
+        .await?;
+
+    let config = client.get_config(Datastore::Running).await?;
+    println!("{config}");
+    client.close_session().await?;
+    Ok(())
+}
+```
+
 ### Connect over TLS (RFC 7589)
 
 > **Note:** vSRX 24.4 has a known TLS handshake issue where the PKI engine cannot
@@ -220,6 +272,7 @@ let config = conn.get_config(Datastore::Running).await?;
 ### NETCONF Client
 - **Async-first** — tokio-based, push config to 500 devices concurrently
 - **SSH + TLS transports** — SSH (RFC 6242) by default, TLS (RFC 7589) via `tls` feature flag
+- **SSH bastion support** — `ProxyJump` (multi-hop), `ProxyCommand`, and OpenSSH `~/.ssh/config` alias resolution
 - **NETCONF 1.0 + 1.1** — EOM and chunked framing with auto-negotiation
 - **All core RPCs** — get, get-config, edit-config, lock/unlock, commit, validate, close/kill-session, discard-changes
 - **Confirmed commit** — auto-rollback safety net (RFC 6241 §8.4)
@@ -254,6 +307,16 @@ let config = conn.get_config(Datastore::Running).await?;
 | SSH agent | SSH | `.ssh_agent()` |
 | Server-only TLS | TLS | `TlsConfig { ca_cert, .. }` |
 | Mutual TLS (mTLS) | TLS | `TlsConfig { client_cert, client_key, .. }` |
+
+### SSH Connection Options
+| Option | Builder API | Notes |
+|--------|-------------|-------|
+| Direct TCP | (default) | No proxy |
+| `ProxyJump` (bastion chain) | `.jump_hosts(Vec<JumpHostConfig>)` | Each hop has its own credentials and host-key policy |
+| `ProxyCommand` | `.proxy_command("ssh -W %h:%p bastion")` | `%h`/`%p` substituted; runs under `sh -c` |
+| `~/.ssh/config` alias | `Client::connect_via_ssh_config("alias")?` | Resolves `HostName`, `Port`, `User`, `IdentityFile`, `ProxyJump`, `ProxyCommand`, `Include` |
+
+`jump_hosts` and `proxy_command` are mutually exclusive at connect time.
 
 ### Error Handling
 
