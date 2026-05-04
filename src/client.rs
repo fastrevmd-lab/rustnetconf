@@ -54,6 +54,7 @@ pub struct ClientBuilder {
     keepalive_interval: Option<Duration>,
     host_key_verification: HostKeyVerification,
     jump_hosts: Vec<JumpHostConfig>,
+    proxy_command: Option<String>,
 }
 
 impl ClientBuilder {
@@ -169,6 +170,39 @@ impl ClientBuilder {
         self
     }
 
+    /// Set an OpenSSH-style `ProxyCommand`.
+    ///
+    /// The command is interpreted by `sh -c` and its stdin/stdout become
+    /// the SSH transport stream to the target. The substrings `%h` and
+    /// `%p` are replaced with the target host and port respectively.
+    ///
+    /// Mutually exclusive with [`Self::jump_hosts`] — setting both causes
+    /// the connection to fail.
+    ///
+    /// **Security:** the command runs in a shell. Substitution is literal
+    /// (no escaping), matching OpenSSH. Callers are responsible for ensuring
+    /// neither the target host nor the command string contains
+    /// attacker-controlled shell metacharacters.
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// use rustnetconf::Client;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = Client::connect("device.internal:830")
+    ///     .username("admin")
+    ///     .ssh_agent()
+    ///     .proxy_command("ssh -W %h:%p bastion.example.com")
+    ///     .connect()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn proxy_command(mut self, command: &str) -> Self {
+        self.proxy_command = Some(command.to_string());
+        self
+    }
+
     /// Establish the SSH connection and perform the NETCONF hello exchange.
     pub async fn connect(self) -> Result<Client, NetconfError> {
         let username = self
@@ -200,6 +234,7 @@ impl ClientBuilder {
             auth,
             host_key_verification: self.host_key_verification,
             jump_hosts: self.jump_hosts,
+            proxy_command: self.proxy_command,
         };
 
         let transport = SshTransport::connect(config.clone()).await?;
@@ -262,6 +297,7 @@ impl Client {
             keepalive_interval: None,
             host_key_verification: HostKeyVerification::default(),
             jump_hosts: Vec::new(),
+            proxy_command: None,
         }
     }
 
