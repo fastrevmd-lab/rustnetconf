@@ -11,7 +11,7 @@ use crate::facts::Facts;
 use crate::notification::Notification;
 use crate::session::Session;
 use crate::transport::Transport;
-use crate::transport::ssh::{HostKeyVerification, SshAuth, SshConfig, SshTransport};
+use crate::transport::ssh::{HostKeyVerification, JumpHostConfig, SshAuth, SshConfig, SshTransport};
 #[cfg(feature = "tls")]
 use crate::transport::tls::{TlsConfig, TlsTransport};
 use crate::rpc::RpcErrorInfo;
@@ -53,6 +53,7 @@ pub struct ClientBuilder {
     gather_facts: bool,
     keepalive_interval: Option<Duration>,
     host_key_verification: HostKeyVerification,
+    jump_hosts: Vec<JumpHostConfig>,
 }
 
 impl ClientBuilder {
@@ -152,6 +153,22 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the ordered list of SSH jump hosts (`ProxyJump` chain) to tunnel
+    /// through before reaching the target.
+    ///
+    /// Each hop carries its own credentials and host-key-verification policy
+    /// because in the real world the bastion frequently has different access
+    /// rules than the device behind it (different user, key, fingerprint).
+    /// The hops are dialed in order: hop 0 directly, hop 1 through hop 0's
+    /// `direct-tcpip`, etc., and the final target through the last hop.
+    ///
+    /// Equivalent to OpenSSH's `ProxyJump h1,h2,...,target`. When empty (the
+    /// default), a direct TCP connection is made to the target.
+    pub fn jump_hosts(mut self, hops: Vec<JumpHostConfig>) -> Self {
+        self.jump_hosts = hops;
+        self
+    }
+
     /// Establish the SSH connection and perform the NETCONF hello exchange.
     pub async fn connect(self) -> Result<Client, NetconfError> {
         let username = self
@@ -182,6 +199,7 @@ impl ClientBuilder {
             username,
             auth,
             host_key_verification: self.host_key_verification,
+            jump_hosts: self.jump_hosts,
         };
 
         let transport = SshTransport::connect(config.clone()).await?;
@@ -243,6 +261,7 @@ impl Client {
             gather_facts: true,
             keepalive_interval: None,
             host_key_verification: HostKeyVerification::default(),
+            jump_hosts: Vec::new(),
         }
     }
 
