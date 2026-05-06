@@ -5,6 +5,7 @@
 //! and mutual TLS authentication.
 
 use async_trait::async_trait;
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -213,14 +214,13 @@ fn build_client_config(config: &TlsConfig) -> Result<rustls::ClientConfig, Trans
 
 /// Load PEM-encoded certificates from a file.
 fn load_pem_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, TransportError> {
-    let file = std::fs::File::open(path).map_err(|e| {
-        TransportError::Tls(format!(
-            "failed to open certificate file '{}': {e}",
-            path.display()
-        ))
-    })?;
-    let mut reader = std::io::BufReader::new(file);
-    let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut reader)
+    let certs: Vec<CertificateDer<'static>> = CertificateDer::pem_file_iter(path)
+        .map_err(|e| {
+            TransportError::Tls(format!(
+                "failed to open certificate file '{}': {e}",
+                path.display()
+            ))
+        })?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| {
             TransportError::Tls(format!(
@@ -241,26 +241,12 @@ fn load_pem_certs(path: &Path) -> Result<Vec<CertificateDer<'static>>, Transport
 
 /// Load a PEM-encoded private key from a file.
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, TransportError> {
-    let file = std::fs::File::open(path).map_err(|e| {
+    let key = PrivateKeyDer::from_pem_file(path).map_err(|e| {
         TransportError::Tls(format!(
-            "failed to open key file '{}': {e}",
+            "failed to load private key from '{}': {e}",
             path.display()
         ))
     })?;
-    let mut reader = std::io::BufReader::new(file);
-    let key = rustls_pemfile::private_key(&mut reader)
-        .map_err(|e| {
-            TransportError::Tls(format!(
-                "failed to parse private key from '{}': {e}",
-                path.display()
-            ))
-        })?
-        .ok_or_else(|| {
-            TransportError::Tls(format!(
-                "no private key found in '{}'",
-                path.display()
-            ))
-        })?;
 
     Ok(key)
 }
