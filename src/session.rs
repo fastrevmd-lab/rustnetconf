@@ -91,6 +91,9 @@ pub struct Session {
     notification_buffer: VecDeque<Notification>,
     /// True after a successful `create-subscription` RPC.
     has_subscription: bool,
+    /// Maximum time to wait for an RPC reply. `None` means wait forever
+    /// (backward-compatible default).
+    rpc_timeout: Option<Duration>,
 }
 
 impl Session {
@@ -116,6 +119,7 @@ impl Session {
             private_config_open: false,
             notification_buffer: VecDeque::new(),
             has_subscription: false,
+            rpc_timeout: None,
         }
     }
 
@@ -254,6 +258,18 @@ impl Session {
         self.keepalive_interval = Some(interval);
     }
 
+    /// Set the maximum time to wait for an RPC reply.
+    ///
+    /// When set, [`send_rpc_raw()`] wraps the read loop with
+    /// [`tokio::time::timeout()`]. If the device does not reply within
+    /// the deadline, `RpcError::Timeout` is returned.
+    ///
+    /// `None` (the default) means wait forever, preserving backward
+    /// compatibility.
+    pub fn set_rpc_timeout(&mut self, timeout: Option<Duration>) {
+        self.rpc_timeout = timeout;
+    }
+
     /// Check if the session is alive (established and not closed).
     ///
     /// Fast in-memory check — does not send any RPC.
@@ -318,6 +334,10 @@ impl Session {
     /// If a stale response from a previously cancelled RPC is received
     /// (message-id mismatch), it is drained and the next message is read.
     /// This repeats up to [`MAX_STALE_DRAIN`] times before returning an error.
+    ///
+    /// When `rpc_timeout` is configured, the entire read loop is bounded by
+    /// [`tokio::time::timeout()`]. If the device does not produce a matching
+    /// reply within the deadline, `RpcError::Timeout` is returned.
     async fn send_rpc_raw(&mut self, xml: &str, message_id: &str) -> Result<RpcReply, NetconfError> {
         self.ensure_established()?;
 
@@ -326,6 +346,21 @@ impl Session {
 
         self.transport.write_all(&framed).await?;
 
+        match self.rpc_timeout {
+            Some(timeout) => {
+                tokio::time::timeout(timeout, self.read_rpc_reply(message_id))
+                    .await
+                    .map_err(|_| crate::error::RpcError::Timeout(timeout))?
+            }
+            None => self.read_rpc_reply(message_id).await,
+        }
+    }
+
+    /// Internal helper: read messages until a matching RPC reply arrives.
+    ///
+    /// Extracted from `send_rpc_raw` so that `tokio::time::timeout` can
+    /// wrap the entire read loop.
+    async fn read_rpc_reply(&mut self, message_id: &str) -> Result<RpcReply, NetconfError> {
         let mut drain_attempt = 0;
         loop {
             let response = self.read_message().await?;
