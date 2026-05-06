@@ -195,18 +195,24 @@ fn find_key_child(children: &[XmlNode]) -> Option<String> {
 }
 
 /// Diff matched elements (same name/key, both sides exist).
+///
+/// Iterates all paired elements. Extra elements on either side (when the lists
+/// have different lengths) are reported as additions or removals.
 fn diff_matched_elements(
     desired: &[&XmlNode],
     running: &[&XmlNode],
     path: &str,
     entries: &mut Vec<DiffEntry>,
 ) {
-    // For simplicity, compare first desired vs first running
-    if let (Some(d), Some(r)) = (desired.first(), running.first()) {
+    let paired_len = desired.len().min(running.len());
+
+    // Compare each pair in order.
+    for (d, r) in desired[..paired_len].iter().zip(running[..paired_len].iter()) {
         if let (
-                XmlNode::Element { children: dc, .. },
-                XmlNode::Element { children: rc, .. },
-            ) = (d, r) {
+            XmlNode::Element { children: dc, .. },
+            XmlNode::Element { children: rc, .. },
+        ) = (d, r)
+        {
             // Check if these are leaf elements (contain only text)
             let d_text = extract_text(dc);
             let r_text = extract_text(rc);
@@ -230,6 +236,26 @@ fn diff_matched_elements(
                 }
             }
         }
+    }
+
+    // Extra desired elements not present in running → Added.
+    for node in &desired[paired_len..] {
+        entries.push(DiffEntry {
+            path: path.to_string(),
+            kind: DiffKind::Added {
+                value: node_to_string(node),
+            },
+        });
+    }
+
+    // Extra running elements not present in desired → Removed.
+    for node in &running[paired_len..] {
+        entries.push(DiffEntry {
+            path: path.to_string(),
+            kind: DiffKind::Removed {
+                value: node_to_string(node),
+            },
+        });
     }
 }
 
