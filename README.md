@@ -12,6 +12,37 @@ Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and
 | **rustnetconf-yang** | YANG model code generation (compile-time config validation) |
 | **rustnetconf-cli** | Terraform-like CLI tool (`netconf` binary) |
 
+## What's New in v0.10.0
+
+**Breaking changes:**
+- `HostKeyVerification` no longer implements `Default` — callers must explicitly choose a host key policy
+- `SshAuth::Password` and `SshAuth::KeyFile { passphrase }` now use `Zeroizing<String>` instead of `String`
+- User-provided XML content (RPC bodies, filters, configs) is now validated for well-formedness before sending
+
+**Security fixes:**
+- Shell injection via ProxyCommand `%h`/`%p` substitution — values are now shell-escaped
+- Credentials (passwords, passphrases) zeroized on drop via the `zeroize` crate
+- XML fragment validation prevents injection through malformed RPC content
+- TLS `danger_accept_invalid_certs` now emits a detailed warning about the full scope of the bypass
+- CLI device names validated to prevent path traversal; state files written with `0600` permissions
+
+**New features:**
+- Configurable RPC timeout (`.rpc_timeout(Duration)`) — prevents indefinite blocking on unresponsive devices
+- Configurable read buffer size (`.max_read_buffer(bytes)`) — defaults to 100 MB
+- IPv6 address support — bracket notation (`[::1]:830`) and bare IPv6 addresses
+- Capability normalization — legacy Junos capability URIs are mapped to standard URIs during session establishment
+
+**Quality improvements:**
+- Connection pool health checks — dead connections are discarded on checkout and drop instead of being recycled
+- Blocking `std::fs::read_to_string` in async context replaced with `tokio::fs`
+- Unnecessary `Arc<Mutex<>>` removed from `SshTransport`
+- `AtomicU64` message counter replaced with plain `u64` (Session is `&mut self` only)
+- YANG codegen: full container/list XML serialization, complete Rust keyword list, hard error on module load failure
+- CLI: plan summary fixed for non-JSON mode, diff engine compares all list elements
+- Removed unused `futures` dependency and `quick-xml` serialize feature
+- `ErrorTag` implements `std::str::FromStr`; `Session::validate()` checks `:validate` capability
+- Dependency updates: russh 0.60.2, rustls 0.23.40, tokio 1.52.2, rustls-webpki 0.103.13
+
 ## RFC Support
 
 | RFC | Feature | Status |
@@ -251,6 +282,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 use rustnetconf::pool::{DevicePool, DeviceConfig};
 use rustnetconf::transport::ssh::SshAuth;
 use rustnetconf::Datastore;
+use zeroize::Zeroizing;
 
 let pool = DevicePool::builder()
     .max_connections(50)
@@ -272,14 +304,17 @@ let config = conn.get_config(Datastore::Running).await?;
 ### NETCONF Client
 - **Async-first** — tokio-based, push config to 500 devices concurrently
 - **SSH + TLS transports** — SSH (RFC 6242) by default, TLS (RFC 7589) via `tls` feature flag
-- **SSH bastion support** — `ProxyJump` (multi-hop), `ProxyCommand`, and OpenSSH `~/.ssh/config` alias resolution
+- **SSH bastion support** — `ProxyJump` (multi-hop), `ProxyCommand` (shell-escaped), and OpenSSH `~/.ssh/config` alias resolution
 - **NETCONF 1.0 + 1.1** — EOM and chunked framing with auto-negotiation
 - **All core RPCs** — get, get-config, edit-config, lock/unlock, commit, validate, close/kill-session, discard-changes
 - **Confirmed commit** — auto-rollback safety net (RFC 6241 §8.4)
 - **Event notifications** — `create-subscription`, inline notification demux, buffered drain/recv API (RFC 5277)
+- **RPC timeout** — configurable per-session deadline prevents indefinite blocking on unresponsive devices
+- **XML fragment validation** — user-provided RPC content is validated before insertion to prevent XML injection
 - **CommitUnknown detection** — distinguishes "commit failed" from "maybe committed, connection lost"
 - **Stale lock recovery** — `lock_or_kill_stale()` kills crashed sessions holding locks
 - **Framing mismatch detection** — catches firmware bugs where devices send wrong framing
+- **IPv6 support** — connect to devices using bracket notation (`[::1]:830`) or bare IPv6 addresses
 
 ### Vendor Profiles
 - **Auto-detection** from device `<hello>` capabilities
@@ -290,13 +325,15 @@ let config = conn.get_config(Datastore::Running).await?;
 ### Connection Pool
 - Tokio semaphore-based concurrency limiting
 - Checkout with timeout (no blocking forever)
-- Auto-checkin on drop, broken connections discarded
+- Auto-checkin on drop with health check — dead connections are discarded, not recycled
 - Connection reuse from idle pool
 
 ### YANG Code Generation
 - Build-time generation from `.yang` model files via libyang2
 - Typed Rust structs with serde Serialize/Deserialize
+- Full XML serialization — leaves, containers, and lists
 - Correct type mapping (string, bool, uint32, etc.)
+- Complete Rust keyword escaping for YANG node names
 - Bundled IETF models: ietf-interfaces, ietf-ip, ietf-yang-types, ietf-inet-types
 
 ### Authentication
@@ -313,7 +350,7 @@ let config = conn.get_config(Datastore::Running).await?;
 |--------|-------------|-------|
 | Direct TCP | (default) | No proxy |
 | `ProxyJump` (bastion chain) | `.jump_hosts(Vec<JumpHostConfig>)` | Each hop has its own credentials and host-key policy |
-| `ProxyCommand` | `.proxy_command("ssh -W %h:%p bastion")` | `%h`/`%p` substituted; runs under `sh -c` |
+| `ProxyCommand` | `.proxy_command("ssh -W %h:%p bastion")` | `%h`/`%p` shell-escaped and substituted; runs under `sh -c` |
 | `~/.ssh/config` alias | `Client::connect_via_ssh_config("alias")?` | Resolves `HostName`, `Port`, `User`, `IdentityFile`, `ProxyJump`, `ProxyCommand`, `Include` |
 
 `jump_hosts` and `proxy_command` are mutually exclusive at connect time.
@@ -349,8 +386,8 @@ match result {
 
 ## Testing
 
-140+ tests across the workspace:
-- **Unit tests** — framing, RPC serialization, capability parsing, vendor profiles, diff engine, inventory parsing
+197 tests across the workspace:
+- **Unit tests** — framing, RPC serialization, capability parsing, vendor profiles, diff engine, inventory parsing, IPv6 address parsing, XML fragment validation, capability normalization
 - **Mock transport tests** — session state machine, CommitUnknown detection, lock recovery
 - **Integration tests** — 32 tests against a live Juniper vSRX including full edit-config round trips, vendor auto-detection, connection pooling, and concurrent sessions
 
@@ -366,22 +403,27 @@ SKIP_INTEGRATION=1 cargo test             # Skip tests requiring a device
 
 - **RSA timing sidechannel (RUSTSEC-2023-0071)** — The `rsa` crate (transitive dependency via `russh → internal-russh-forked-ssh-key → rsa`) has a known timing sidechannel that could theoretically allow RSA key recovery. No upstream fix is available. **Mitigation:** Use Ed25519 or ECDSA keys instead of RSA for SSH authentication.
 
-- **Credentials not zeroized in memory** — Passwords and key passphrases are stored as `String`, which is not securely zeroed on drop. Credentials may persist in process memory until overwritten. **Mitigation:** Prefer SSH agent authentication (`ssh_agent()`) over inline passwords/passphrases, and avoid core dumps in production.
-
 - **Debug logs may contain file paths** — When SSH key file loading fails, the key file path is included in `tracing::debug!` output. This is not exposed at info/warn/error levels. **Mitigation:** Disable debug-level logging in production, or filter `rustnetconf::transport` logs.
 
 ### Security Features
 
-- **SSH host key verification** — Use `host_key_verification(HostKeyVerification::Fingerprint("SHA256:..."))` to pin a device's host key and prevent MITM attacks. Default is `AcceptAll` (with a logged warning), consistent with most network automation tools.
+- **Credential zeroization** — Passwords and key passphrases use `Zeroizing<String>` (via the `zeroize` crate) and are securely erased from memory on drop.
+- **SSH host key verification** — `HostKeyVerification` must be set explicitly (no `Default` impl). Use `Fingerprint("SHA256:...")` to pin host keys in production. `AcceptAll` is available for lab use but emits a `tracing::warn!`.
+- **Shell-escaped ProxyCommand** — `%h` and `%p` substitutions are shell-escaped to prevent command injection via malicious hostnames.
+- **XML fragment validation** — All user-provided RPC content is validated for well-formedness before insertion, preventing XML injection.
 - **XML attribute escaping** — All message-id values are escaped to prevent XML attribute injection.
-- **Read buffer limits** — Session read buffers are capped at 100 MB to prevent memory exhaustion from malformed device responses.
+- **TLS bypass warnings** — `danger_accept_invalid_certs` emits a detailed warning explaining that ALL certificate validation is bypassed (trust chain, signatures, hostname, and expiry).
+- **Read buffer limits** — Session read buffers default to 100 MB (configurable via `.max_read_buffer()`) to prevent memory exhaustion.
+- **RPC timeout** — Configurable via `.rpc_timeout()` to prevent indefinite blocking on unresponsive devices.
+- **CLI input validation** — Device names are validated to prevent path traversal; state files are written with `0600` permissions on Unix.
 - **Typed error hierarchy** — Structured error types (`ChannelClosed`, `SessionExpired`, `MessageIdMismatch`) enable precise error handling without string matching.
 - **No unsafe code** — The entire codebase uses safe Rust.
 
 ### Security Best Practices
 
 - Use Ed25519 SSH keys (not RSA) for device authentication
-- Set `host_key_verification(HostKeyVerification::Fingerprint(...))` in production
+- Set `host_key_verification(HostKeyVerification::Fingerprint(...))` in production — `HostKeyVerification` has no default, so you must choose explicitly
+- Set `.rpc_timeout(Duration::from_secs(30))` to prevent hanging on unresponsive devices
 - Prefer SSH agent auth over inline passwords
 - Store credentials in inventory.toml with restricted file permissions (`chmod 600`)
 - Run the CLI on trusted management networks with direct device connectivity
@@ -394,20 +436,29 @@ To report a security vulnerability, please open an issue on GitHub.
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| `async-trait` | 0.1.89 | Async trait support |
-| `futures` | 0.3.32 | Async combinators |
-| `quick-xml` | 0.37.5 | XML parsing (NETCONF RPC encode/decode) |
-| `russh` | 0.60.0 | SSH transport (pure Rust, no libssh2) |
-| `thiserror` | 2.0.18 | Error derive macros |
-| `tokio` | 1.50.0 | Async runtime |
-| `tracing` | 0.1.44 | Structured logging/tracing |
+| `async-trait` | 0.1 | Async trait support |
+| `quick-xml` | 0.37 | XML parsing (NETCONF RPC encode/decode) |
+| `russh` | 0.60 | SSH transport (pure Rust, no libssh2) |
+| `thiserror` | 2 | Error derive macros |
+| `tokio` | 1 | Async runtime |
+| `tracing` | 0.1 | Structured logging/tracing |
+| `zeroize` | 1 | Secure credential erasure on drop |
+
+Optional (behind `tls` feature):
+
+| Crate | Version | Purpose |
+|-------|---------|---------|
+| `rustls` | 0.23 | TLS transport (pure Rust, no OpenSSL) |
+| `tokio-rustls` | 0.26 | Async TLS stream adapter |
+| `webpki-roots` | 0.26 | Mozilla CA root certificates |
 
 Dev-only:
 
 | Crate | Version | Purpose |
 |-------|---------|---------|
-| `tokio-test` | 0.4.5 | Async test utilities |
-| `tracing-subscriber` | 0.3.23 | Log subscriber for tests |
+| `tokio-test` | 0.4 | Async test utilities |
+| `tracing-subscriber` | 0.3 | Log subscriber for tests |
+| `tempfile` | 3 | Temporary directories for tests |
 
 ## License
 
