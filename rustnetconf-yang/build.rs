@@ -53,18 +53,29 @@ fn main() {
     ctx.set_searchdir(&yang_dir)
         .expect("failed to set yang search directory");
 
-    // Load each module
+    // Load each module; collect failures and hard-error at the end so users
+    // never silently end up with missing generated types.
     let mut module_names = Vec::new();
+    let mut load_errors: Vec<String> = Vec::new();
     for (name, revision) in &yang_files {
         match ctx.load_module(name, revision.as_deref(), &[]) {
             Ok(_module) => {
-                eprintln!("cargo:warning=Loaded YANG module: {name}");
+                println!("cargo:warning=Loaded YANG module: {name}");
                 module_names.push(name.clone());
             }
             Err(e) => {
-                eprintln!("cargo:warning=Failed to load {name}: {e}");
+                let msg = format!("Failed to load YANG module '{name}': {e}");
+                println!("cargo:warning={msg}");
+                load_errors.push(msg);
             }
         }
+    }
+    if !load_errors.is_empty() {
+        panic!(
+            "rustnetconf-yang: {} YANG module(s) failed to load — types were NOT generated.\n{}",
+            load_errors.len(),
+            load_errors.join("\n")
+        );
     }
 
     // Generate Rust code
