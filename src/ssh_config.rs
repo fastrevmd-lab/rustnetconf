@@ -287,8 +287,8 @@ fn pattern_list_matches(patterns: &[HostPattern], target: &str) -> bool {
 ///
 /// Each entry becomes a [`JumpHostConfig`] with [`SshAuth::Agent`] as
 /// the default auth method (matching the most common deployment) and
-/// [`HostKeyVerification::AcceptAll`] (the rustnetconf default — the
-/// caller can tighten per-hop after resolution).
+/// [`HostKeyVerification::AcceptAll`] (the caller can tighten per-hop
+/// after resolution).
 pub fn parse_proxy_jump(value: &str) -> Vec<JumpHostConfig> {
     value
         .split(',')
@@ -306,6 +306,16 @@ pub fn parse_proxy_jump(value: &str) -> Vec<JumpHostConfig> {
                 }
                 None => (host_port.to_string(), 22u16),
             };
+            // TODO: support per-hop host key verification configuration.
+            // Currently all jump hops default to AcceptAll which is insecure
+            // for production use. A future API should allow callers to supply
+            // a verification policy per hop (e.g. via a callback or a map of
+            // host→fingerprint).
+            tracing::warn!(
+                jump_host = %host,
+                "ProxyJump hop uses AcceptAll host key verification — \
+                 per-hop verification is not yet configurable"
+            );
             JumpHostConfig {
                 host,
                 port,
