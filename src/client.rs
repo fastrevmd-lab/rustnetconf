@@ -57,6 +57,7 @@ pub struct ClientBuilder {
     host_key_verification: HostKeyVerification,
     jump_hosts: Vec<JumpHostConfig>,
     proxy_command: Option<String>,
+    rpc_timeout: Option<Duration>,
 }
 
 impl ClientBuilder {
@@ -205,6 +206,34 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the maximum time to wait for an RPC reply.
+    ///
+    /// When set, each RPC is bounded by [`tokio::time::timeout()`]. If the
+    /// device does not respond within the deadline, `RpcError::Timeout` is
+    /// returned.
+    ///
+    /// Default: `None` (wait forever).
+    ///
+    /// # Examples
+    /// ```rust,no_run
+    /// use rustnetconf::Client;
+    /// use std::time::Duration;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let client = Client::connect("10.0.0.1:830")
+    ///     .username("admin")
+    ///     .password("secret")
+    ///     .rpc_timeout(Duration::from_secs(30))
+    ///     .connect()
+    ///     .await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn rpc_timeout(mut self, timeout: Duration) -> Self {
+        self.rpc_timeout = Some(timeout);
+        self
+    }
+
     /// Establish the SSH connection and perform the NETCONF hello exchange.
     pub async fn connect(self) -> Result<Client, NetconfError> {
         let username = self
@@ -246,6 +275,10 @@ impl ClientBuilder {
             session.set_keepalive_interval(interval);
         }
 
+        if self.rpc_timeout.is_some() {
+            session.set_rpc_timeout(self.rpc_timeout);
+        }
+
         // Set explicit vendor profile if provided (overrides auto-detection)
         if let Some(profile) = self.vendor_profile {
             session.set_vendor_profile(profile);
@@ -262,6 +295,7 @@ impl ClientBuilder {
             transport_config: TransportConfig::Ssh(config),
             gather_facts: self.gather_facts,
             keepalive_interval: self.keepalive_interval,
+            rpc_timeout: self.rpc_timeout,
         })
     }
 }
@@ -278,6 +312,8 @@ pub struct Client {
     gather_facts: bool,
     /// Keepalive interval (None = disabled).
     keepalive_interval: Option<Duration>,
+    /// RPC timeout (None = wait forever).
+    rpc_timeout: Option<Duration>,
 }
 
 impl Client {
@@ -300,6 +336,7 @@ impl Client {
             host_key_verification: HostKeyVerification::default(),
             jump_hosts: Vec::new(),
             proxy_command: None,
+            rpc_timeout: None,
         }
     }
 
@@ -390,6 +427,7 @@ impl Client {
             vendor_profile: None,
             gather_facts: true,
             keepalive_interval: None,
+            rpc_timeout: None,
         }
     }
 
@@ -482,6 +520,10 @@ impl Client {
 
         if let Some(interval) = self.keepalive_interval {
             session.set_keepalive_interval(interval);
+        }
+
+        if self.rpc_timeout.is_some() {
+            session.set_rpc_timeout(self.rpc_timeout);
         }
 
         session.establish().await?;
@@ -774,6 +816,7 @@ pub struct TlsClientBuilder {
     vendor_profile: Option<Box<dyn VendorProfile>>,
     gather_facts: bool,
     keepalive_interval: Option<Duration>,
+    rpc_timeout: Option<Duration>,
 }
 
 #[cfg(feature = "tls")]
@@ -796,6 +839,14 @@ impl TlsClientBuilder {
         self
     }
 
+    /// Set the maximum time to wait for an RPC reply.
+    ///
+    /// Default: `None` (wait forever).
+    pub fn rpc_timeout(mut self, timeout: Duration) -> Self {
+        self.rpc_timeout = Some(timeout);
+        self
+    }
+
     /// Establish the TLS connection and perform the NETCONF hello exchange.
     pub async fn connect(self) -> Result<Client, NetconfError> {
         let transport = TlsTransport::connect(&self.tls_config).await?;
@@ -803,6 +854,10 @@ impl TlsClientBuilder {
 
         if let Some(interval) = self.keepalive_interval {
             session.set_keepalive_interval(interval);
+        }
+
+        if self.rpc_timeout.is_some() {
+            session.set_rpc_timeout(self.rpc_timeout);
         }
 
         if let Some(profile) = self.vendor_profile {
@@ -820,6 +875,7 @@ impl TlsClientBuilder {
             transport_config: TransportConfig::Tls(self.tls_config),
             gather_facts: self.gather_facts,
             keepalive_interval: self.keepalive_interval,
+            rpc_timeout: self.rpc_timeout,
         })
     }
 }
