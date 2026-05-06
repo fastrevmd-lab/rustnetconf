@@ -21,6 +21,25 @@ use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::process;
 
+/// Validate that a device name contains only safe characters.
+///
+/// Allowed: alphanumeric characters, hyphens (`-`), underscores (`_`), and dots (`.`).
+/// Rejects path traversal sequences and shell-special characters.
+fn validate_device_name(name: &str) -> Result<(), String> {
+    if name.is_empty() {
+        return Err("device name must not be empty".to_string());
+    }
+    let valid = name
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.');
+    if !valid {
+        return Err(format!(
+            "invalid device name '{name}': only alphanumeric characters, hyphens, underscores, and dots are allowed"
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Parser)]
 #[command(name = "netconf", version, about = "Declarative NETCONF config management")]
 struct Cli {
@@ -80,24 +99,30 @@ async fn main() {
     let project_dir = &cli.project_dir;
 
     let result = match cli.command {
-        Commands::Plan { device, json } => {
-            commands::plan::run(project_dir, &device, json).await.map(|_| ())
-        }
-        Commands::Apply { device, yes } => {
-            commands::apply::run(project_dir, &device, yes).await
-        }
-        Commands::Confirm { device } => {
-            commands::confirm::run(project_dir, &device).await
-        }
-        Commands::Rollback { device } => {
-            commands::rollback::run(project_dir, &device).await
-        }
-        Commands::Get { device } => {
-            commands::get::run(project_dir, &device).await
-        }
-        Commands::Validate { device } => {
-            commands::validate::run(project_dir, &device).await
-        }
+        Commands::Plan { device, json } => match validate_device_name(&device) {
+            Err(e) => Err(e),
+            Ok(()) => commands::plan::run(project_dir, &device, json).await.map(|_| ()),
+        },
+        Commands::Apply { device, yes } => match validate_device_name(&device) {
+            Err(e) => Err(e),
+            Ok(()) => commands::apply::run(project_dir, &device, yes).await,
+        },
+        Commands::Confirm { device } => match validate_device_name(&device) {
+            Err(e) => Err(e),
+            Ok(()) => commands::confirm::run(project_dir, &device).await,
+        },
+        Commands::Rollback { device } => match validate_device_name(&device) {
+            Err(e) => Err(e),
+            Ok(()) => commands::rollback::run(project_dir, &device).await,
+        },
+        Commands::Get { device } => match validate_device_name(&device) {
+            Err(e) => Err(e),
+            Ok(()) => commands::get::run(project_dir, &device).await,
+        },
+        Commands::Validate { device } => match validate_device_name(&device) {
+            Err(e) => Err(e),
+            Ok(()) => commands::validate::run(project_dir, &device).await,
+        },
         Commands::Init => {
             commands::init::run(project_dir)
         }
