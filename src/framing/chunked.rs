@@ -33,6 +33,11 @@ impl ChunkedFramer {
 impl Framer for ChunkedFramer {
     fn encode(&self, message: &str) -> Vec<u8> {
         let data = message.as_bytes();
+        // Empty messages: just emit the end-of-chunks marker — a zero-length
+        // chunk header (\n#0\n) is rejected by the decoder per RFC 6242.
+        if data.is_empty() {
+            return END_OF_CHUNKS.to_vec();
+        }
         // Single chunk encoding: \n#<len>\n<data>\n##\n
         let header = format!("\n#{}\n", data.len());
         let mut buf = Vec::with_capacity(header.len() + data.len() + END_OF_CHUNKS.len());
@@ -250,10 +255,18 @@ mod tests {
     fn test_encode_empty_message() {
         let framer = ChunkedFramer::new();
         let encoded = framer.encode("");
-        // \n#0\n\n##\n — but we encode with len 0
-        // Actually, an empty message produces \n#0\n which is invalid per our decoder
-        // This is an edge case: empty NETCONF messages shouldn't happen in practice
-        assert_eq!(encoded, b"\n#0\n\n##\n");
+        // Empty message must encode as just the end-of-chunks marker.
+        // A \n#0\n chunk header is rejected by the decoder per RFC 6242.
+        assert_eq!(encoded, b"\n##\n");
+    }
+
+    #[test]
+    fn test_encode_decode_roundtrip_empty() {
+        let framer = ChunkedFramer::new();
+        let encoded = framer.encode("");
+        let (decoded, consumed) = framer.decode(&encoded).unwrap().unwrap();
+        assert_eq!(decoded, "");
+        assert_eq!(consumed, encoded.len());
     }
 
     #[test]

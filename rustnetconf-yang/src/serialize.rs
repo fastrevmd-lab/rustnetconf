@@ -5,13 +5,26 @@
 //! typed structs.
 
 use quick_xml::events::{BytesEnd, BytesStart, BytesText, Event};
-use quick_xml::Writer;
-use std::io::Cursor;
+pub use quick_xml::Writer;
+pub use std::io::Cursor;
+
+/// Trait for types that can serialize their child fields into an XML writer.
+///
+/// Implemented by the code generator for all YANG structs (containers and list
+/// entries). This allows containers and list entries to embed their XML into a
+/// parent writer without creating a standalone document.
+pub trait WriteXmlFields {
+    /// Write this value's child elements into `writer`.
+    ///
+    /// Does **not** write the surrounding element start/end tags — the caller
+    /// is responsible for those. This makes it easy to compose nested XML.
+    fn write_xml_fields(&self, writer: &mut Writer<Cursor<Vec<u8>>>) -> Result<(), XmlError>;
+}
 
 /// Trait for types that can be serialized to NETCONF XML.
 ///
 /// Implemented by the code generator for each YANG container/list.
-pub trait ToNetconfXml {
+pub trait ToNetconfXml: WriteXmlFields {
     /// The YANG module namespace URI.
     fn namespace(&self) -> &str;
 
@@ -82,6 +95,24 @@ pub fn write_end(
     writer: &mut Writer<Cursor<Vec<u8>>>,
     name: &str,
 ) -> Result<(), XmlError> {
+    writer
+        .write_event(Event::End(BytesEnd::new(name)))
+        .map_err(|e| XmlError::Write(e.to_string()))?;
+    Ok(())
+}
+
+/// Write a named XML element whose content comes from a [`WriteXmlFields`] value.
+///
+/// Writes `<name>`, calls `value.write_xml_fields()`, then writes `</name>`.
+pub fn write_element_with_fields<T: WriteXmlFields>(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    name: &str,
+    value: &T,
+) -> Result<(), XmlError> {
+    writer
+        .write_event(Event::Start(BytesStart::new(name)))
+        .map_err(|e| XmlError::Write(e.to_string()))?;
+    value.write_xml_fields(writer)?;
     writer
         .write_event(Event::End(BytesEnd::new(name)))
         .map_err(|e| XmlError::Write(e.to_string()))?;

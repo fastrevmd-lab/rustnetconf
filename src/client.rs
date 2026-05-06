@@ -882,13 +882,44 @@ impl TlsClientBuilder {
 
 /// Parse an address string into (host, port).
 ///
-/// Accepts `"host:port"` or `"host"` (defaults to NETCONF port 830).
+/// Accepts the following forms:
+/// - `"host:port"` — IPv4 or hostname with explicit port
+/// - `"host"` — IPv4 or hostname, defaults to NETCONF port 830
+/// - `"[::1]:830"` — IPv6 with bracket notation and explicit port
+/// - `"[::1]"` — IPv6 with bracket notation, defaults to port 830
+/// - `"2001:db8::1"` — bare IPv6 address (no port), defaults to port 830
 fn parse_address(address: &str) -> (String, u16) {
-    if let Some((host, port_str)) = address.rsplit_once(':') {
-        if let Ok(port) = port_str.parse::<u16>() {
-            return (host.to_string(), port);
+    // Bracket notation: [host]:port or [host]
+    if let Some(rest) = address.strip_prefix('[') {
+        if let Some(bracket_end) = rest.find(']') {
+            let host = &rest[..bracket_end];
+            let after_bracket = &rest[bracket_end + 1..];
+            if let Some(port_str) = after_bracket.strip_prefix(':') {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    return (host.to_string(), port);
+                }
+            }
+            // [host] with no port, or malformed port — use default
+            return (host.to_string(), 830);
         }
     }
+
+    // Non-bracket: try rsplit_once for "host:port".
+    // If there's more than one colon it's a bare IPv6 address — use default port.
+    if address.contains(':') {
+        let colon_count = address.bytes().filter(|&b| b == b':').count();
+        if colon_count == 1 {
+            // Exactly one colon: must be host:port
+            if let Some((host, port_str)) = address.split_once(':') {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    return (host.to_string(), port);
+                }
+            }
+        }
+        // Multiple colons: bare IPv6 address, use default port
+        return (address.to_string(), 830);
+    }
+
     (address.to_string(), 830)
 }
 
@@ -923,6 +954,41 @@ mod tests {
         let (host, port) = parse_address("router.example.com:22830");
         assert_eq!(host, "router.example.com");
         assert_eq!(port, 22830);
+    }
+
+    #[test]
+    fn test_parse_address_ipv6_bracket_with_port() {
+        let (host, port) = parse_address("[::1]:830");
+        assert_eq!(host, "::1");
+        assert_eq!(port, 830);
+    }
+
+    #[test]
+    fn test_parse_address_ipv6_full_bracket_with_port() {
+        let (host, port) = parse_address("[2001:db8::1]:830");
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 830);
+    }
+
+    #[test]
+    fn test_parse_address_ipv6_bracket_no_port() {
+        let (host, port) = parse_address("[::1]");
+        assert_eq!(host, "::1");
+        assert_eq!(port, 830);
+    }
+
+    #[test]
+    fn test_parse_address_bare_ipv6_uses_default_port() {
+        let (host, port) = parse_address("2001:db8::1");
+        assert_eq!(host, "2001:db8::1");
+        assert_eq!(port, 830);
+    }
+
+    #[test]
+    fn test_parse_address_bare_ipv6_loopback_uses_default_port() {
+        let (host, port) = parse_address("::1");
+        assert_eq!(host, "::1");
+        assert_eq!(port, 830);
     }
 
     #[test]

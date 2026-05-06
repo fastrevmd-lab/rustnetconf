@@ -141,8 +141,11 @@ fn generate_node(
             writeln!(output, "{ind}}}").unwrap();
             writeln!(output).unwrap();
 
+            // Generate WriteXmlFields for all containers (top-level and nested)
+            generate_write_xml_fields_impl(output, node, &rust_name, indent);
+
             if is_top_level {
-                generate_to_xml_impl(output, node, &rust_name, &node_name, indent);
+                generate_to_xml_impl(output, &rust_name, &node_name, indent);
             }
 
             for child in node.children() {
@@ -164,6 +167,9 @@ fn generate_node(
 
             writeln!(output, "{ind}}}").unwrap();
             writeln!(output).unwrap();
+
+            // Generate WriteXmlFields for list entries so they can be embedded
+            generate_write_xml_fields_impl(output, node, &rust_name, indent);
 
             for child in node.children() {
                 if matches!(child.kind(), SchemaNodeKind::Container | SchemaNodeKind::List) {
@@ -210,10 +216,64 @@ fn generate_field(output: &mut String, node: &SchemaNode, indent: usize) {
     }
 }
 
-/// Generate ToNetconfXml implementation for a top-level container.
-fn generate_to_xml_impl(
+/// Generate WriteXmlFields implementation for a container or list entry struct.
+///
+/// This impl writes all child fields (leaves, leaf-lists, containers, lists)
+/// into a caller-supplied writer. It does not write the surrounding element tags.
+fn generate_write_xml_fields_impl(
     output: &mut String,
     node: &SchemaNode,
+    rust_name: &str,
+    indent: usize,
+) {
+    let ind = "    ".repeat(indent);
+
+    writeln!(output, "{ind}impl WriteXmlFields for {rust_name} {{").unwrap();
+    writeln!(output, "{ind}    fn write_xml_fields(&self, writer: &mut Writer<Cursor<Vec<u8>>>) -> Result<(), XmlError> {{").unwrap();
+
+    for child in node.children() {
+        let child_name = child.name().to_string();
+        let field = to_rust_field_name(&child_name);
+
+        match child.kind() {
+            SchemaNodeKind::Leaf => {
+                writeln!(output, "{ind}        if let Some(ref val) = self.{field} {{").unwrap();
+                writeln!(output, "{ind}            write_text_element(writer, \"{child_name}\", &val.to_string())?;").unwrap();
+                writeln!(output, "{ind}        }}").unwrap();
+            }
+            SchemaNodeKind::LeafList => {
+                writeln!(output, "{ind}        for val in &self.{field} {{").unwrap();
+                writeln!(output, "{ind}            write_text_element(writer, \"{child_name}\", &val.to_string())?;").unwrap();
+                writeln!(output, "{ind}        }}").unwrap();
+            }
+            SchemaNodeKind::Container => {
+                writeln!(output, "{ind}        if let Some(ref child) = self.{field} {{").unwrap();
+                writeln!(output, "{ind}            write_element_with_fields(writer, \"{child_name}\", child)?;").unwrap();
+                writeln!(output, "{ind}        }}").unwrap();
+            }
+            SchemaNodeKind::List => {
+                writeln!(output, "{ind}        for item in &self.{field} {{").unwrap();
+                writeln!(output, "{ind}            write_element_with_fields(writer, \"{child_name}\", item)?;").unwrap();
+                writeln!(output, "{ind}        }}").unwrap();
+            }
+            _ => {
+                // Skip choice, anyxml, etc. for now
+            }
+        }
+    }
+
+    writeln!(output, "{ind}        Ok(())").unwrap();
+    writeln!(output, "{ind}    }}").unwrap();
+    writeln!(output, "{ind}}}").unwrap();
+    writeln!(output).unwrap();
+}
+
+/// Generate ToNetconfXml implementation for a top-level container.
+///
+/// Delegates to WriteXmlFields for field serialization so containers and
+/// lists at any nesting depth are serialized correctly.
+fn generate_to_xml_impl(
+    output: &mut String,
     rust_name: &str,
     node_name: &str,
     indent: usize,
@@ -226,23 +286,7 @@ fn generate_to_xml_impl(
     writeln!(output, "{ind}    fn to_xml(&self) -> Result<String, XmlError> {{").unwrap();
     writeln!(output, "{ind}        let mut writer = new_writer();").unwrap();
     writeln!(output, "{ind}        write_start_with_ns(&mut writer, \"{node_name}\", NAMESPACE)?;").unwrap();
-
-    for child in node.children() {
-        let child_name = child.name().to_string();
-        let field = to_rust_field_name(&child_name);
-
-        match child.kind() {
-            SchemaNodeKind::Leaf => {
-                writeln!(output, "{ind}        if let Some(ref val) = self.{field} {{").unwrap();
-                writeln!(output, "{ind}            write_text_element(&mut writer, \"{child_name}\", &val.to_string())?;").unwrap();
-                writeln!(output, "{ind}        }}").unwrap();
-            }
-            _ => {
-                // Complex children handled by nested serialization (future)
-            }
-        }
-    }
-
+    writeln!(output, "{ind}        self.write_xml_fields(&mut writer)?;").unwrap();
     writeln!(output, "{ind}        write_end(&mut writer, \"{node_name}\")?;").unwrap();
     writeln!(output, "{ind}        finish_writer(writer)").unwrap();
     writeln!(output, "{ind}    }}").unwrap();
