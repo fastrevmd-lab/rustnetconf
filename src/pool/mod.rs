@@ -141,17 +141,23 @@ impl DevicePool {
                 crate::error::TransportError::Connect("pool semaphore closed".to_string())
             })?;
 
-        // Try to reuse an idle connection
+        // Try to reuse an idle connection, skipping any dead sessions
         {
             let mut conns = self.connections.lock().await;
             if let Some(pool) = conns.get_mut(device_name) {
-                if let Some(client) = pool.pop() {
-                    return Ok(PoolGuard {
-                        client: Some(client),
-                        device_name: device_name.to_string(),
-                        connections: Arc::clone(&self.connections),
-                        _permit: permit,
-                    });
+                while let Some(client) = pool.pop() {
+                    if client.session_alive() {
+                        return Ok(PoolGuard {
+                            client: Some(client),
+                            device_name: device_name.to_string(),
+                            connections: Arc::clone(&self.connections),
+                            _permit: permit,
+                        });
+                    }
+                    tracing::warn!(
+                        device = device_name,
+                        "discarding dead idle connection from pool"
+                    );
                 }
             }
         }
@@ -214,13 +220,30 @@ impl<'a> DerefMut for PoolGuard<'a> {
 impl<'a> Drop for PoolGuard<'a> {
     fn drop(&mut self) {
         if let Some(client) = self.client.take() {
+            if !client.session_alive() {
+                tracing::warn!(
+                    device = %self.device_name,
+                    "dropping dead connection — not returning to pool"
+                );
+                return;
+            }
+
             let connections = Arc::clone(&self.connections);
             let device_name = self.device_name.clone();
 
-            tokio::spawn(async move {
-                let mut conns = connections.lock().await;
-                conns.entry(device_name).or_default().push(client);
-            });
+            // Only spawn if a Tokio runtime is still available; during shutdown
+            // (or in sync contexts) the connection is simply dropped.
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn(async move {
+                    let mut conns = connections.lock().await;
+                    conns.entry(device_name).or_default().push(client);
+                });
+            } else {
+                tracing::warn!(
+                    device = %device_name,
+                    "no Tokio runtime on drop — connection not returned to pool"
+                );
+            }
         }
         // Semaphore permit released when _permit drops
     }
