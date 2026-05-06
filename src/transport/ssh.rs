@@ -15,15 +15,16 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::process::{Child, ChildStdin, ChildStdout};
-use tokio::sync::Mutex;
+
+use zeroize::Zeroizing;
 
 use crate::error::TransportError;
 use crate::transport::Transport;
 
 /// SSH transport for NETCONF sessions.
 pub struct SshTransport {
-    channel: Arc<Mutex<ChannelStream>>,
-    handle: Arc<Mutex<client::Handle<SshHandler>>>,
+    channel: ChannelStream,
+    handle: client::Handle<SshHandler>,
     /// SSH handles for each jump-host hop, kept alive for the lifetime of
     /// the target session. Dropping a jump handle would tear down the
     /// `direct-tcpip` channel that carries the next hop's transport, so
@@ -36,14 +37,18 @@ pub struct SshTransport {
 }
 
 /// SSH authentication method.
+///
+/// Sensitive fields (passwords, passphrases) use [`Zeroizing<String>`] so
+/// the memory is overwritten on drop, reducing the window for credential
+/// leakage via memory dumps.
 #[derive(Clone)]
 pub enum SshAuth {
     /// Password authentication.
-    Password(String),
+    Password(Zeroizing<String>),
     /// Key file authentication (path to private key, optional passphrase).
     KeyFile {
         path: String,
-        passphrase: Option<String>,
+        passphrase: Option<Zeroizing<String>>,
     },
     /// SSH agent authentication.
     Agent,
@@ -53,13 +58,12 @@ pub enum SshAuth {
 ///
 /// Controls how the client validates the device's SSH host key during
 /// connection. Use this to protect against man-in-the-middle attacks.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub enum HostKeyVerification {
     /// Accept all host keys without verification (**INSECURE**).
     ///
     /// Suitable for lab environments, testing, or initial device provisioning.
     /// A warning is logged when this mode is used.
-    #[default]
     AcceptAll,
 
     /// Accept only a host key matching a specific SHA-256 fingerprint.
@@ -102,11 +106,10 @@ pub struct SshConfig {
     /// [`TransportError::Connect`]. Use one or the other to reach a host.
     ///
     /// **Security:** the command is interpreted by `sh -c` to support
-    /// pipelines and shell features, matching OpenSSH semantics. The
-    /// caller is responsible for ensuring `host`, `port`, and the
-    /// command string do not contain attacker-controlled shell
-    /// metacharacters. In particular, `%h` is substituted **literally**
-    /// without escaping (also matching OpenSSH).
+    /// pipelines and shell features. The `%h` and `%p` values are
+    /// shell-escaped (single-quoted) before substitution to prevent
+    /// injection. The command template itself is not escaped — the
+    /// caller is responsible for its safety.
     pub proxy_command: Option<String>,
 }
 
@@ -206,16 +209,35 @@ fn build_russh_config() -> client::Config {
     }
 }
 
+/// Shell-escape a string by wrapping it in single quotes and escaping
+/// any embedded single quotes (`'` → `'\''`).
+///
+/// This is the POSIX-standard way to produce a literal string safe for
+/// `sh -c` consumption: `'foo'\''bar'` passes `foo'bar` to the program.
+fn shell_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// Substitute OpenSSH `ProxyCommand` tokens in `command`.
 ///
 /// Replaces `%h` with the target host and `%p` with the target port,
-/// matching `man 5 ssh_config`. Substitution is literal — no escaping —
-/// because OpenSSH itself does not escape these tokens. Callers are
-/// responsible for the safety of the resulting shell string.
+/// matching `man 5 ssh_config`. Both values are shell-escaped before
+/// substitution to prevent shell injection when the result is passed to
+/// `sh -c`.
 fn expand_proxy_command(command: &str, host: &str, port: u16) -> String {
     command
-        .replace("%h", host)
-        .replace("%p", &port.to_string())
+        .replace("%h", &shell_escape(host))
+        .replace("%p", &shell_escape(&port.to_string()))
 }
 
 /// Combined `AsyncRead`/`AsyncWrite` over a child process's stdio,
@@ -304,16 +326,17 @@ async fn authenticate(
 ) -> Result<(), TransportError> {
     let auth_result = match auth {
         SshAuth::Password(password) => handle
-            .authenticate_password(username, password)
+            .authenticate_password(username, password.as_str())
             .await
             .map_err(|e| TransportError::Auth(format!("password auth failed: {e}")))?,
         SshAuth::KeyFile { path, passphrase } => {
             let key_path = Path::new(path);
-            let key_contents = std::fs::read_to_string(key_path).map_err(|e| {
+            let key_contents = tokio::fs::read_to_string(key_path).await.map_err(|e| {
                 tracing::debug!(path, %e, "failed to read key file");
                 TransportError::Auth("failed to read SSH key file".to_string())
             })?;
-            let key_pair = keys::decode_secret_key(&key_contents, passphrase.as_deref())
+            let passphrase_str = passphrase.as_ref().map(|p| p.as_str());
+            let key_pair = keys::decode_secret_key(&key_contents, passphrase_str)
                 .map_err(|e| {
                     tracing::debug!(%e, "failed to decode key");
                     TransportError::Auth("failed to decode SSH key".to_string())
@@ -561,8 +584,8 @@ impl SshTransport {
         };
 
         Ok(Self {
-            channel: Arc::new(Mutex::new(channel_stream)),
-            handle: Arc::new(Mutex::new(handle)),
+            channel: channel_stream,
+            handle,
             _jump_handles: jump_handles,
             _proxy_process: proxy_process,
         })
@@ -572,8 +595,7 @@ impl SshTransport {
 #[async_trait]
 impl Transport for SshTransport {
     async fn write_all(&mut self, data: &[u8]) -> Result<(), TransportError> {
-        let channel = self.channel.lock().await;
-        channel
+        self.channel
             .channel
             .data(data)
             .await
@@ -582,13 +604,11 @@ impl Transport for SshTransport {
     }
 
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-        let mut channel = self.channel.lock().await;
-
         // First, drain any buffered data
-        if !channel.read_buffer.is_empty() {
-            let to_read = std::cmp::min(buf.len(), channel.read_buffer.len());
-            buf[..to_read].copy_from_slice(&channel.read_buffer[..to_read]);
-            channel.read_buffer.drain(..to_read);
+        if !self.channel.read_buffer.is_empty() {
+            let to_read = std::cmp::min(buf.len(), self.channel.read_buffer.len());
+            buf[..to_read].copy_from_slice(&self.channel.read_buffer[..to_read]);
+            self.channel.read_buffer.drain(..to_read);
             return Ok(to_read);
         }
 
@@ -596,13 +616,13 @@ impl Transport for SshTransport {
         // Messages like WindowAdjusted, Success, ExtendedData (stderr)
         // can arrive at any time and must not be treated as EOF.
         loop {
-            match channel.channel.wait().await {
+            match self.channel.channel.wait().await {
                 Some(ChannelMsg::Data { data: channel_data }) => {
                     let bytes = &channel_data[..];
                     let to_copy = std::cmp::min(buf.len(), bytes.len());
                     buf[..to_copy].copy_from_slice(&bytes[..to_copy]);
                     if bytes.len() > to_copy {
-                        channel.read_buffer.extend_from_slice(&bytes[to_copy..]);
+                        self.channel.read_buffer.extend_from_slice(&bytes[to_copy..]);
                     }
                     return Ok(to_copy);
                 }
@@ -618,14 +638,12 @@ impl Transport for SshTransport {
     }
 
     async fn close(&mut self) -> Result<(), TransportError> {
-        let channel = self.channel.lock().await;
-        channel
+        self.channel
             .channel
             .eof()
             .await
             .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;
-        let handle = self.handle.lock().await;
-        handle
+        self.handle
             .disconnect(Disconnect::ByApplication, "closing session", "en")
             .await
             .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;
@@ -645,7 +663,7 @@ mod tests {
             host: "10.0.0.1".to_string(),
             port: 830,
             username: "u".to_string(),
-            auth: SshAuth::Password("p".to_string()),
+            auth: SshAuth::Password(Zeroizing::new("p".to_string())),
             host_key_verification: HostKeyVerification::AcceptAll,
             jump_hosts: Vec::new(),
             proxy_command: None,
@@ -729,16 +747,31 @@ mod tests {
     }
 
     #[test]
+    fn shell_escape_plain_string() {
+        assert_eq!(shell_escape("hello"), "'hello'");
+    }
+
+    #[test]
+    fn shell_escape_with_single_quote() {
+        assert_eq!(shell_escape("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn shell_escape_with_metacharacters() {
+        assert_eq!(shell_escape("a;rm -rf /"), "'a;rm -rf /'");
+    }
+
+    #[test]
     fn expand_proxy_command_replaces_h_and_p() {
         let out = expand_proxy_command("ssh -W %h:%p bastion", "10.1.2.3", 830);
-        assert_eq!(out, "ssh -W 10.1.2.3:830 bastion");
+        assert_eq!(out, "ssh -W '10.1.2.3':'830' bastion");
     }
 
     #[test]
     fn expand_proxy_command_replaces_multiple_occurrences() {
         // %h and %p can appear more than once.
         let out = expand_proxy_command("nc %h %p; echo %h:%p", "host", 22);
-        assert_eq!(out, "nc host 22; echo host:22");
+        assert_eq!(out, "nc 'host' '22'; echo 'host':'22'");
     }
 
     #[test]
@@ -749,12 +782,11 @@ mod tests {
     }
 
     #[test]
-    fn expand_proxy_command_substitutes_literally() {
-        // Substitution is literal (matches OpenSSH) — host with shell
-        // metacharacters comes through verbatim. Documented behavior:
-        // callers are responsible for sanitization.
+    fn expand_proxy_command_escapes_shell_metacharacters() {
+        // Shell metacharacters in host are escaped via single-quoting,
+        // preventing shell injection when the result is passed to `sh -c`.
         let out = expand_proxy_command("nc %h %p", "host;rm -rf /", 22);
-        assert_eq!(out, "nc host;rm -rf / 22");
+        assert_eq!(out, "nc 'host;rm -rf /' '22'");
     }
 
     #[tokio::test]
@@ -765,7 +797,7 @@ mod tests {
             host: "10.0.0.1".to_string(),
             port: 830,
             username: "u".to_string(),
-            auth: SshAuth::Password("p".to_string()),
+            auth: SshAuth::Password(Zeroizing::new("p".to_string())),
             host_key_verification: HostKeyVerification::AcceptAll,
             jump_hosts: vec![JumpHostConfig {
                 host: "bastion".to_string(),
@@ -798,7 +830,7 @@ mod tests {
             host: "ignored".to_string(),
             port: 0,
             username: "u".to_string(),
-            auth: SshAuth::Password("p".to_string()),
+            auth: SshAuth::Password(Zeroizing::new("p".to_string())),
             host_key_verification: HostKeyVerification::AcceptAll,
             jump_hosts: Vec::new(),
             // `false` exits 1 immediately, so stdin/stdout EOF and the SSH

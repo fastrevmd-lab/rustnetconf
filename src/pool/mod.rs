@@ -22,7 +22,7 @@
 //!     .add_device("spine-01", DeviceConfig {
 //!         host: "10.0.0.1:830".into(),
 //!         username: "admin".into(),
-//!         auth: SshAuth::Password("secret".into()),
+//!         auth: SshAuth::Password(zeroize::Zeroizing::new("secret".into())),
 //!         vendor: None,
 //!     })
 //!     .build();
@@ -255,12 +255,12 @@ async fn connect_device(config: &DeviceConfig) -> Result<Client, NetconfError> {
 
     match &config.auth {
         SshAuth::Password(pass) => {
-            builder = builder.password(pass);
+            builder = builder.password(pass.as_str());
         }
         SshAuth::KeyFile { path, passphrase } => {
             builder = builder.key_file(path);
             if let Some(pass) = passphrase {
-                builder = builder.key_passphrase(pass);
+                builder = builder.key_passphrase(pass.as_str());
             }
         }
         SshAuth::Agent => {

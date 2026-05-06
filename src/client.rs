@@ -12,6 +12,7 @@ use crate::notification::Notification;
 use crate::session::Session;
 use crate::transport::Transport;
 use crate::transport::ssh::{HostKeyVerification, JumpHostConfig, SshAuth, SshConfig, SshTransport};
+use zeroize::Zeroizing;
 use crate::ssh_config::{SshConfigError, SshConfigFile};
 use std::path::Path;
 #[cfg(feature = "tls")]
@@ -182,10 +183,9 @@ impl ClientBuilder {
     /// Mutually exclusive with [`Self::jump_hosts`] — setting both causes
     /// the connection to fail.
     ///
-    /// **Security:** the command runs in a shell. Substitution is literal
-    /// (no escaping), matching OpenSSH. Callers are responsible for ensuring
-    /// neither the target host nor the command string contains
-    /// attacker-controlled shell metacharacters.
+    /// **Security:** the command runs in a shell. The `%h` and `%p` values
+    /// are shell-escaped before substitution. The command template itself
+    /// is not escaped — callers are responsible for its safety.
     ///
     /// # Examples
     /// ```rust,no_run
@@ -247,10 +247,10 @@ impl ClientBuilder {
         } else if let Some(key_path) = self.key_file {
             SshAuth::KeyFile {
                 path: key_path,
-                passphrase: self.key_passphrase,
+                passphrase: self.key_passphrase.map(Zeroizing::new),
             }
         } else if let Some(password) = self.password {
-            SshAuth::Password(password)
+            SshAuth::Password(Zeroizing::new(password))
         } else {
             return Err(crate::error::TransportError::Auth(
                 "no authentication method specified (password, key_file, or ssh_agent)".to_string(),
@@ -333,7 +333,7 @@ impl Client {
             vendor_profile: None,
             gather_facts: true,
             keepalive_interval: None,
-            host_key_verification: HostKeyVerification::default(),
+            host_key_verification: HostKeyVerification::AcceptAll,
             jump_hosts: Vec::new(),
             proxy_command: None,
             rpc_timeout: None,
