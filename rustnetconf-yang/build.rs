@@ -53,18 +53,29 @@ fn main() {
     ctx.set_searchdir(&yang_dir)
         .expect("failed to set yang search directory");
 
-    // Load each module
+    // Load each module; collect failures and hard-error at the end so users
+    // never silently end up with missing generated types.
     let mut module_names = Vec::new();
+    let mut load_errors: Vec<String> = Vec::new();
     for (name, revision) in &yang_files {
         match ctx.load_module(name, revision.as_deref(), &[]) {
             Ok(_module) => {
-                eprintln!("cargo:warning=Loaded YANG module: {name}");
+                println!("cargo:warning=Loaded YANG module: {name}");
                 module_names.push(name.clone());
             }
             Err(e) => {
-                eprintln!("cargo:warning=Failed to load {name}: {e}");
+                let msg = format!("Failed to load YANG module '{name}': {e}");
+                println!("cargo:warning={msg}");
+                load_errors.push(msg);
             }
         }
+    }
+    if !load_errors.is_empty() {
+        panic!(
+            "rustnetconf-yang: {} YANG module(s) failed to load — types were NOT generated.\n{}",
+            load_errors.len(),
+            load_errors.join("\n")
+        );
     }
 
     // Generate Rust code
@@ -311,12 +322,15 @@ fn to_rust_type_name(yang_name: &str) -> String {
 /// Convert YANG name to Rust snake_case field name.
 fn to_rust_field_name(yang_name: &str) -> String {
     let name = yang_name.replace('-', "_");
+    // Full set of Rust keywords (stable + reserved) that must be escaped.
     match name.as_str() {
-        "type" => "r#type".to_string(),
-        "match" => "r#match".to_string(),
-        "ref" => "r#ref".to_string(),
-        "mod" => "r#mod".to_string(),
-        "if" => "r#if".to_string(),
+        "as" | "async" | "await" | "break" | "const" | "continue" | "crate" | "dyn"
+        | "else" | "enum" | "extern" | "false" | "fn" | "for" | "if" | "impl" | "in"
+        | "let" | "loop" | "match" | "mod" | "move" | "mut" | "pub" | "ref" | "return"
+        | "self" | "Self" | "static" | "struct" | "super" | "trait" | "true" | "type"
+        | "unsafe" | "use" | "where" | "while" | "abstract" | "become" | "box" | "do"
+        | "final" | "macro" | "override" | "priv" | "try" | "typeof" | "unsized"
+        | "virtual" | "yield" => format!("{name}_"),
         _ => name,
     }
 }
