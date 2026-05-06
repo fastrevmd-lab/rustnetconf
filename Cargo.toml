@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "rustnetconf"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 authors = ["fastrevmd-lab"]
 description = "An async-first NETCONF 1.0/1.1 client library for Rust"
