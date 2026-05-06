@@ -94,6 +94,9 @@ pub struct Session {
     /// Maximum time to wait for an RPC reply. `None` means wait forever
     /// (backward-compatible default).
     rpc_timeout: Option<Duration>,
+    /// Maximum number of bytes that may accumulate in `read_buffer` before
+    /// the read is aborted. Defaults to [`MAX_READ_BUFFER`].
+    max_read_buffer: usize,
 }
 
 impl Session {
@@ -120,6 +123,7 @@ impl Session {
             notification_buffer: VecDeque::new(),
             has_subscription: false,
             rpc_timeout: None,
+            max_read_buffer: MAX_READ_BUFFER,
         }
     }
 
@@ -129,6 +133,15 @@ impl Session {
     /// profile is locked in.
     pub fn set_vendor_profile(&mut self, profile: Box<dyn VendorProfile>) {
         self.vendor_profile = profile;
+    }
+
+    /// Set the maximum read buffer size in bytes.
+    ///
+    /// If the device sends more data than this without completing a framed
+    /// message, the read is aborted to prevent memory exhaustion.
+    /// Defaults to [`MAX_READ_BUFFER`] (100 MB).
+    pub fn set_max_read_buffer(&mut self, max_bytes: usize) {
+        self.max_read_buffer = max_bytes;
     }
 
     /// Perform the NETCONF `<hello>` exchange and establish the session.
@@ -468,12 +481,12 @@ impl Session {
             }
             self.read_buffer.extend_from_slice(&temp_buf[..bytes_read]);
 
-            if self.read_buffer.len() > MAX_READ_BUFFER {
+            if self.read_buffer.len() > self.max_read_buffer {
                 return Err(TransportError::Io(std::io::Error::new(
                     std::io::ErrorKind::OutOfMemory,
                     format!(
                         "read buffer exceeded {} MB without completing a message",
-                        MAX_READ_BUFFER / (1024 * 1024)
+                        self.max_read_buffer / (1024 * 1024)
                     ),
                 ))
                 .into());
@@ -685,6 +698,10 @@ impl Session {
     ///
     /// Requires the `:validate` capability.
     pub async fn validate(&mut self, source: Datastore) -> Result<(), NetconfError> {
+        self.require_capability(
+            crate::capability::uri::VALIDATE,
+            "validate",
+        )?;
         let msg_id = self.next_message_id();
         let xml = operations::validate_xml(&msg_id, source);
         self.send_rpc(&xml, &msg_id).await?;

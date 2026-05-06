@@ -463,7 +463,7 @@ impl RpcErrorBuilder {
                 });
             }
             ErrorField::ErrorTag => {
-                self.tag = Some(ErrorTag::from_str(value));
+                self.tag = Some(value.parse().unwrap_or(ErrorTag::Other(value.to_string())));
             }
             ErrorField::ErrorSeverity => {
                 self.severity = Some(match value {

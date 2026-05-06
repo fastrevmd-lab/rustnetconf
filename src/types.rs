@@ -196,11 +196,14 @@ pub enum ErrorTag {
     Other(String),
 }
 
-impl ErrorTag {
+impl std::str::FromStr for ErrorTag {
+    type Err = std::convert::Infallible;
+
     /// Parse an error tag from its XML string representation.
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(tag: &str) -> Self {
-        match tag {
+    ///
+    /// Always succeeds — unknown tags map to [`ErrorTag::Other`].
+    fn from_str(tag: &str) -> Result<Self, Self::Err> {
+        let variant = match tag {
             "in-use" => ErrorTag::InUse,
             "invalid-value" => ErrorTag::InvalidValue,
             "too-big" => ErrorTag::TooBig,
@@ -221,6 +224,7 @@ impl ErrorTag {
             "operation-failed" => ErrorTag::OperationFailed,
             "malformed-message" => ErrorTag::MalformedMessage,
             other => ErrorTag::Other(other.to_string()),
-        }
+        };
+        Ok(variant)
     }
 }

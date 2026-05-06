@@ -59,6 +59,7 @@ pub struct ClientBuilder {
     jump_hosts: Vec<JumpHostConfig>,
     proxy_command: Option<String>,
     rpc_timeout: Option<Duration>,
+    max_read_buffer: Option<usize>,
 }
 
 impl ClientBuilder {
@@ -234,6 +235,16 @@ impl ClientBuilder {
         self
     }
 
+    /// Set the maximum read buffer size in bytes.
+    ///
+    /// Overrides the default of 100 MB. If a device response accumulates more
+    /// than this many bytes without completing a framed message, the connection
+    /// is aborted to prevent memory exhaustion.
+    pub fn max_read_buffer(mut self, max_bytes: usize) -> Self {
+        self.max_read_buffer = Some(max_bytes);
+        self
+    }
+
     /// Establish the SSH connection and perform the NETCONF hello exchange.
     pub async fn connect(self) -> Result<Client, NetconfError> {
         let username = self
@@ -277,6 +288,10 @@ impl ClientBuilder {
 
         if self.rpc_timeout.is_some() {
             session.set_rpc_timeout(self.rpc_timeout);
+        }
+
+        if let Some(max_bytes) = self.max_read_buffer {
+            session.set_max_read_buffer(max_bytes);
         }
 
         // Set explicit vendor profile if provided (overrides auto-detection)
@@ -337,6 +352,7 @@ impl Client {
             jump_hosts: Vec::new(),
             proxy_command: None,
             rpc_timeout: None,
+            max_read_buffer: None,
         }
     }
 

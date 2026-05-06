@@ -54,6 +54,13 @@ pub struct DeviceConfig {
     /// SSH authentication method.
     pub auth: SshAuth,
     /// Optional explicit vendor profile. `None` = auto-detect.
+    ///
+    /// TODO: This field is not yet wired into connection setup. `connect_device()`
+    /// takes `&DeviceConfig` (shared reference via `Arc`), so the `Box<dyn VendorProfile>`
+    /// cannot be moved out. To wire this, either change the field to
+    /// `Option<Arc<dyn VendorProfile>>` and add a corresponding `Session::set_vendor_profile_arc()`
+    /// method, or restructure the pool to use per-device mutexes so the config
+    /// can be consumed on first connect.
     pub vendor: Option<Box<dyn VendorProfile>>,
 }
 
@@ -198,6 +205,13 @@ pub struct PoolGuard<'a> {
 
 impl<'a> PoolGuard<'a> {
     /// Mark the connection as broken — it will be discarded on drop.
+    ///
+    /// # Warning
+    ///
+    /// After calling `discard()` the guard's `client` field is `None`. Any
+    /// subsequent dereference (via `Deref`/`DerefMut`) will panic. The guard
+    /// should be dropped immediately after calling this method and must not be
+    /// used to issue further RPCs.
     pub fn discard(&mut self) {
         self.client = None;
     }
