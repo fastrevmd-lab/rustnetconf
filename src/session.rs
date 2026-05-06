@@ -477,12 +477,16 @@ impl Session {
     /// Use this for vendor-specific RPCs not covered by the standard
     /// NETCONF operations (get-config, edit-config, etc.).
     ///
-    /// # Safety
+    /// # Content requirements
     ///
-    /// `rpc_content` must be well-formed XML. It is inserted verbatim into
-    /// the `<rpc>` wrapper — do not pass untrusted user input without
-    /// validation.
+    /// `rpc_content` must be well-formed XML. It is validated with
+    /// [`rpc::validate_xml_fragment`] before being inserted into the `<rpc>`
+    /// wrapper and sent on the wire. A `ProtocolError::Xml` is returned if the
+    /// fragment is malformed. Callers are responsible for ensuring that any
+    /// user-provided values within the content are appropriately escaped or
+    /// sanitized before passing to this method.
     pub async fn rpc(&mut self, rpc_content: &str) -> Result<String, NetconfError> {
+        rpc::validate_xml_fragment(rpc_content)?;
         let msg_id = self.next_message_id();
         let safe_id = crate::rpc::operations::escape_xml_attr(&msg_id);
         let xml = format!(
@@ -500,10 +504,14 @@ impl Session {
     /// Like [`rpc()`](Self::rpc), but instead of discarding warnings, returns
     /// them alongside the response data. Useful for Junos `<load-configuration>`
     /// and other operations where warnings carry diagnostic value.
+    ///
+    /// `rpc_content` is validated as well-formed XML before sending; see
+    /// [`rpc()`](Self::rpc) for details.
     pub async fn rpc_with_warnings(
         &mut self,
         rpc_content: &str,
     ) -> Result<(String, Vec<RpcErrorInfo>), NetconfError> {
+        rpc::validate_xml_fragment(rpc_content)?;
         let msg_id = self.next_message_id();
         let safe_id = crate::rpc::operations::escape_xml_attr(&msg_id);
         let xml = format!(
@@ -524,11 +532,18 @@ impl Session {
     ///
     /// The response is passed through the vendor profile's `unwrap_config()`
     /// to strip vendor-specific wrapper elements.
+    ///
+    /// `filter`, when provided, must be a well-formed XML subtree filter
+    /// fragment. It is validated before sending; a `ProtocolError::Xml` is
+    /// returned if it is malformed.
     pub async fn get_config(
         &mut self,
         source: Datastore,
         filter: Option<&str>,
     ) -> Result<String, NetconfError> {
+        if let Some(filter_xml) = filter {
+            rpc::validate_xml_fragment(filter_xml)?;
+        }
         let msg_id = self.next_message_id();
         let xml = operations::get_config_xml(&msg_id, source, filter);
         let reply = self.send_rpc(&xml, &msg_id).await?;
@@ -541,7 +556,14 @@ impl Session {
     }
 
     /// Fetch operational and configuration data.
+    ///
+    /// `filter`, when provided, must be a well-formed XML subtree filter
+    /// fragment. It is validated before sending; a `ProtocolError::Xml` is
+    /// returned if it is malformed.
     pub async fn get(&mut self, filter: Option<&str>) -> Result<String, NetconfError> {
+        if let Some(filter_xml) = filter {
+            rpc::validate_xml_fragment(filter_xml)?;
+        }
         let msg_id = self.next_message_id();
         let xml = operations::get_xml(&msg_id, filter);
         let reply = self.send_rpc(&xml, &msg_id).await?;
@@ -555,6 +577,9 @@ impl Session {
     ///
     /// The config payload is passed through the vendor profile's `wrap_config()`
     /// to add vendor-specific elements/namespaces if needed.
+    ///
+    /// `config` must be well-formed XML. It is validated before sending; a
+    /// `ProtocolError::Xml` is returned if it is malformed.
     pub async fn edit_config(
         &mut self,
         target: Datastore,
@@ -563,6 +588,7 @@ impl Session {
         test_option: Option<TestOption>,
         error_option: Option<ErrorOption>,
     ) -> Result<(), NetconfError> {
+        rpc::validate_xml_fragment(config)?;
         let wrapped_config = self.vendor_profile.wrap_config(config);
         let msg_id = self.next_message_id();
         let params = EditConfigParams {
@@ -957,6 +983,10 @@ impl Session {
                 "device does not advertise :interleave capability — \
                  RPCs during active subscription may not be supported"
             );
+        }
+
+        if let Some(filter_xml) = filter {
+            rpc::validate_xml_fragment(filter_xml)?;
         }
 
         let message_id = self.next_message_id();
