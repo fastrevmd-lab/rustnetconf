@@ -326,7 +326,7 @@ async fn authenticate(
             .map_err(|e| TransportError::Auth(format!("password auth failed: {e}")))?,
         SshAuth::KeyFile { path, passphrase } => {
             let key_path = Path::new(path);
-            let key_contents = std::fs::read_to_string(key_path).map_err(|e| {
+            let key_contents = tokio::fs::read_to_string(key_path).await.map_err(|e| {
                 tracing::debug!(path, %e, "failed to read key file");
                 TransportError::Auth("failed to read SSH key file".to_string())
             })?;
