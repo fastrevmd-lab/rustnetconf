@@ -12,6 +12,7 @@ use crate::notification::Notification;
 use crate::session::Session;
 use crate::transport::Transport;
 use crate::transport::ssh::{HostKeyVerification, JumpHostConfig, SshAuth, SshConfig, SshTransport};
+use zeroize::Zeroizing;
 use crate::ssh_config::{SshConfigError, SshConfigFile};
 use std::path::Path;
 #[cfg(feature = "tls")]
@@ -217,10 +218,10 @@ impl ClientBuilder {
         } else if let Some(key_path) = self.key_file {
             SshAuth::KeyFile {
                 path: key_path,
-                passphrase: self.key_passphrase,
+                passphrase: self.key_passphrase.map(Zeroizing::new),
             }
         } else if let Some(password) = self.password {
-            SshAuth::Password(password)
+            SshAuth::Password(Zeroizing::new(password))
         } else {
             return Err(crate::error::TransportError::Auth(
                 "no authentication method specified (password, key_file, or ssh_agent)".to_string(),

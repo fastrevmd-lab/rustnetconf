@@ -17,6 +17,8 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::Mutex;
 
+use zeroize::Zeroizing;
+
 use crate::error::TransportError;
 use crate::transport::Transport;
 
@@ -36,14 +38,18 @@ pub struct SshTransport {
 }
 
 /// SSH authentication method.
+///
+/// Sensitive fields (passwords, passphrases) use [`Zeroizing<String>`] so
+/// the memory is overwritten on drop, reducing the window for credential
+/// leakage via memory dumps.
 #[derive(Clone)]
 pub enum SshAuth {
     /// Password authentication.
-    Password(String),
+    Password(Zeroizing<String>),
     /// Key file authentication (path to private key, optional passphrase).
     KeyFile {
         path: String,
-        passphrase: Option<String>,
+        passphrase: Option<Zeroizing<String>>,
     },
     /// SSH agent authentication.
     Agent,
@@ -321,7 +327,7 @@ async fn authenticate(
 ) -> Result<(), TransportError> {
     let auth_result = match auth {
         SshAuth::Password(password) => handle
-            .authenticate_password(username, password)
+            .authenticate_password(username, password.as_str())
             .await
             .map_err(|e| TransportError::Auth(format!("password auth failed: {e}")))?,
         SshAuth::KeyFile { path, passphrase } => {
@@ -330,7 +336,8 @@ async fn authenticate(
                 tracing::debug!(path, %e, "failed to read key file");
                 TransportError::Auth("failed to read SSH key file".to_string())
             })?;
-            let key_pair = keys::decode_secret_key(&key_contents, passphrase.as_deref())
+            let passphrase_str = passphrase.as_ref().map(|p| p.as_str());
+            let key_pair = keys::decode_secret_key(&key_contents, passphrase_str)
                 .map_err(|e| {
                     tracing::debug!(%e, "failed to decode key");
                     TransportError::Auth("failed to decode SSH key".to_string())
@@ -662,7 +669,7 @@ mod tests {
             host: "10.0.0.1".to_string(),
             port: 830,
             username: "u".to_string(),
-            auth: SshAuth::Password("p".to_string()),
+            auth: SshAuth::Password(Zeroizing::new("p".to_string())),
             host_key_verification: HostKeyVerification::AcceptAll,
             jump_hosts: Vec::new(),
             proxy_command: None,
@@ -796,7 +803,7 @@ mod tests {
             host: "10.0.0.1".to_string(),
             port: 830,
             username: "u".to_string(),
-            auth: SshAuth::Password("p".to_string()),
+            auth: SshAuth::Password(Zeroizing::new("p".to_string())),
             host_key_verification: HostKeyVerification::AcceptAll,
             jump_hosts: vec![JumpHostConfig {
                 host: "bastion".to_string(),
@@ -829,7 +836,7 @@ mod tests {
             host: "ignored".to_string(),
             port: 0,
             username: "u".to_string(),
-            auth: SshAuth::Password("p".to_string()),
+            auth: SshAuth::Password(Zeroizing::new("p".to_string())),
             host_key_verification: HostKeyVerification::AcceptAll,
             jump_hosts: Vec::new(),
             // `false` exits 1 immediately, so stdin/stdout EOF and the SSH
