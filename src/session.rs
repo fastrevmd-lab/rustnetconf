@@ -620,6 +620,10 @@ impl Session {
     ///
     /// Requires the `:validate` capability.
     pub async fn validate(&mut self, source: Datastore) -> Result<(), NetconfError> {
+        self.require_capability(
+            crate::capability::uri::VALIDATE,
+            "validate",
+        )?;
         let msg_id = self.next_message_id();
         let xml = operations::validate_xml(&msg_id, source);
         self.send_rpc(&xml, &msg_id).await?;
