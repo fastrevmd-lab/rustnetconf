@@ -181,10 +181,9 @@ impl ClientBuilder {
     /// Mutually exclusive with [`Self::jump_hosts`] — setting both causes
     /// the connection to fail.
     ///
-    /// **Security:** the command runs in a shell. Substitution is literal
-    /// (no escaping), matching OpenSSH. Callers are responsible for ensuring
-    /// neither the target host nor the command string contains
-    /// attacker-controlled shell metacharacters.
+    /// **Security:** the command runs in a shell. The `%h` and `%p` values
+    /// are shell-escaped before substitution. The command template itself
+    /// is not escaped — callers are responsible for its safety.
     ///
     /// # Examples
     /// ```rust,no_run

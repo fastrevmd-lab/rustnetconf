@@ -102,11 +102,10 @@ pub struct SshConfig {
     /// [`TransportError::Connect`]. Use one or the other to reach a host.
     ///
     /// **Security:** the command is interpreted by `sh -c` to support
-    /// pipelines and shell features, matching OpenSSH semantics. The
-    /// caller is responsible for ensuring `host`, `port`, and the
-    /// command string do not contain attacker-controlled shell
-    /// metacharacters. In particular, `%h` is substituted **literally**
-    /// without escaping (also matching OpenSSH).
+    /// pipelines and shell features. The `%h` and `%p` values are
+    /// shell-escaped (single-quoted) before substitution to prevent
+    /// injection. The command template itself is not escaped — the
+    /// caller is responsible for its safety.
     pub proxy_command: Option<String>,
 }
 
@@ -206,16 +205,35 @@ fn build_russh_config() -> client::Config {
     }
 }
 
+/// Shell-escape a string by wrapping it in single quotes and escaping
+/// any embedded single quotes (`'` → `'\''`).
+///
+/// This is the POSIX-standard way to produce a literal string safe for
+/// `sh -c` consumption: `'foo'\''bar'` passes `foo'bar` to the program.
+fn shell_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
+}
+
 /// Substitute OpenSSH `ProxyCommand` tokens in `command`.
 ///
 /// Replaces `%h` with the target host and `%p` with the target port,
-/// matching `man 5 ssh_config`. Substitution is literal — no escaping —
-/// because OpenSSH itself does not escape these tokens. Callers are
-/// responsible for the safety of the resulting shell string.
+/// matching `man 5 ssh_config`. Both values are shell-escaped before
+/// substitution to prevent shell injection when the result is passed to
+/// `sh -c`.
 fn expand_proxy_command(command: &str, host: &str, port: u16) -> String {
     command
-        .replace("%h", host)
-        .replace("%p", &port.to_string())
+        .replace("%h", &shell_escape(host))
+        .replace("%p", &shell_escape(&port.to_string()))
 }
 
 /// Combined `AsyncRead`/`AsyncWrite` over a child process's stdio,
@@ -729,16 +747,31 @@ mod tests {
     }
 
     #[test]
+    fn shell_escape_plain_string() {
+        assert_eq!(shell_escape("hello"), "'hello'");
+    }
+
+    #[test]
+    fn shell_escape_with_single_quote() {
+        assert_eq!(shell_escape("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn shell_escape_with_metacharacters() {
+        assert_eq!(shell_escape("a;rm -rf /"), "'a;rm -rf /'");
+    }
+
+    #[test]
     fn expand_proxy_command_replaces_h_and_p() {
         let out = expand_proxy_command("ssh -W %h:%p bastion", "10.1.2.3", 830);
-        assert_eq!(out, "ssh -W 10.1.2.3:830 bastion");
+        assert_eq!(out, "ssh -W '10.1.2.3':'830' bastion");
     }
 
     #[test]
     fn expand_proxy_command_replaces_multiple_occurrences() {
         // %h and %p can appear more than once.
         let out = expand_proxy_command("nc %h %p; echo %h:%p", "host", 22);
-        assert_eq!(out, "nc host 22; echo host:22");
+        assert_eq!(out, "nc 'host' '22'; echo 'host':'22'");
     }
 
     #[test]
@@ -749,12 +782,11 @@ mod tests {
     }
 
     #[test]
-    fn expand_proxy_command_substitutes_literally() {
-        // Substitution is literal (matches OpenSSH) — host with shell
-        // metacharacters comes through verbatim. Documented behavior:
-        // callers are responsible for sanitization.
+    fn expand_proxy_command_escapes_shell_metacharacters() {
+        // Shell metacharacters in host are escaped via single-quoting,
+        // preventing shell injection when the result is passed to `sh -c`.
         let out = expand_proxy_command("nc %h %p", "host;rm -rf /", 22);
-        assert_eq!(out, "nc host;rm -rf / 22");
+        assert_eq!(out, "nc 'host;rm -rf /' '22'");
     }
 
     #[tokio::test]
