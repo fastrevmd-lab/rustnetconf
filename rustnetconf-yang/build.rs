@@ -267,12 +267,15 @@ fn to_rust_type_name(yang_name: &str) -> String {
 /// Convert YANG name to Rust snake_case field name.
 fn to_rust_field_name(yang_name: &str) -> String {
     let name = yang_name.replace('-', "_");
+    // Full set of Rust keywords (stable + reserved) that must be escaped.
     match name.as_str() {
-        "type" => "r#type".to_string(),
-        "match" => "r#match".to_string(),
-        "ref" => "r#ref".to_string(),
-        "mod" => "r#mod".to_string(),
-        "if" => "r#if".to_string(),
+        "as" | "async" | "await" | "break" | "const" | "continue" | "crate" | "dyn"
+        | "else" | "enum" | "extern" | "false" | "fn" | "for" | "if" | "impl" | "in"
+        | "let" | "loop" | "match" | "mod" | "move" | "mut" | "pub" | "ref" | "return"
+        | "self" | "Self" | "static" | "struct" | "super" | "trait" | "true" | "type"
+        | "unsafe" | "use" | "where" | "while" | "abstract" | "become" | "box" | "do"
+        | "final" | "macro" | "override" | "priv" | "try" | "typeof" | "unsized"
+        | "virtual" | "yield" => format!("{name}_"),
         _ => name,
     }
 }
