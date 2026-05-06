@@ -147,7 +147,7 @@ impl Session {
 
         // Read device hello
         let device_hello = self.read_message().await?;
-        let caps = capability::parse_device_hello(&device_hello)
+        let mut caps = capability::parse_device_hello(&device_hello)
             .map_err(ProtocolError::HelloFailed)?;
 
         // Negotiate version and switch framing
@@ -165,6 +165,11 @@ impl Session {
         if self.vendor_profile.name() == "generic" {
             self.vendor_profile = vendor::detect_vendor(&caps);
         }
+
+        // Normalize legacy capability URIs to their standard forms using the
+        // detected vendor profile (e.g., Junos uses urn:ietf:params:xml:ns:netconf:
+        // instead of the standard urn:ietf:params:netconf: prefix).
+        caps.normalize_with(self.vendor_profile.as_ref());
 
         self.version = Some(version);
         self.capabilities = Some(caps);

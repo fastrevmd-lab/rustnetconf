@@ -90,6 +90,32 @@ impl Capabilities {
         &self.uris
     }
 
+    /// Normalize capability URIs using the vendor profile's `normalize_capability()`.
+    ///
+    /// For each URI that the vendor maps to a standard form, the original URI is
+    /// removed and the normalized form is inserted. This allows `supports()` checks
+    /// against standard URIs to work even when the device advertised a legacy form.
+    pub fn normalize_with(&mut self, vendor: &dyn crate::vendor::VendorProfile) {
+        let to_normalize: Vec<String> = self
+            .uris
+            .iter()
+            .filter_map(|uri| {
+                vendor
+                    .normalize_capability(uri)
+                    .map(|normalized| (uri.clone(), normalized))
+            })
+            .flat_map(|(original, normalized)| [original, normalized])
+            .collect();
+
+        // Remove originals and insert normalized forms.  We collected pairs
+        // above as [original, normalized] — split them back out.
+        let mut iter = to_normalize.into_iter();
+        while let (Some(original), Some(normalized)) = (iter.next(), iter.next()) {
+            self.uris.remove(&original);
+            self.uris.insert(normalized);
+        }
+    }
+
     /// Returns true if the `:candidate` capability is supported.
     pub fn has_candidate(&self) -> bool {
         self.supports(uri::CANDIDATE)
@@ -254,5 +280,46 @@ mod tests {
         assert!(hello.contains(uri::BASE_1_0));
         assert!(hello.contains(uri::BASE_1_1));
         assert!(hello.contains("<hello"));
+    }
+
+    #[test]
+    fn test_normalize_with_junos_legacy_capability() {
+        use crate::vendor::junos::JunosVendor;
+
+        let legacy = "urn:ietf:params:xml:ns:netconf:capability:candidate:1.0";
+        let standard = "urn:ietf:params:netconf:capability:candidate:1.0";
+
+        let mut uris = HashSet::new();
+        uris.insert(uri::BASE_1_0.to_string());
+        uris.insert(legacy.to_string());
+        let mut caps = Capabilities::new(uris, Some(1));
+
+        // Before normalization: legacy URI is present, standard is not
+        assert!(caps.supports(legacy));
+        assert!(!caps.supports(standard));
+
+        let vendor = JunosVendor::default();
+        caps.normalize_with(&vendor);
+
+        // After normalization: standard URI is present, legacy is gone
+        assert!(caps.supports(standard));
+        assert!(!caps.supports(legacy));
+    }
+
+    #[test]
+    fn test_normalize_with_standard_uris_unchanged() {
+        use crate::vendor::junos::JunosVendor;
+
+        let mut uris = HashSet::new();
+        uris.insert(uri::BASE_1_0.to_string());
+        uris.insert(uri::CANDIDATE.to_string());
+        let mut caps = Capabilities::new(uris, Some(1));
+
+        let vendor = JunosVendor::default();
+        caps.normalize_with(&vendor);
+
+        // Standard URIs must survive normalization intact
+        assert!(caps.supports(uri::BASE_1_0));
+        assert!(caps.supports(uri::CANDIDATE));
     }
 }
