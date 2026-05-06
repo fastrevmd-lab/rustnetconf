@@ -296,7 +296,7 @@ impl Client {
             vendor_profile: None,
             gather_facts: true,
             keepalive_interval: None,
-            host_key_verification: HostKeyVerification::default(),
+            host_key_verification: HostKeyVerification::AcceptAll,
             jump_hosts: Vec::new(),
             proxy_command: None,
         }

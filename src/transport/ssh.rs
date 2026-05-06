@@ -53,13 +53,12 @@ pub enum SshAuth {
 ///
 /// Controls how the client validates the device's SSH host key during
 /// connection. Use this to protect against man-in-the-middle attacks.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub enum HostKeyVerification {
     /// Accept all host keys without verification (**INSECURE**).
     ///
     /// Suitable for lab environments, testing, or initial device provisioning.
     /// A warning is logged when this mode is used.
-    #[default]
     AcceptAll,
 
     /// Accept only a host key matching a specific SHA-256 fingerprint.
