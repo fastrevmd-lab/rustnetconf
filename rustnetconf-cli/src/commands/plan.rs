@@ -40,11 +40,10 @@ pub async fn run(
             has_changes = true;
         }
 
-        if json_output {
-            all_entries.extend(entries);
-        } else {
+        if !json_output {
             print!("{}", format_colored(&entries, &config.name));
         }
+        all_entries.extend(entries);
     }
 
     if json_output {
