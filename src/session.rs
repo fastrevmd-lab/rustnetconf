@@ -92,6 +92,9 @@ pub struct Session {
     notification_buffer: VecDeque<Notification>,
     /// True after a successful `create-subscription` RPC.
     has_subscription: bool,
+    /// Maximum number of bytes that may accumulate in `read_buffer` before
+    /// the read is aborted. Defaults to [`MAX_READ_BUFFER`].
+    max_read_buffer: usize,
 }
 
 impl Session {
@@ -117,6 +120,7 @@ impl Session {
             private_config_open: false,
             notification_buffer: VecDeque::new(),
             has_subscription: false,
+            max_read_buffer: MAX_READ_BUFFER,
         }
     }
 
@@ -126,6 +130,15 @@ impl Session {
     /// profile is locked in.
     pub fn set_vendor_profile(&mut self, profile: Box<dyn VendorProfile>) {
         self.vendor_profile = profile;
+    }
+
+    /// Set the maximum read buffer size in bytes.
+    ///
+    /// If the device sends more data than this without completing a framed
+    /// message, the read is aborted to prevent memory exhaustion.
+    /// Defaults to [`MAX_READ_BUFFER`] (100 MB).
+    pub fn set_max_read_buffer(&mut self, max_bytes: usize) {
+        self.max_read_buffer = max_bytes;
     }
 
     /// Perform the NETCONF `<hello>` exchange and establish the session.
@@ -429,12 +442,12 @@ impl Session {
             }
             self.read_buffer.extend_from_slice(&temp_buf[..bytes_read]);
 
-            if self.read_buffer.len() > MAX_READ_BUFFER {
+            if self.read_buffer.len() > self.max_read_buffer {
                 return Err(TransportError::Io(std::io::Error::new(
                     std::io::ErrorKind::OutOfMemory,
                     format!(
                         "read buffer exceeded {} MB without completing a message",
-                        MAX_READ_BUFFER / (1024 * 1024)
+                        self.max_read_buffer / (1024 * 1024)
                     ),
                 ))
                 .into());
