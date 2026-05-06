@@ -192,6 +192,13 @@ pub struct PoolGuard<'a> {
 
 impl<'a> PoolGuard<'a> {
     /// Mark the connection as broken — it will be discarded on drop.
+    ///
+    /// # Warning
+    ///
+    /// After calling `discard()` the guard's `client` field is `None`. Any
+    /// subsequent dereference (via `Deref`/`DerefMut`) will panic. The guard
+    /// should be dropped immediately after calling this method and must not be
+    /// used to issue further RPCs.
     pub fn discard(&mut self) {
         self.client = None;
     }
