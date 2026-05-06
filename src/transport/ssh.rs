@@ -15,7 +15,6 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::process::{Child, ChildStdin, ChildStdout};
-use tokio::sync::Mutex;
 
 use zeroize::Zeroizing;
 
@@ -24,8 +23,8 @@ use crate::transport::Transport;
 
 /// SSH transport for NETCONF sessions.
 pub struct SshTransport {
-    channel: Arc<Mutex<ChannelStream>>,
-    handle: Arc<Mutex<client::Handle<SshHandler>>>,
+    channel: ChannelStream,
+    handle: client::Handle<SshHandler>,
     /// SSH handles for each jump-host hop, kept alive for the lifetime of
     /// the target session. Dropping a jump handle would tear down the
     /// `direct-tcpip` channel that carries the next hop's transport, so
@@ -585,8 +584,8 @@ impl SshTransport {
         };
 
         Ok(Self {
-            channel: Arc::new(Mutex::new(channel_stream)),
-            handle: Arc::new(Mutex::new(handle)),
+            channel: channel_stream,
+            handle,
             _jump_handles: jump_handles,
             _proxy_process: proxy_process,
         })
@@ -596,8 +595,7 @@ impl SshTransport {
 #[async_trait]
 impl Transport for SshTransport {
     async fn write_all(&mut self, data: &[u8]) -> Result<(), TransportError> {
-        let channel = self.channel.lock().await;
-        channel
+        self.channel
             .channel
             .data(data)
             .await
@@ -606,13 +604,11 @@ impl Transport for SshTransport {
     }
 
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-        let mut channel = self.channel.lock().await;
-
         // First, drain any buffered data
-        if !channel.read_buffer.is_empty() {
-            let to_read = std::cmp::min(buf.len(), channel.read_buffer.len());
-            buf[..to_read].copy_from_slice(&channel.read_buffer[..to_read]);
-            channel.read_buffer.drain(..to_read);
+        if !self.channel.read_buffer.is_empty() {
+            let to_read = std::cmp::min(buf.len(), self.channel.read_buffer.len());
+            buf[..to_read].copy_from_slice(&self.channel.read_buffer[..to_read]);
+            self.channel.read_buffer.drain(..to_read);
             return Ok(to_read);
         }
 
@@ -620,13 +616,13 @@ impl Transport for SshTransport {
         // Messages like WindowAdjusted, Success, ExtendedData (stderr)
         // can arrive at any time and must not be treated as EOF.
         loop {
-            match channel.channel.wait().await {
+            match self.channel.channel.wait().await {
                 Some(ChannelMsg::Data { data: channel_data }) => {
                     let bytes = &channel_data[..];
                     let to_copy = std::cmp::min(buf.len(), bytes.len());
                     buf[..to_copy].copy_from_slice(&bytes[..to_copy]);
                     if bytes.len() > to_copy {
-                        channel.read_buffer.extend_from_slice(&bytes[to_copy..]);
+                        self.channel.read_buffer.extend_from_slice(&bytes[to_copy..]);
                     }
                     return Ok(to_copy);
                 }
@@ -642,14 +638,12 @@ impl Transport for SshTransport {
     }
 
     async fn close(&mut self) -> Result<(), TransportError> {
-        let channel = self.channel.lock().await;
-        channel
+        self.channel
             .channel
             .eof()
             .await
             .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;
-        let handle = self.handle.lock().await;
-        handle
+        self.handle
             .disconnect(Disconnect::ByApplication, "closing session", "en")
             .await
             .map_err(|e| TransportError::Io(std::io::Error::other(e.to_string())))?;
