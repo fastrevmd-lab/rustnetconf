@@ -60,10 +60,19 @@ pub struct TlsConfig {
     /// Defaults to `host` if not set. Useful when connecting by IP address
     /// but the server certificate contains a hostname.
     pub server_name: Option<String>,
-    /// Accept invalid server certificates (**INSECURE**).
+    /// Accept invalid server certificates (**INSECURE — lab/test use only**).
     ///
-    /// Suitable for lab environments with self-signed certificates.
-    /// A warning is logged when this mode is used.
+    /// When `true`, **ALL** certificate validation is disabled. This includes:
+    /// - Trust chain verification (self-signed or unknown CA certs accepted)
+    /// - Signature verification (cryptographic signatures are not checked)
+    /// - Hostname verification (SNI name is not matched against the certificate)
+    /// - Expiry checks (expired certificates are accepted)
+    ///
+    /// This is not merely "trust relaxation" — it is a complete bypass of TLS
+    /// certificate security. Only use this in isolated lab or test environments
+    /// where you control both endpoints. Never use in production.
+    ///
+    /// A `tracing::warn!` is emitted at connection time when this is `true`.
     pub danger_accept_invalid_certs: bool,
 }
 
@@ -200,8 +209,10 @@ fn build_client_config(config: &TlsConfig) -> Result<rustls::ClientConfig, Trans
 
     if config.danger_accept_invalid_certs {
         tracing::warn!(
-            "accepting invalid TLS certificates — \
-             disable danger_accept_invalid_certs for production use"
+            host = %config.host,
+            "danger_accept_invalid_certs is enabled — ALL TLS certificate validation \
+             is bypassed (trust chain, signatures, hostname, and expiry checks). \
+             This must not be used in production."
         );
         tls_config
             .dangerous()
@@ -265,10 +276,16 @@ fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>, TransportErro
     Ok(key)
 }
 
-/// Certificate verifier that accepts all certificates (INSECURE).
+/// Certificate verifier that accepts all certificates without any checks (INSECURE).
 ///
-/// Used only when `danger_accept_invalid_certs` is enabled for lab environments
-/// with self-signed certificates.
+/// This is a **complete bypass** of TLS certificate security, not selective trust
+/// relaxation. The `rustls` API requires implementing all three verification methods
+/// (`verify_server_cert`, `verify_tls12_signature`, `verify_tls13_signature`) as a
+/// unit — there is no way to skip trust chain verification while keeping signature
+/// checks. As a result, all three are no-ops here.
+///
+/// Only used when `danger_accept_invalid_certs` is `true`. Never instantiate this
+/// in production code.
 #[derive(Debug)]
 struct DangerousVerifier;
 
