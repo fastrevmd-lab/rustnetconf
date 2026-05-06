@@ -18,7 +18,6 @@
 //! ```
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::capability::{self, Capabilities, NetconfVersion};
@@ -68,7 +67,7 @@ pub struct Session {
     transport: Box<dyn Transport>,
     framer: Box<dyn Framer>,
     capabilities: Option<Capabilities>,
-    message_id: AtomicU64,
+    message_id: u64,
     state: SessionState,
     /// Buffer for accumulating incoming data from the transport.
     read_buffer: Vec<u8>,
@@ -105,7 +104,7 @@ impl Session {
             transport,
             framer: Box::new(EomFramer::new()),
             capabilities: None,
-            message_id: AtomicU64::new(1),
+            message_id: 1u64,
             state: SessionState::Connected,
             read_buffer: Vec::new(),
             version: None,
@@ -385,10 +384,10 @@ impl Session {
     }
 
     /// Allocate the next message-id.
-    fn next_message_id(&self) -> String {
-        self.message_id
-            .fetch_add(1, Ordering::SeqCst)
-            .to_string()
+    fn next_message_id(&mut self) -> String {
+        let id = self.message_id;
+        self.message_id += 1;
+        id.to_string()
     }
 
     /// Read one complete framed message from the transport.
