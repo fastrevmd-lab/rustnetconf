@@ -46,7 +46,9 @@ async fn connect_vsrx(target: &VsrxTarget) -> Client {
 /// T34/T35: SSH connect + key auth, session establishment.
 #[tokio::test]
 async fn test_connect_and_hello() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let mut client = connect_vsrx(&target).await;
 
@@ -68,7 +70,9 @@ async fn test_connect_and_hello() {
 /// T38: Connection refused — wrong port should fail with TransportError.
 #[tokio::test]
 async fn test_connection_refused() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     // Port 12345 should be unreachable on the test device
     let (host, _port) = common::split_host_port(target.endpoint());
@@ -89,7 +93,9 @@ async fn test_connection_refused() {
 /// T39: Auth failure — wrong credentials should fail with TransportError::Auth.
 #[tokio::test]
 async fn test_auth_failure() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     // We want to assert *auth* failure, so opt out of host-key checking — the
     // default RejectAll would mask the auth error path we're testing.
@@ -118,7 +124,9 @@ async fn test_connection_unreachable_host() {
     // Still gated on opt-in env so this stays paired with the rest of the
     // integration suite, but the test itself targets RFC 5737 TEST-NET-1
     // rather than the configured device.
-    let Some(_target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(_target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     // 192.0.2.1 is TEST-NET-1 (RFC 5737) — guaranteed unreachable
     let result = tokio::time::timeout(
@@ -144,7 +152,9 @@ async fn test_connection_unreachable_host() {
 /// T42: get-config round trip — fetch running config.
 #[tokio::test]
 async fn test_get_config_running() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let mut client = connect_vsrx(&target).await;
 
@@ -168,7 +178,9 @@ async fn test_get_config_running() {
 /// T42: get-config with subtree filter.
 #[tokio::test]
 async fn test_get_config_filtered() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let mut client = connect_vsrx(&target).await;
 
@@ -191,7 +203,9 @@ async fn test_get_config_filtered() {
 /// Get candidate config — should match running when no uncommitted changes.
 #[tokio::test]
 async fn test_get_config_candidate() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let mut client = connect_vsrx(&target).await;
 
@@ -216,7 +230,9 @@ async fn test_get_config_candidate() {
 /// Get-config with a filter that returns no data — should succeed with empty/minimal response.
 #[tokio::test]
 async fn test_get_config_empty_filter_result() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let mut client = connect_vsrx(&target).await;
 
@@ -241,7 +257,9 @@ async fn test_get_config_empty_filter_result() {
 /// T41: Full edit-config round trip — lock → edit → validate → commit → unlock.
 #[tokio::test]
 async fn test_edit_config_round_trip() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
     let _guard = CANDIDATE_LOCK.lock().await;
 
     let mut client = connect_vsrx(&target).await;
@@ -305,7 +323,9 @@ async fn test_edit_config_round_trip() {
 /// Edit-config with replace operation — replaces entire subtree.
 #[tokio::test]
 async fn test_edit_config_replace() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
     let _guard = CANDIDATE_LOCK.lock().await;
 
     let mut client = connect_vsrx(&target).await;
@@ -357,7 +377,9 @@ async fn test_edit_config_replace() {
 /// Validate with intentionally invalid config — expect a structured RPC error.
 #[tokio::test]
 async fn test_edit_config_invalid_rejected() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
     let _guard = CANDIDATE_LOCK.lock().await;
 
     let mut client = connect_vsrx(&target).await;
@@ -397,7 +419,9 @@ async fn test_edit_config_invalid_rejected() {
 /// Lock contention — second lock on same datastore should fail with lock-denied.
 #[tokio::test]
 async fn test_lock_contention() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
     let _guard = CANDIDATE_LOCK.lock().await;
 
     // First client locks candidate
@@ -431,7 +455,9 @@ async fn test_lock_contention() {
 /// Unlock without lock — should fail with an RPC error.
 #[tokio::test]
 async fn test_unlock_without_lock() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
     let _guard = CANDIDATE_LOCK.lock().await;
 
     let mut client = connect_vsrx(&target).await;
@@ -447,7 +473,9 @@ async fn test_unlock_without_lock() {
 /// T33: Operation after session closed should fail gracefully.
 #[tokio::test]
 async fn test_operation_after_close() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let mut client = connect_vsrx(&target).await;
     client.close_session().await.expect("close_session failed");
@@ -460,7 +488,9 @@ async fn test_operation_after_close() {
 /// Double close-session should be idempotent — no panic, no error.
 #[tokio::test]
 async fn test_double_close_session() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let mut client = connect_vsrx(&target).await;
     client
@@ -476,7 +506,9 @@ async fn test_double_close_session() {
 /// Multiple sequential RPCs on one session — verify message-id incrementing.
 #[tokio::test]
 async fn test_multiple_sequential_rpcs() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
     let _guard = CANDIDATE_LOCK.lock().await;
 
     let mut client = connect_vsrx(&target).await;
@@ -528,7 +560,9 @@ async fn test_multiple_sequential_rpcs() {
 /// T32: Capability-gated operations — commit requires :candidate.
 #[tokio::test]
 async fn test_capability_check() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let client = connect_vsrx(&target).await;
 
@@ -547,7 +581,9 @@ async fn test_capability_check() {
 /// Verify all capability URIs are returned and non-empty.
 #[tokio::test]
 async fn test_capabilities_all_uris() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let client = connect_vsrx(&target).await;
 
@@ -575,7 +611,9 @@ async fn test_capabilities_all_uris() {
 /// T37: NETCONF subsystem channel — verify we get proper XML responses.
 #[tokio::test]
 async fn test_get_operational() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let mut client = connect_vsrx(&target).await;
 
@@ -606,7 +644,9 @@ async fn test_get_operational() {
 /// Get without filter — should return all operational + config data.
 #[tokio::test]
 async fn test_get_unfiltered() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let mut client = connect_vsrx(&target).await;
 
@@ -627,11 +667,12 @@ async fn test_get_unfiltered() {
 /// Multiple independent sessions to the same device — no interference.
 #[tokio::test]
 async fn test_concurrent_sessions() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     // Open two sessions simultaneously
-    let (mut client1, mut client2) =
-        tokio::join!(connect_vsrx(&target), connect_vsrx(&target));
+    let (mut client1, mut client2) = tokio::join!(connect_vsrx(&target), connect_vsrx(&target));
 
     // Both should have different session IDs
     let id1 = client1.capabilities().unwrap().session_id().unwrap();
@@ -663,7 +704,9 @@ async fn test_concurrent_sessions() {
 /// Large config fetch — verify the framing layer handles multi-read responses.
 #[tokio::test]
 async fn test_large_config_payload() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let mut client = connect_vsrx(&target).await;
 
@@ -693,7 +736,9 @@ async fn test_large_config_payload() {
 /// Verify that RPC errors from the device include the structured error fields.
 #[tokio::test]
 async fn test_rpc_error_structure() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
     let _guard = CANDIDATE_LOCK.lock().await;
 
     let mut client = connect_vsrx(&target).await;

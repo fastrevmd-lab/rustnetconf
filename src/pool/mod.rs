@@ -13,7 +13,7 @@
 //!
 //! ```rust,no_run
 //! use rustnetconf::pool::{DevicePool, DeviceConfig};
-//! use rustnetconf::transport::ssh::SshAuth;
+//! use rustnetconf::transport::ssh::{HostKeyVerification, SshAuth};
 //! use rustnetconf::Datastore;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,6 +23,9 @@
 //!         host: "10.0.0.1:830".into(),
 //!         username: "admin".into(),
 //!         auth: SshAuth::Password(zeroize::Zeroizing::new("secret".into())),
+//!         host_key_verification: Some(HostKeyVerification::Fingerprint(
+//!             "SHA256:AAAA...".into(),
+//!         )),
 //!         vendor: None,
 //!     })
 //!     .build();

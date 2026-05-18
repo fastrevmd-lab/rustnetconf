@@ -44,7 +44,9 @@ fn vsrx_device_config(target: &VsrxTarget) -> DeviceConfig {
 /// vSRX is auto-detected as Junos vendor.
 #[tokio::test]
 async fn test_vsrx_auto_detected_as_junos() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let client = connect_vsrx(&target).await;
     assert_eq!(client.vendor_name(), "junos");
@@ -53,7 +55,9 @@ async fn test_vsrx_auto_detected_as_junos() {
 /// edit-config with Junos auto-wrapping — bare config gets <configuration> added.
 #[tokio::test]
 async fn test_edit_config_with_junos_auto_wrap() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let mut client = connect_vsrx(&target).await;
     assert_eq!(client.vendor_name(), "junos");
@@ -95,7 +99,9 @@ async fn test_edit_config_with_junos_auto_wrap() {
 /// get-config with Junos unwrapping strips <configuration> wrapper.
 #[tokio::test]
 async fn test_get_config_junos_unwrap() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let mut client = connect_vsrx(&target).await;
 
@@ -122,7 +128,9 @@ async fn test_get_config_junos_unwrap() {
 /// Pool checkout + use + auto-checkin.
 #[tokio::test]
 async fn test_pool_checkout_and_use() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let pool = DevicePool::builder()
         .max_connections(5)
@@ -148,7 +156,9 @@ async fn test_pool_checkout_and_use() {
 /// Pool reuses connections on second checkout.
 #[tokio::test]
 async fn test_pool_connection_reuse() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let pool = DevicePool::builder()
         .max_connections(5)
@@ -178,7 +188,9 @@ async fn test_pool_connection_reuse() {
 /// Pool returns error for unknown device.
 #[tokio::test]
 async fn test_pool_unknown_device() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let pool = DevicePool::builder()
         .max_connections(5)
@@ -192,7 +204,9 @@ async fn test_pool_unknown_device() {
 /// Pool checkout times out when all connections in use.
 #[tokio::test]
 async fn test_pool_checkout_timeout() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let pool = DevicePool::builder()
         .max_connections(1)
@@ -211,7 +225,9 @@ async fn test_pool_checkout_timeout() {
 /// Concurrent pool checkouts to same device.
 #[tokio::test]
 async fn test_pool_concurrent_checkouts() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let pool = DevicePool::builder()
         .max_connections(3)
@@ -239,7 +255,9 @@ async fn test_pool_concurrent_checkouts() {
 /// Pool auto-detects Junos vendor on connections.
 #[tokio::test]
 async fn test_pool_auto_detects_vendor() {
-    let Some(target) = common::skip_unless_vsrx_configured() else { return; };
+    let Some(target) = common::skip_unless_vsrx_configured() else {
+        return;
+    };
 
     let pool = DevicePool::builder()
         .max_connections(5)

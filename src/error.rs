@@ -78,9 +78,7 @@ pub enum TransportError {
     /// Server presented a host key whose fingerprint does not match the one
     /// recorded in the known_hosts file for this host. Possible MITM attack
     /// or the device's host key was rotated — investigate before reconnecting.
-    #[error(
-        "host key mismatch for {host}: known_hosts has {expected}, server presented {actual}"
-    )]
+    #[error("host key mismatch for {host}: known_hosts has {expected}, server presented {actual}")]
     HostKeyMismatch {
         host: String,
         expected: String,

@@ -139,7 +139,13 @@ impl CidrNet {
             return false;
         };
         match (self, addr) {
-            (CidrNet::V4 { network, prefix_len }, IpAddr::V4(v4)) => {
+            (
+                CidrNet::V4 {
+                    network,
+                    prefix_len,
+                },
+                IpAddr::V4(v4),
+            ) => {
                 let bits = u32::from(v4);
                 let mask = if *prefix_len == 0 {
                     0
@@ -148,7 +154,13 @@ impl CidrNet {
                 };
                 (bits & mask) == (*network & mask)
             }
-            (CidrNet::V6 { network, prefix_len }, IpAddr::V6(v6)) => {
+            (
+                CidrNet::V6 {
+                    network,
+                    prefix_len,
+                },
+                IpAddr::V6(v6),
+            ) => {
                 let bits = u128::from(v6);
                 let mask = if *prefix_len == 0 {
                     0
@@ -451,7 +463,9 @@ mod tests {
         // A single plain-hostname entry; the line should parse and the host
         // pattern should match exactly.
         let line = "device-a.lab ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleKeyBlobForTesting";
-        let entry = super::parse_line(line, 1).expect("parses").expect("not blank");
+        let entry = super::parse_line(line, 1)
+            .expect("parses")
+            .expect("not blank");
         assert!(entry.host_matches("device-a.lab", 22));
         assert!(!entry.host_matches("device-b.lab", 22));
     }
@@ -563,8 +577,12 @@ mod tests {
     fn parse_line_blank_and_comment_yield_none() {
         assert!(super::parse_line("", 1).unwrap().is_none());
         assert!(super::parse_line("   ", 1).unwrap().is_none());
-        assert!(super::parse_line("# this is a comment", 1).unwrap().is_none());
-        assert!(super::parse_line("   # indented comment", 1).unwrap().is_none());
+        assert!(super::parse_line("# this is a comment", 1)
+            .unwrap()
+            .is_none());
+        assert!(super::parse_line("   # indented comment", 1)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -602,7 +620,10 @@ mod tests {
         let entry = super::parse_line(line, 1).unwrap().unwrap();
         assert!(entry.host_matches("a.lab.example.org", 22));
         assert!(entry.host_matches("longer.lab.example.org", 22));
-        assert!(!entry.host_matches("lab.example.org", 22), "literal '.' in pattern must match");
+        assert!(
+            !entry.host_matches("lab.example.org", 22),
+            "literal '.' in pattern must match"
+        );
         assert!(!entry.host_matches("a.other.example.org", 22));
 
         let line = "device?.lab ssh-ed25519 AAAAblob";
