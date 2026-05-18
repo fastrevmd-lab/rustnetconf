@@ -491,7 +491,7 @@ SKIP_INTEGRATION=1 cargo test             # Skip tests requiring a device
 
 - Use Ed25519 SSH keys (not RSA) for device authentication (also mitigates
   RUSTSEC-2023-0071 above)
-- Set `host_key_verification(HostKeyVerification::Fingerprint(...))` in production — the default is `RejectAll` (fail closed), so the connection will refuse to complete until you choose a policy. For the CLI, set `host_key_fingerprint = "SHA256:..."` per device in `inventory.toml`.
+- Set `host_key_verification(HostKeyVerification::Fingerprint(...))` or `HostKeyVerification::KnownHosts(path)` in production — the default is `RejectAll` (fail closed), so the connection will refuse to complete until you choose a policy. For the CLI, set either `host_key_fingerprint = "SHA256:..."` or `known_hosts_path = "/path/to/known_hosts"` per device in `inventory.toml` (or `known_hosts_path` under `[defaults]` for fleet-wide pinning). See `examples/known_hosts.rs` for the `ssh-keyscan` workflow.
 - Set `.rpc_timeout(Duration::from_secs(30))` to prevent hanging on unresponsive devices
 - Prefer SSH agent auth over inline passwords
 - Store credentials in inventory.toml with restricted file permissions (`chmod 600`)
