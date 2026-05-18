@@ -12,6 +12,31 @@ Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and
 | **rustnetconf-yang** | YANG model code generation (compile-time config validation) |
 | **rustnetconf-cli** | Terraform-like CLI tool (`netconf` binary) |
 
+## What's New in v0.11.0
+
+Security remediation pass — addresses the seven findings from the internal
+audit (RNC-SEC-001..006 + CI hardening). Merged via PR #27.
+
+**Breaking changes:**
+- `ClientBuilder` default `HostKeyVerification` is now `RejectAll` (fail closed). Connections refuse to complete until the caller pins a fingerprint or explicitly opts in to `AcceptAll`. `ProxyJump` hops parsed from `~/.ssh/config` likewise default to `RejectAll`.
+- `inventory.toml`: device `password` and `key_passphrase` fields now deserialize into a `SecretString` newtype. `Debug` prints `SecretString(***)` and contents zeroize on drop.
+- `ClientBuilder::password` / `.key_passphrase` now accept `Option<Zeroizing<String>>` (was plain `Option<String>`).
+
+**Security fixes:**
+- **RNC-SEC-001** — SSH host-key verification fails closed by default in both the library and the CLI. New CLI flag `--insecure-accept-host-key` for lab use; otherwise `host_key_fingerprint` must be set per device in `inventory.toml`.
+- **RNC-SEC-002** — RUSTSEC-2023-0071 (rsa Marvin Attack timing side-channel) risk-accepted via `.cargo/audit.toml` with reachability analysis and review date 2026-08-01. russh bumped 0.60.2 → 0.60.3.
+- **RNC-SEC-003** — Inventory passwords use the new `SecretString` type with redacted `Debug` and a custom `Deserialize` that zeroizes on drop.
+- **RNC-SEC-004** — State files always land at `0o600` via atomic temp-file + `rename(2)`, even when a pre-existing file had looser permissions. `.netconf` and `.netconf/state` are forced to `0o700` on every call. Stale temp files from a prior crash are cleaned up.
+- **RNC-SEC-005** — `apply` and `rollback` guarantee candidate-lock cleanup on error. New `Client::release_candidate_lock_best_effort` (discard-changes + unlock, swallowing errors) is invoked from extracted `*_locked_region` helpers.
+- **RNC-SEC-006** — Desired XML is validated for well-formedness *before* any device connection or candidate lock. Errors name the offending file.
+
+**CI hardening:**
+- New `.github/workflows/ci.yml` runs build, test (workspace, all features), clippy with `-D warnings`, rustfmt, and `cargo audit` on every push and PR to main.
+
+**Quality fixes:**
+- YANG codegen: generated `use super::*;` / `use crate::serialize::*;` imports now carry `#[allow(unused_imports)]` so modules without leaf references compile cleanly under `-D warnings`.
+- YANG codegen test: corrected `r#type` → `type_` to match the field-sanitization the generator actually emits.
+
 ## What's New in v0.10.0
 
 **Breaking changes:**
