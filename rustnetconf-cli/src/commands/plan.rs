@@ -1,23 +1,24 @@
 //! `netconf plan <device>` — show what would change.
 
-use std::path::Path;
-use rustnetconf::Datastore;
 use crate::connect::connect_device;
 use crate::desired::read_desired_configs;
-use crate::diff::{diff_xml, format_colored, format::summary};
+use crate::diff::{diff_xml, format::summary, format_colored};
 use crate::inventory::Inventory;
+use rustnetconf::Datastore;
+use std::path::Path;
 
 pub async fn run(
     project_dir: &Path,
     device_name: &str,
     json_output: bool,
+    accept_insecure_host_key: bool,
 ) -> Result<bool, String> {
     let inventory = Inventory::load(&project_dir.join("inventory.toml"))?;
     let device = inventory.device(device_name)?;
     let desired_configs = read_desired_configs(project_dir, device_name)?;
 
     eprintln!("Connecting to {} ({})...", device.name, device.host);
-    let mut client = connect_device(&device).await?;
+    let mut client = connect_device(&device, accept_insecure_host_key).await?;
     eprintln!("Connected (vendor: {})", client.vendor_name());
 
     let mut has_changes = false;
@@ -52,7 +53,10 @@ pub async fn run(
 
     eprintln!("\n{}", summary(&all_entries.clone()));
 
-    client.close_session().await.map_err(|e| format!("close failed: {e}"))?;
+    client
+        .close_session()
+        .await
+        .map_err(|e| format!("close failed: {e}"))?;
 
     Ok(has_changes)
 }

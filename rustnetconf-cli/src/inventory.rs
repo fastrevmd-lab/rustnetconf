@@ -1,8 +1,56 @@
 //! Parse inventory.toml — maps device names to connection details.
+//!
+//! ## Secrets
+//!
+//! `inventory.toml` may contain plaintext passwords. Treat the file as
+//! sensitive: protect with restrictive filesystem permissions (`chmod 600`),
+//! add it to `.gitignore`, and prefer key-file or SSH-agent authentication
+//! over inline passwords where possible.
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
+use zeroize::Zeroizing;
+
+/// A password or other secret that:
+/// 1. Is zeroized on drop (backed by [`zeroize::Zeroizing`]).
+/// 2. Redacts itself in `Debug` output to prevent accidental disclosure via
+///    panic messages, `tracing`, or `dbg!`.
+/// 3. Deserializes from a plain TOML string transparently.
+#[derive(Clone)]
+pub struct SecretString(Zeroizing<String>);
+
+impl SecretString {
+    /// Wrap an existing string. Prefer `Deserialize` for the normal path —
+    /// this constructor exists for tests and programmatic construction.
+    #[allow(dead_code)]
+    pub fn new(value: String) -> Self {
+        Self(Zeroizing::new(value))
+    }
+
+    /// Borrow the inner secret as `&str`. Callers should pass this directly
+    /// into APIs that need it and avoid storing the result.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SecretString {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SecretString(***)")
+    }
+}
+
+impl<'de> Deserialize<'de> for SecretString {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        Ok(SecretString(Zeroizing::new(raw)))
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct Inventory {
@@ -23,9 +71,18 @@ pub struct InventoryDefaults {
 pub struct DeviceEntry {
     pub host: String,
     pub username: Option<String>,
-    pub password: Option<String>,
+    /// Plaintext password from `inventory.toml`. Wrapped in
+    /// [`SecretString`] so it is zeroized on drop and never shows up in
+    /// `Debug` output. Prefer `key_file` where possible.
+    pub password: Option<SecretString>,
     pub key_file: Option<String>,
     pub vendor: Option<String>,
+    /// SHA-256 host key fingerprint to pin (with or without `SHA256:` prefix).
+    ///
+    /// Obtain with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the
+    /// device. When set, the SSH host key must match exactly or the
+    /// connection is rejected.
+    pub host_key_fingerprint: Option<String>,
 }
 
 impl Inventory {
@@ -45,10 +102,14 @@ impl Inventory {
 
     /// Get a device entry by name, with defaults applied.
     pub fn device(&self, name: &str) -> Result<ResolvedDevice, String> {
-        let entry = self.devices.get(name)
+        let entry = self
+            .devices
+            .get(name)
             .ok_or_else(|| format!("device '{name}' not found in inventory"))?;
 
-        let username = entry.username.clone()
+        let username = entry
+            .username
+            .clone()
             .or_else(|| self.defaults.username.clone())
             .ok_or_else(|| format!("device '{name}': no username specified"))?;
 
@@ -60,8 +121,12 @@ impl Inventory {
             username,
             password: entry.password.clone(),
             key_file,
-            vendor: entry.vendor.clone().or_else(|| self.defaults.vendor.clone()),
+            vendor: entry
+                .vendor
+                .clone()
+                .or_else(|| self.defaults.vendor.clone()),
             confirm_timeout: self.defaults.confirm_timeout.unwrap_or(60),
+            host_key_fingerprint: entry.host_key_fingerprint.clone(),
         })
     }
 }
@@ -72,11 +137,14 @@ pub struct ResolvedDevice {
     pub name: String,
     pub host: String,
     pub username: String,
-    pub password: Option<String>,
+    /// Password from inventory, redacted in `Debug` and zeroized on drop.
+    pub password: Option<SecretString>,
     pub key_file: Option<String>,
     #[allow(dead_code)]
     pub vendor: Option<String>,
     pub confirm_timeout: u32,
+    /// Optional SHA-256 host key fingerprint to pin for this device.
+    pub host_key_fingerprint: Option<String>,
 }
 
 /// Resolve ~ to home directory in a path.
@@ -118,6 +186,53 @@ password = "secret"
         let dev = inv.device("spine-01").unwrap();
         assert_eq!(dev.host, "10.0.0.1:830");
         assert_eq!(dev.confirm_timeout, 120);
+
+        // Password deserialized into a SecretString and is recoverable
+        // via expose().
+        let dev2 = inv.device("spine-02").unwrap();
+        assert_eq!(
+            dev2.password.as_ref().map(SecretString::expose),
+            Some("secret")
+        );
+    }
+
+    /// Plaintext password from inventory.toml must never appear in Debug
+    /// output of `DeviceEntry`, `ResolvedDevice`, or `Inventory`. Regression
+    /// guard for RNC-SEC-003.
+    #[test]
+    fn debug_output_does_not_leak_password() {
+        let toml = r#"
+[devices.router-01]
+host = "10.0.0.1"
+username = "admin"
+password = "hunter2-do-not-leak"
+"#;
+        let inv: Inventory = toml::from_str(toml).unwrap();
+        let inventory_debug = format!("{inv:?}");
+        assert!(
+            !inventory_debug.contains("hunter2-do-not-leak"),
+            "password leaked through Inventory Debug: {inventory_debug}"
+        );
+
+        let dev = inv.device("router-01").unwrap();
+        let device_debug = format!("{dev:?}");
+        assert!(
+            !device_debug.contains("hunter2-do-not-leak"),
+            "password leaked through ResolvedDevice Debug: {device_debug}"
+        );
+
+        // Sanity: the redacted marker is present so we know Debug actually
+        // visited the field.
+        assert!(device_debug.contains("SecretString(***)"));
+    }
+
+    #[test]
+    fn secret_string_debug_redacts_value() {
+        let secret = SecretString::new("super-secret".to_string());
+        let debug = format!("{secret:?}");
+        assert_eq!(debug, "SecretString(***)");
+        // Sanity: expose() still returns the plaintext for actual use.
+        assert_eq!(secret.expose(), "super-secret");
     }
 
     #[test]

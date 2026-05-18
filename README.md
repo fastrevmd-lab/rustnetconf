@@ -98,6 +98,12 @@ key_file = "~/.ssh/id_ed25519"
 # vendor auto-detected from device hello
 ```
 
+**Secrets:** `inventory.toml` may contain plaintext passwords. Prefer
+`key_file` or SSH-agent auth where possible. If you must use inline
+passwords, protect the file with `chmod 600 inventory.toml` and add it
+to `.gitignore`. Passwords are stored in zeroizing memory and redacted
+from `Debug` output, but the on-disk file itself is plaintext.
+
 ## Library — Quick Start
 
 ```toml
@@ -391,8 +397,25 @@ match result {
 - **Mock transport tests** — session state machine, CommitUnknown detection, lock recovery
 - **Integration tests** — 32 tests against a live Juniper vSRX including full edit-config round trips, vendor auto-detection, connection pooling, and concurrent sessions
 
+### Prerequisites
+
+The `rustnetconf-yang` subcrate builds `libyang2` from source via `yang2`'s `bundled` feature, which requires `cmake`. Install it before running workspace-wide tests or clippy:
+
 ```bash
-cargo test --workspace                    # Run all tests
+# Debian/Ubuntu
+sudo apt-get install cmake
+
+# macOS
+brew install cmake
+
+# Fedora/RHEL
+sudo dnf install cmake
+```
+
+The core `rustnetconf` and `rustnetconf-cli` crates do not require `cmake`; `cargo test -p rustnetconf` works without it.
+
+```bash
+cargo test --workspace                    # Run all tests (requires cmake)
 cargo test --test integration_vsrx        # Run vSRX integration tests only
 SKIP_INTEGRATION=1 cargo test             # Skip tests requiring a device
 ```
@@ -408,7 +431,7 @@ SKIP_INTEGRATION=1 cargo test             # Skip tests requiring a device
 ### Security Features
 
 - **Credential zeroization** — Passwords and key passphrases use `Zeroizing<String>` (via the `zeroize` crate) and are securely erased from memory on drop.
-- **SSH host key verification** — `HostKeyVerification` must be set explicitly (no `Default` impl). Use `Fingerprint("SHA256:...")` to pin host keys in production. `AcceptAll` is available for lab use but emits a `tracing::warn!`.
+- **SSH host key verification** — `HostKeyVerification` must be set explicitly. The `ClientBuilder` default is `RejectAll` (fail closed): the SSH handshake fails until the caller pins a fingerprint via `Fingerprint("SHA256:...")` or explicitly opts in to `AcceptAll` for lab use (logs a `tracing::warn!`). `ProxyJump` hops parsed from `~/.ssh/config` likewise default to `RejectAll` and must be individually configured. In the CLI, set `host_key_fingerprint` per device in `inventory.toml`, or pass `--insecure-accept-host-key` for lab use only.
 - **Shell-escaped ProxyCommand** — `%h` and `%p` substitutions are shell-escaped to prevent command injection via malicious hostnames.
 - **XML fragment validation** — All user-provided RPC content is validated for well-formedness before insertion, preventing XML injection.
 - **XML attribute escaping** — All message-id values are escaped to prevent XML attribute injection.
@@ -419,10 +442,21 @@ SKIP_INTEGRATION=1 cargo test             # Skip tests requiring a device
 - **Typed error hierarchy** — Structured error types (`ChannelClosed`, `SessionExpired`, `MessageIdMismatch`) enable precise error handling without string matching.
 - **No unsafe code** — The entire codebase uses safe Rust.
 
+### Known advisories
+
+- **RUSTSEC-2023-0071** (Marvin Attack, `rsa` crate timing side-channel)
+  is present in the dependency graph via
+  `russh → internal-russh-forked-ssh-key → rsa 0.10.0-rc.16`. No fixed
+  upstream release is available yet. The advisory is risk-accepted with
+  rationale in `.cargo/audit.toml` and CI re-checks on every run. It only
+  matters when an **RSA** SSH key is used for authentication — Ed25519
+  and ECDSA paths are unaffected. Use the mitigation in the next section.
+
 ### Security Best Practices
 
-- Use Ed25519 SSH keys (not RSA) for device authentication
-- Set `host_key_verification(HostKeyVerification::Fingerprint(...))` in production — `HostKeyVerification` has no default, so you must choose explicitly
+- Use Ed25519 SSH keys (not RSA) for device authentication (also mitigates
+  RUSTSEC-2023-0071 above)
+- Set `host_key_verification(HostKeyVerification::Fingerprint(...))` in production — the default is `RejectAll` (fail closed), so the connection will refuse to complete until you choose a policy. For the CLI, set `host_key_fingerprint = "SHA256:..."` per device in `inventory.toml`.
 - Set `.rpc_timeout(Duration::from_secs(30))` to prevent hanging on unresponsive devices
 - Prefer SSH agent auth over inline passwords
 - Store credentials in inventory.toml with restricted file permissions (`chmod 600`)

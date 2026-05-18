@@ -1,17 +1,55 @@
 //! `netconf apply <device>` — apply desired config with confirmed-commit.
 
-use std::path::Path;
-use rustnetconf::{Datastore, DefaultOperation};
 use crate::connect::connect_device;
 use crate::desired::read_desired_configs;
+use crate::desired::DesiredConfig;
 use crate::diff::{diff_xml, format_colored};
 use crate::inventory::Inventory;
 use crate::state;
+use rustnetconf::{Client, Datastore, DefaultOperation};
+use std::path::Path;
+
+/// Run the edit/validate/commit sequence inside the candidate lock.
+///
+/// Extracted so the caller can attach a cleanup guard: any error returned
+/// here triggers `release_candidate_lock_best_effort` before the session
+/// is closed, preventing a stale lock from blocking subsequent runs.
+async fn apply_locked_region(
+    client: &mut Client,
+    configs_to_apply: &[&DesiredConfig],
+    confirm_timeout: u32,
+) -> Result<(), String> {
+    for config in configs_to_apply {
+        eprintln!("Applying {}...", config.name);
+        client
+            .edit_config(Datastore::Candidate)
+            .config(&config.xml)
+            .default_operation(DefaultOperation::Merge)
+            .send()
+            .await
+            .map_err(|e| format!("edit-config failed for {}: {e}", config.name))?;
+    }
+
+    eprintln!("Validating...");
+    client
+        .validate(Datastore::Candidate)
+        .await
+        .map_err(|e| format!("validation failed: {e}"))?;
+
+    eprintln!("Committing (confirmed, {}s timeout)...", confirm_timeout);
+    client
+        .confirmed_commit(confirm_timeout)
+        .await
+        .map_err(|e| format!("confirmed-commit failed: {e}"))?;
+
+    Ok(())
+}
 
 pub async fn run(
     project_dir: &Path,
     device_name: &str,
     auto_confirm: bool,
+    accept_insecure_host_key: bool,
 ) -> Result<(), String> {
     let inventory = Inventory::load(&project_dir.join("inventory.toml"))?;
     let device = inventory.device(device_name)?;
@@ -19,7 +57,7 @@ pub async fn run(
     let confirm_timeout = device.confirm_timeout;
 
     eprintln!("Connecting to {} ({})...", device.name, device.host);
-    let mut client = connect_device(&device).await?;
+    let mut client = connect_device(&device, accept_insecure_host_key).await?;
     eprintln!("Connected (vendor: {})", client.vendor_name());
 
     // Show plan first
@@ -75,34 +113,26 @@ pub async fn run(
 
     // Lock candidate
     eprintln!("Locking candidate datastore...");
-    client.lock(Datastore::Candidate).await
+    client
+        .lock(Datastore::Candidate)
+        .await
         .map_err(|e| format!("lock failed: {e}"))?;
 
-    // Apply each config file
-    for config in &configs_to_apply {
-        eprintln!("Applying {}...", config.name);
-        client.edit_config(Datastore::Candidate)
-            .config(&config.xml)
-            .default_operation(DefaultOperation::Merge)
-            .send()
-            .await
-            .map_err(|e| {
-                format!("edit-config failed for {}: {e}", config.name)
-            })?;
+    // Run the edit/validate/commit region with a cleanup guard so any
+    // mid-transaction error releases the lock and discards pending changes.
+    let result = apply_locked_region(&mut client, &configs_to_apply, confirm_timeout).await;
+
+    if let Err(e) = result {
+        eprintln!("Error during apply, releasing candidate lock...");
+        client.release_candidate_lock_best_effort().await;
+        client.close_session().await.ok();
+        return Err(e);
     }
 
-    // Validate
-    eprintln!("Validating...");
-    client.validate(Datastore::Candidate).await
-        .map_err(|e| format!("validation failed: {e}"))?;
-
-    // Confirmed commit
-    eprintln!("Committing (confirmed, {}s timeout)...", confirm_timeout);
-    client.confirmed_commit(confirm_timeout).await
-        .map_err(|e| format!("confirmed-commit failed: {e}"))?;
-
-    // Unlock
-    client.unlock(Datastore::Candidate).await
+    // Unlock on success path
+    client
+        .unlock(Datastore::Candidate)
+        .await
         .map_err(|e| format!("unlock failed: {e}"))?;
 
     eprintln!(

@@ -58,12 +58,17 @@ pub enum SshAuth {
 ///
 /// Controls how the client validates the device's SSH host key during
 /// connection. Use this to protect against man-in-the-middle attacks.
+///
+/// Default for [`crate::ClientBuilder`]: [`HostKeyVerification::RejectAll`]
+/// (fail closed). Callers must explicitly choose a policy via
+/// [`crate::ClientBuilder::host_key_verification`] for connections to
+/// succeed in production.
 #[derive(Clone, Debug)]
 pub enum HostKeyVerification {
     /// Accept all host keys without verification (**INSECURE**).
     ///
     /// Suitable for lab environments, testing, or initial device provisioning.
-    /// A warning is logged when this mode is used.
+    /// A warning is logged when this mode is used. Never use in production.
     AcceptAll,
 
     /// Accept only a host key matching a specific SHA-256 fingerprint.
@@ -74,7 +79,13 @@ pub enum HostKeyVerification {
     /// Obtain the fingerprint with: `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub`
     Fingerprint(String),
 
-    /// Reject all host keys (useful for testing error paths).
+    /// Reject every host key — fail closed.
+    ///
+    /// This is the default for [`crate::ClientBuilder`]. Connections will
+    /// fail until the caller explicitly chooses [`Self::Fingerprint`] (for
+    /// production) or [`Self::AcceptAll`] (for labs/testing).
+    ///
+    /// Also useful in tests to exercise error paths.
     RejectAll,
 }
 
@@ -139,40 +150,60 @@ impl client::Handler for SshHandler {
         &mut self,
         server_public_key: &keys::PublicKey,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        let result = match &self.host_key_verification {
+        let fingerprint = server_public_key
+            .fingerprint(keys::HashAlg::Sha256)
+            .to_string();
+        let allowed = evaluate_host_key_policy(&self.host_key_verification, &fingerprint);
+        match &self.host_key_verification {
             HostKeyVerification::AcceptAll => {
                 tracing::warn!(
                     "accepting SSH host key without verification — \
                      set host_key_verification() for production use"
                 );
-                Ok(true)
+            }
+            HostKeyVerification::Fingerprint(expected) if allowed => {
+                tracing::debug!("SSH host key fingerprint verified");
+                let _ = expected;
             }
             HostKeyVerification::Fingerprint(expected) => {
-                let fingerprint = server_public_key.fingerprint(keys::HashAlg::Sha256);
-                let actual = fingerprint.to_string();
-                // Allow comparison with or without "SHA256:" prefix
-                let matches = actual == *expected
-                    || actual
-                        .strip_prefix("SHA256:")
-                        .is_some_and(|stripped| stripped == expected);
-                if matches {
-                    tracing::debug!("SSH host key fingerprint verified");
-                    Ok(true)
-                } else {
-                    tracing::error!(
-                        expected = %expected,
-                        actual = %actual,
-                        "SSH host key fingerprint mismatch — possible MITM attack"
-                    );
-                    Ok(false)
-                }
+                tracing::error!(
+                    expected = %expected,
+                    actual = %fingerprint,
+                    "SSH host key fingerprint mismatch — possible MITM attack"
+                );
             }
             HostKeyVerification::RejectAll => {
-                tracing::error!("SSH host key rejected (RejectAll policy)");
-                Ok(false)
+                tracing::error!(
+                    actual = %fingerprint,
+                    "SSH host key rejected (RejectAll policy — fail closed). \
+                     Pin the device's fingerprint with HostKeyVerification::Fingerprint \
+                     or explicitly opt in to HostKeyVerification::AcceptAll for lab use."
+                );
             }
-        };
-        std::future::ready(result)
+        }
+        std::future::ready(Ok(allowed))
+    }
+}
+
+/// Decide whether an SSH host key with the given SHA-256 fingerprint should
+/// be accepted under `policy`.
+///
+/// Pure function so the decision is unit-testable without constructing a
+/// real `russh::keys::PublicKey`. `actual_fingerprint` is expected in the
+/// format produced by `russh::keys::PublicKey::fingerprint(HashAlg::Sha256)`
+/// (typically `"SHA256:<base64>"`); comparison against
+/// [`HostKeyVerification::Fingerprint`] is tolerant of a missing `SHA256:`
+/// prefix on the expected side.
+fn evaluate_host_key_policy(policy: &HostKeyVerification, actual_fingerprint: &str) -> bool {
+    match policy {
+        HostKeyVerification::AcceptAll => true,
+        HostKeyVerification::RejectAll => false,
+        HostKeyVerification::Fingerprint(expected) => {
+            actual_fingerprint == expected
+                || actual_fingerprint
+                    .strip_prefix("SHA256:")
+                    .is_some_and(|stripped| stripped == expected)
+        }
     }
 }
 
@@ -269,17 +300,11 @@ impl AsyncWrite for ProxyCommandStream {
         Pin::new(&mut self.stdin).poll_write(cx, data)
     }
 
-    fn poll_flush(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.stdin).poll_flush(cx)
     }
 
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<std::io::Result<()>> {
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
         Pin::new(&mut self.stdin).poll_shutdown(cx)
     }
 }
@@ -301,17 +326,17 @@ fn spawn_proxy_command(
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| {
-            TransportError::Connect(format!(
-                "failed to spawn ProxyCommand `{expanded}`: {e}"
-            ))
+            TransportError::Connect(format!("failed to spawn ProxyCommand `{expanded}`: {e}"))
         })?;
 
-    let stdin = child.stdin.take().ok_or_else(|| {
-        TransportError::Connect("ProxyCommand stdin not captured".to_string())
-    })?;
-    let stdout = child.stdout.take().ok_or_else(|| {
-        TransportError::Connect("ProxyCommand stdout not captured".to_string())
-    })?;
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| TransportError::Connect("ProxyCommand stdin not captured".to_string()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| TransportError::Connect("ProxyCommand stdout not captured".to_string()))?;
 
     Ok((ProxyCommandStream { stdin, stdout }, child))
 }
@@ -336,11 +361,10 @@ async fn authenticate(
                 TransportError::Auth("failed to read SSH key file".to_string())
             })?;
             let passphrase_str = passphrase.as_ref().map(|p| p.as_str());
-            let key_pair = keys::decode_secret_key(&key_contents, passphrase_str)
-                .map_err(|e| {
-                    tracing::debug!(%e, "failed to decode key");
-                    TransportError::Auth("failed to decode SSH key".to_string())
-                })?;
+            let key_pair = keys::decode_secret_key(&key_contents, passphrase_str).map_err(|e| {
+                tracing::debug!(%e, "failed to decode key");
+                TransportError::Auth("failed to decode SSH key".to_string())
+            })?;
             let hash_alg = handle
                 .best_supported_rsa_hash()
                 .await
@@ -356,9 +380,10 @@ async fn authenticate(
             let mut agent = keys::agent::client::AgentClient::connect_env()
                 .await
                 .map_err(|e| TransportError::Auth(format!("SSH agent connect failed: {e}")))?;
-            let identities = agent.request_identities().await.map_err(|e| {
-                TransportError::Auth(format!("SSH agent identities failed: {e}"))
-            })?;
+            let identities = agent
+                .request_identities()
+                .await
+                .map_err(|e| TransportError::Auth(format!("SSH agent identities failed: {e}")))?;
 
             let mut auth_success = false;
             for identity in identities {
@@ -448,9 +473,7 @@ impl SshTransport {
                         .channel_open_direct_tcpip(&*hop.host, hop.port as u32, "0.0.0.0", 0)
                         .await
                         .map_err(|e| {
-                            TransportError::Connect(format!(
-                                "direct-tcpip to {label} failed: {e}"
-                            ))
+                            TransportError::Connect(format!("direct-tcpip to {label} failed: {e}"))
                         })?;
                     let stream = channel.into_stream();
                     let handler = SshHandler {
@@ -547,7 +570,9 @@ impl SshTransport {
         channel
             .request_subsystem(true, "netconf")
             .await
-            .map_err(|e| TransportError::Channel(format!("failed to request netconf subsystem: {e}")))?;
+            .map_err(|e| {
+                TransportError::Channel(format!("failed to request netconf subsystem: {e}"))
+            })?;
 
         // Wait for the subsystem confirmation from the server.
         // When `want_reply` is true, the server sends Success or Failure.
@@ -622,7 +647,9 @@ impl Transport for SshTransport {
                     let to_copy = std::cmp::min(buf.len(), bytes.len());
                     buf[..to_copy].copy_from_slice(&bytes[..to_copy]);
                     if bytes.len() > to_copy {
-                        self.channel.read_buffer.extend_from_slice(&bytes[to_copy..]);
+                        self.channel
+                            .read_buffer
+                            .extend_from_slice(&bytes[to_copy..]);
                     }
                     return Ok(to_copy);
                 }
@@ -684,9 +711,7 @@ mod tests {
                 path: "/home/me/.ssh/jump_key".to_string(),
                 passphrase: None,
             },
-            host_key_verification: HostKeyVerification::Fingerprint(
-                "SHA256:abc123".to_string(),
-            ),
+            host_key_verification: HostKeyVerification::Fingerprint("SHA256:abc123".to_string()),
         };
         assert_eq!(hop.host, "bastion.example.com");
         assert_eq!(hop.port, 22);
@@ -842,5 +867,50 @@ mod tests {
             Ok(_) => panic!("expected connect to fail"),
         };
         assert!(matches!(err, TransportError::Connect(_)), "got {err:?}");
+    }
+
+    // ───────── host key verification policy ─────────
+    //
+    // The pure `evaluate_host_key_policy` helper isolates the decision from
+    // the russh trait impl so we can unit-test every variant without
+    // constructing a real `keys::PublicKey`.
+
+    #[test]
+    fn host_key_policy_accept_all_accepts_any_fingerprint() {
+        let policy = HostKeyVerification::AcceptAll;
+        assert!(evaluate_host_key_policy(&policy, "SHA256:anything"));
+        assert!(evaluate_host_key_policy(&policy, ""));
+    }
+
+    #[test]
+    fn host_key_policy_reject_all_rejects_any_fingerprint() {
+        // Production safe default: connections fail until the caller pins
+        // a fingerprint or explicitly opts in to AcceptAll.
+        let policy = HostKeyVerification::RejectAll;
+        assert!(!evaluate_host_key_policy(&policy, "SHA256:abc"));
+        assert!(!evaluate_host_key_policy(&policy, "anything"));
+    }
+
+    #[test]
+    fn host_key_policy_fingerprint_match_accepts() {
+        // Full SHA256:... form matches exactly.
+        let policy = HostKeyVerification::Fingerprint("SHA256:abc123".to_string());
+        assert!(evaluate_host_key_policy(&policy, "SHA256:abc123"));
+    }
+
+    #[test]
+    fn host_key_policy_fingerprint_match_strips_sha256_prefix() {
+        // Users often paste just the base64 portion of `ssh-keygen -lf`
+        // output. The helper tolerates a missing prefix on the expected
+        // side as long as the actual has it.
+        let policy = HostKeyVerification::Fingerprint("abc123".to_string());
+        assert!(evaluate_host_key_policy(&policy, "SHA256:abc123"));
+    }
+
+    #[test]
+    fn host_key_policy_fingerprint_mismatch_rejects() {
+        let policy = HostKeyVerification::Fingerprint("SHA256:abc123".to_string());
+        assert!(!evaluate_host_key_policy(&policy, "SHA256:def456"));
+        assert!(!evaluate_host_key_policy(&policy, ""));
     }
 }
