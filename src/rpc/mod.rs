@@ -78,7 +78,10 @@ mod xml_validate_tests {
 
     #[test]
     fn test_valid_xml_fragment() {
-        assert!(validate_xml_fragment("<interfaces><interface><name>ge-0/0/0</name></interface></interfaces>").is_ok());
+        assert!(validate_xml_fragment(
+            "<interfaces><interface><name>ge-0/0/0</name></interface></interfaces>"
+        )
+        .is_ok());
     }
 
     #[test]
@@ -101,7 +104,10 @@ mod xml_validate_tests {
         let result = validate_xml_fragment("<unclosed>");
         assert!(result.is_err(), "unclosed tag should fail validation");
         let err = format!("{}", result.unwrap_err());
-        assert!(err.contains("not well-formed"), "error should mention not well-formed: {err}");
+        assert!(
+            err.contains("not well-formed"),
+            "error should mention not well-formed: {err}"
+        );
     }
 
     #[test]
@@ -113,7 +119,10 @@ mod xml_validate_tests {
     #[test]
     fn test_malformed_attribute_is_invalid() {
         let result = validate_xml_fragment("<a b=broken>");
-        assert!(result.is_err(), "malformed attribute should fail validation");
+        assert!(
+            result.is_err(),
+            "malformed attribute should fail validation"
+        );
     }
 }
 
@@ -185,9 +194,8 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
                         // Extract message-id attribute
                         for attr in tag.attributes().flatten() {
                             if attr.key.local_name().as_ref() == b"message-id" {
-                                found_message_id = Some(
-                                    String::from_utf8_lossy(&attr.value).to_string()
-                                );
+                                found_message_id =
+                                    Some(String::from_utf8_lossy(&attr.value).to_string());
                             }
                         }
                     }
@@ -207,13 +215,9 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
                         data_xml.push_str(name);
                         for attr in tag.attributes().flatten() {
                             data_xml.push(' ');
-                            data_xml.push_str(
-                                std::str::from_utf8(attr.key.as_ref()).unwrap_or(""),
-                            );
+                            data_xml.push_str(std::str::from_utf8(attr.key.as_ref()).unwrap_or(""));
                             data_xml.push_str("=\"");
-                            data_xml.push_str(
-                                &String::from_utf8_lossy(&attr.value),
-                            );
+                            data_xml.push_str(&String::from_utf8_lossy(&attr.value));
                             data_xml.push('"');
                         }
                         data_xml.push('>');
@@ -248,13 +252,9 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
                     data_xml.push_str(name);
                     for attr in tag.attributes().flatten() {
                         data_xml.push(' ');
-                        data_xml.push_str(
-                            std::str::from_utf8(attr.key.as_ref()).unwrap_or(""),
-                        );
+                        data_xml.push_str(std::str::from_utf8(attr.key.as_ref()).unwrap_or(""));
                         data_xml.push_str("=\"");
-                        data_xml.push_str(
-                            &String::from_utf8_lossy(&attr.value),
-                        );
+                        data_xml.push_str(&String::from_utf8_lossy(&attr.value));
                         data_xml.push('"');
                     }
                     data_xml.push_str("/>");
@@ -493,9 +493,7 @@ impl RpcErrorBuilder {
             severity: self.severity,
             app_tag: self.app_tag,
             path: self.path,
-            message: self
-                .message
-                .unwrap_or_else(|| "unknown error".to_string()),
+            message: self.message.unwrap_or_else(|| "unknown error".to_string()),
             info: self.info,
         }
     }
@@ -531,19 +529,15 @@ fn extract_rpc_reply_inner_content(xml: &str) -> Option<String> {
                         has_content = true;
                     }
                     depth += 1;
-                        content.push('<');
-                        content.push_str(name);
-                        for attr in tag.attributes().flatten() {
-                            content.push(' ');
-                            content.push_str(
-                                std::str::from_utf8(attr.key.as_ref()).unwrap_or(""),
-                            );
-                            content.push_str("=\"");
-                            content.push_str(
-                                &String::from_utf8_lossy(&attr.value),
-                            );
-                            content.push('"');
-                        }
+                    content.push('<');
+                    content.push_str(name);
+                    for attr in tag.attributes().flatten() {
+                        content.push(' ');
+                        content.push_str(std::str::from_utf8(attr.key.as_ref()).unwrap_or(""));
+                        content.push_str("=\"");
+                        content.push_str(&String::from_utf8_lossy(&attr.value));
+                        content.push('"');
+                    }
                     content.push('>');
                 }
             }
@@ -554,13 +548,9 @@ fn extract_rpc_reply_inner_content(xml: &str) -> Option<String> {
                 content.push_str(name);
                 for attr in tag.attributes().flatten() {
                     content.push(' ');
-                    content.push_str(
-                        std::str::from_utf8(attr.key.as_ref()).unwrap_or(""),
-                    );
+                    content.push_str(std::str::from_utf8(attr.key.as_ref()).unwrap_or(""));
                     content.push_str("=\"");
-                    content.push_str(
-                        &String::from_utf8_lossy(&attr.value),
-                    );
+                    content.push_str(&String::from_utf8_lossy(&attr.value));
                     content.push('"');
                 }
                 content.push_str("/>");
@@ -640,10 +630,7 @@ mod tests {
         let err = parse_rpc_reply(xml, "3").unwrap_err();
         match err {
             RpcError::ServerError {
-                tag,
-                message,
-                path,
-                ..
+                tag, message, path, ..
             } => {
                 assert_eq!(tag, ErrorTag::InvalidValue);
                 assert_eq!(message, "invalid interface name");

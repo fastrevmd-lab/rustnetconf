@@ -105,10 +105,7 @@ impl TlsTransport {
         let tls_config = build_client_config(config)?;
         let connector = TlsConnector::from(Arc::new(tls_config));
 
-        let sni = config
-            .server_name
-            .as_deref()
-            .unwrap_or(&config.host);
+        let sni = config.server_name.as_deref().unwrap_or(&config.host);
 
         let server_name = ServerName::try_from(sni.to_string()).map_err(|e| {
             TransportError::Tls(format!(
@@ -150,27 +147,17 @@ impl Transport for TlsTransport {
             .write_all(data)
             .await
             .map_err(TransportError::Io)?;
-        self.stream
-            .flush()
-            .await
-            .map_err(TransportError::Io)?;
+        self.stream.flush().await.map_err(TransportError::Io)?;
         Ok(())
     }
 
     async fn read(&mut self, buf: &mut [u8]) -> Result<usize, TransportError> {
-        let n = self
-            .stream
-            .read(buf)
-            .await
-            .map_err(TransportError::Io)?;
+        let n = self.stream.read(buf).await.map_err(TransportError::Io)?;
         Ok(n)
     }
 
     async fn close(&mut self) -> Result<(), TransportError> {
-        self.stream
-            .shutdown()
-            .await
-            .map_err(TransportError::Io)?;
+        self.stream.shutdown().await.map_err(TransportError::Io)?;
         Ok(())
     }
 }
@@ -182,9 +169,9 @@ fn build_client_config(config: &TlsConfig) -> Result<rustls::ClientConfig, Trans
     if let Some(ca_path) = &config.ca_cert {
         let certs = load_pem_certs(ca_path)?;
         for cert in certs {
-            root_store.add(cert).map_err(|e| {
-                TransportError::Tls(format!("failed to add CA certificate: {e}"))
-            })?;
+            root_store
+                .add(cert)
+                .map_err(|e| TransportError::Tls(format!("failed to add CA certificate: {e}")))?;
         }
     } else {
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
@@ -192,21 +179,20 @@ fn build_client_config(config: &TlsConfig) -> Result<rustls::ClientConfig, Trans
 
     let builder = rustls::ClientConfig::builder().with_root_certificates(root_store);
 
-    let mut tls_config = if let (Some(cert_path), Some(key_path)) =
-        (&config.client_cert, &config.client_key)
-    {
-        let certs = load_pem_certs(cert_path)?;
-        let key = load_private_key(key_path)?;
-        builder
-            .with_client_auth_cert(certs, key)
-            .map_err(|e| TransportError::Tls(format!("client certificate error: {e}")))?
-    } else if config.client_cert.is_some() || config.client_key.is_some() {
-        return Err(TransportError::Tls(
-            "both client_cert and client_key must be specified for mutual TLS".to_string(),
-        ));
-    } else {
-        builder.with_no_client_auth()
-    };
+    let mut tls_config =
+        if let (Some(cert_path), Some(key_path)) = (&config.client_cert, &config.client_key) {
+            let certs = load_pem_certs(cert_path)?;
+            let key = load_private_key(key_path)?;
+            builder
+                .with_client_auth_cert(certs, key)
+                .map_err(|e| TransportError::Tls(format!("client certificate error: {e}")))?
+        } else if config.client_cert.is_some() || config.client_key.is_some() {
+            return Err(TransportError::Tls(
+                "both client_cert and client_key must be specified for mutual TLS".to_string(),
+            ));
+        } else {
+            builder.with_no_client_auth()
+        };
 
     if config.danger_accept_invalid_certs {
         tracing::warn!(
@@ -389,6 +375,6 @@ mod tests {
         let result = load_private_key(Path::new("/nonexistent/key.pem"));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("failed to open key file"));
+        assert!(err.contains("failed to load private key from"));
     }
 }

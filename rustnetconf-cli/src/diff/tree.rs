@@ -101,12 +101,7 @@ fn parse_xml_tree(xml: &str) -> Result<Vec<XmlNode>, String> {
 }
 
 /// Recursively diff two node lists.
-fn diff_nodes(
-    desired: &[XmlNode],
-    running: &[XmlNode],
-    path: &str,
-    entries: &mut Vec<DiffEntry>,
-) {
+fn diff_nodes(desired: &[XmlNode], running: &[XmlNode], path: &str, entries: &mut Vec<DiffEntry>) {
     // Build maps of element name → children for both sides
     let desired_map = build_element_map(desired);
     let running_map = build_element_map(running);
@@ -181,7 +176,11 @@ fn build_element_map(nodes: &[XmlNode]) -> BTreeMap<String, Vec<&XmlNode>> {
 /// Find a `<name>` child element's text value (used as list key).
 fn find_key_child(children: &[XmlNode]) -> Option<String> {
     for child in children {
-        if let XmlNode::Element { name, children: grandchildren } = child {
+        if let XmlNode::Element {
+            name,
+            children: grandchildren,
+        } = child
+        {
             if name == "name" {
                 for gc in grandchildren {
                     if let XmlNode::Text(value) = gc {
@@ -207,11 +206,12 @@ fn diff_matched_elements(
     let paired_len = desired.len().min(running.len());
 
     // Compare each pair in order.
-    for (d, r) in desired[..paired_len].iter().zip(running[..paired_len].iter()) {
-        if let (
-            XmlNode::Element { children: dc, .. },
-            XmlNode::Element { children: rc, .. },
-        ) = (d, r)
+    for (d, r) in desired[..paired_len]
+        .iter()
+        .zip(running[..paired_len].iter())
+    {
+        if let (XmlNode::Element { children: dc, .. }, XmlNode::Element { children: rc, .. }) =
+            (d, r)
         {
             // Check if these are leaf elements (contain only text)
             let d_text = extract_text(dc);
@@ -221,10 +221,7 @@ fn diff_matched_elements(
                 (Some(dt), Some(rt)) if dt != rt => {
                     entries.push(DiffEntry {
                         path: path.to_string(),
-                        kind: DiffKind::Modified {
-                            from: rt,
-                            to: dt,
-                        },
+                        kind: DiffKind::Modified { from: rt, to: dt },
                     });
                 }
                 (Some(_), Some(_)) => {
@@ -277,7 +274,11 @@ fn node_to_string(node: &XmlNode) -> String {
             if children.is_empty() {
                 format!("<{name}/>")
             } else {
-                let inner: String = children.iter().map(node_to_string).collect::<Vec<_>>().join("");
+                let inner: String = children
+                    .iter()
+                    .map(node_to_string)
+                    .collect::<Vec<_>>()
+                    .join("");
                 format!("<{name}>{inner}</{name}>")
             }
         }
@@ -311,7 +312,9 @@ mod tests {
         let desired = "<system><host-name>spine-01</host-name><location><building>DC-1</building></location></system>";
         let running = "<system><host-name>spine-01</host-name></system>";
         let entries = diff_xml(desired, running).unwrap();
-        assert!(entries.iter().any(|e| matches!(&e.kind, DiffKind::Added { .. })));
+        assert!(entries
+            .iter()
+            .any(|e| matches!(&e.kind, DiffKind::Added { .. })));
     }
 
     #[test]
@@ -319,7 +322,9 @@ mod tests {
         let desired = "<system><host-name>spine-01</host-name></system>";
         let running = "<system><host-name>spine-01</host-name><location><building>DC-1</building></location></system>";
         let entries = diff_xml(desired, running).unwrap();
-        assert!(entries.iter().any(|e| matches!(&e.kind, DiffKind::Removed { .. })));
+        assert!(entries
+            .iter()
+            .any(|e| matches!(&e.kind, DiffKind::Removed { .. })));
     }
 
     #[test]
@@ -336,9 +341,9 @@ mod tests {
         let desired = "<interfaces><interface><name>ge-0/0/0</name></interface><interface><name>ge-0/0/1</name></interface></interfaces>";
         let running = "<interfaces><interface><name>ge-0/0/0</name></interface></interfaces>";
         let entries = diff_xml(desired, running).unwrap();
-        assert!(entries.iter().any(|e|
-            matches!(&e.kind, DiffKind::Added { .. }) && e.path.contains("ge-0/0/1")
-        ));
+        assert!(entries
+            .iter()
+            .any(|e| matches!(&e.kind, DiffKind::Added { .. }) && e.path.contains("ge-0/0/1")));
     }
 
     #[test]
@@ -346,7 +351,10 @@ mod tests {
         let desired = "<system>\n  <host-name>spine-01</host-name>\n</system>";
         let running = "<system><host-name>spine-01</host-name></system>";
         let entries = diff_xml(desired, running).unwrap();
-        assert!(entries.is_empty(), "whitespace differences should be ignored");
+        assert!(
+            entries.is_empty(),
+            "whitespace differences should be ignored"
+        );
     }
 
     #[test]
@@ -354,6 +362,8 @@ mod tests {
         let desired = "<system><ntp/></system>";
         let running = "<system></system>";
         let entries = diff_xml(desired, running).unwrap();
-        assert!(entries.iter().any(|e| matches!(&e.kind, DiffKind::Added { .. })));
+        assert!(entries
+            .iter()
+            .any(|e| matches!(&e.kind, DiffKind::Added { .. })));
     }
 }

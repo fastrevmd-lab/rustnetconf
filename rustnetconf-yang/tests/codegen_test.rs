@@ -10,7 +10,7 @@ mod tests {
         let iface = Interface {
             name: Some("ge-0/0/0".into()),
             description: Some("uplink to spine".into()),
-            r#type: Some("ethernetCsmacd".into()),
+            type_: Some("ethernetCsmacd".into()),
             enabled: Some(true),
             ..Default::default()
         };
@@ -54,9 +54,7 @@ mod tests {
 
     #[test]
     fn test_interfaces_to_xml() {
-        let interfaces = Interfaces {
-            interface: vec![],
-        };
+        let interfaces = Interfaces { interface: vec![] };
 
         let xml = interfaces.to_xml().expect("to_xml failed");
         assert!(xml.contains("urn:ietf:params:xml:ns:yang:ietf-interfaces"));
@@ -90,7 +88,7 @@ mod tests {
         let iface = Interface::default();
         assert!(iface.name.is_none());
         assert!(iface.description.is_none());
-        assert!(iface.r#type.is_none());
+        assert!(iface.type_.is_none());
         assert!(iface.enabled.is_none());
         assert!(iface.speed.is_none());
         assert!(iface.statistics.is_none());
@@ -107,8 +105,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&original).expect("serialize failed");
-        let deserialized: Interface =
-            serde_json::from_str(&json).expect("deserialize failed");
+        let deserialized: Interface = serde_json::from_str(&json).expect("deserialize failed");
 
         assert_eq!(original.name, deserialized.name);
         assert_eq!(original.description, deserialized.description);

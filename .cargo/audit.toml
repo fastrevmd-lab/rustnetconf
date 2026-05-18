@@ -1,0 +1,28 @@
+# cargo-audit configuration.
+#
+# This file lists RustSec advisories that are tracked and explicitly
+# risk-accepted (or pending upstream fixes). Each ignore entry must
+# include a rationale and a review date so it does not become invisible.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 — Marvin Attack timing side-channel in `rsa`.
+    #
+    # Reachability: `rsa 0.10.0-rc.16` is pulled in through
+    #   russh -> internal-russh-forked-ssh-key -> rsa.
+    # The dependency exists unconditionally inside the forked ssh-key
+    # crate; russh has no opt-out feature for it. Upstream `cargo audit`
+    # reports "No fixed upgrade is available!"
+    #
+    # Exposure: only matters when an RSA SSH key is used. The library
+    # default and CLI templates do not generate or use RSA keys, and
+    # rustnetconf supports ed25519/ECDSA paths through SSH agent and
+    # key_file auth.
+    #
+    # Mitigation: README/security documentation recommends Ed25519 or
+    # ECDSA SSH keys until a fixed upstream release lands.
+    #
+    # Review date: 2026-08-01 (re-check russh + ssh-key for a fixed rsa
+    # release; remove this ignore once upstream resolves it).
+    "RUSTSEC-2023-0071",
+]

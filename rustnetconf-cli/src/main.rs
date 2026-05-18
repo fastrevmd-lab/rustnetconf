@@ -41,11 +41,24 @@ fn validate_device_name(name: &str) -> Result<(), String> {
 }
 
 #[derive(Parser)]
-#[command(name = "netconf", version, about = "Declarative NETCONF config management")]
+#[command(
+    name = "netconf",
+    version,
+    about = "Declarative NETCONF config management"
+)]
 struct Cli {
     /// Project directory (defaults to current directory).
     #[arg(short = 'C', long, default_value = ".")]
     project_dir: PathBuf,
+
+    /// Accept the SSH host key without verification (**INSECURE**).
+    ///
+    /// By default, the SSH host key must match the `host_key_fingerprint`
+    /// field in inventory.toml. Pass this flag for lab/testing environments
+    /// where the device fingerprint is unknown. Never use against production
+    /// devices — this disables man-in-the-middle protection.
+    #[arg(long, global = true)]
+    insecure_accept_host_key: bool,
 
     #[command(subcommand)]
     command: Commands,
@@ -98,34 +111,36 @@ async fn main() {
     let cli = Cli::parse();
     let project_dir = &cli.project_dir;
 
+    let insecure = cli.insecure_accept_host_key;
+
     let result = match cli.command {
         Commands::Plan { device, json } => match validate_device_name(&device) {
             Err(e) => Err(e),
-            Ok(()) => commands::plan::run(project_dir, &device, json).await.map(|_| ()),
+            Ok(()) => commands::plan::run(project_dir, &device, json, insecure)
+                .await
+                .map(|_| ()),
         },
         Commands::Apply { device, yes } => match validate_device_name(&device) {
             Err(e) => Err(e),
-            Ok(()) => commands::apply::run(project_dir, &device, yes).await,
+            Ok(()) => commands::apply::run(project_dir, &device, yes, insecure).await,
         },
         Commands::Confirm { device } => match validate_device_name(&device) {
             Err(e) => Err(e),
-            Ok(()) => commands::confirm::run(project_dir, &device).await,
+            Ok(()) => commands::confirm::run(project_dir, &device, insecure).await,
         },
         Commands::Rollback { device } => match validate_device_name(&device) {
             Err(e) => Err(e),
-            Ok(()) => commands::rollback::run(project_dir, &device).await,
+            Ok(()) => commands::rollback::run(project_dir, &device, insecure).await,
         },
         Commands::Get { device } => match validate_device_name(&device) {
             Err(e) => Err(e),
-            Ok(()) => commands::get::run(project_dir, &device).await,
+            Ok(()) => commands::get::run(project_dir, &device, insecure).await,
         },
         Commands::Validate { device } => match validate_device_name(&device) {
             Err(e) => Err(e),
-            Ok(()) => commands::validate::run(project_dir, &device).await,
+            Ok(()) => commands::validate::run(project_dir, &device, insecure).await,
         },
-        Commands::Init => {
-            commands::init::run(project_dir)
-        }
+        Commands::Init => commands::init::run(project_dir),
     };
 
     if let Err(e) = result {

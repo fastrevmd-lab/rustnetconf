@@ -61,6 +61,9 @@ mod tests {
 
     #[test]
     fn test_generic_normalize_returns_none() {
-        assert_eq!(GenericVendor.normalize_capability("urn:ietf:params:netconf:base:1.0"), None);
+        assert_eq!(
+            GenericVendor.normalize_capability("urn:ietf:params:netconf:base:1.0"),
+            None
+        );
     }
 }

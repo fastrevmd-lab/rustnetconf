@@ -285,10 +285,11 @@ fn pattern_list_matches(patterns: &[HostPattern], target: &str) -> bool {
 
 /// Parse a `ProxyJump` value: comma-separated `[user@]host[:port]`.
 ///
-/// Each entry becomes a [`JumpHostConfig`] with [`SshAuth::Agent`] as
-/// the default auth method (matching the most common deployment) and
-/// [`HostKeyVerification::AcceptAll`] (the caller can tighten per-hop
-/// after resolution).
+/// Each entry becomes a [`JumpHostConfig`] with [`SshAuth::Agent`] as the
+/// default auth method (matching the most common deployment) and
+/// [`HostKeyVerification::RejectAll`] as the default host-key policy
+/// (fail closed). Callers must tighten or relax per-hop policies after
+/// resolution before the chain is usable in production.
 pub fn parse_proxy_jump(value: &str) -> Vec<JumpHostConfig> {
     value
         .split(',')
@@ -306,22 +307,12 @@ pub fn parse_proxy_jump(value: &str) -> Vec<JumpHostConfig> {
                 }
                 None => (host_port.to_string(), 22u16),
             };
-            // TODO: support per-hop host key verification configuration.
-            // Currently all jump hops default to AcceptAll which is insecure
-            // for production use. A future API should allow callers to supply
-            // a verification policy per hop (e.g. via a callback or a map of
-            // host→fingerprint).
-            tracing::warn!(
-                jump_host = %host,
-                "ProxyJump hop uses AcceptAll host key verification — \
-                 per-hop verification is not yet configurable"
-            );
             JumpHostConfig {
                 host,
                 port,
                 username: user.unwrap_or_else(|| std::env::var("USER").unwrap_or_default()),
                 auth: SshAuth::Agent,
-                host_key_verification: HostKeyVerification::AcceptAll,
+                host_key_verification: HostKeyVerification::RejectAll,
             }
         })
         .collect()
@@ -343,11 +334,7 @@ fn expand_tilde(path: &str) -> String {
     path.to_string()
 }
 
-fn load_into(
-    path: &Path,
-    sections: &mut Vec<Section>,
-    depth: usize,
-) -> Result<(), SshConfigError> {
+fn load_into(path: &Path, sections: &mut Vec<Section>, depth: usize) -> Result<(), SshConfigError> {
     if depth > INCLUDE_DEPTH_LIMIT {
         return Err(SshConfigError::IncludeTooDeep {
             path: path.to_path_buf(),
@@ -391,8 +378,10 @@ fn parse_into(
                 sections.push(s);
             }
             in_match_block = false;
-            let patterns: Vec<HostPattern> =
-                tokenize(value).iter().map(|t| HostPattern::parse(t)).collect();
+            let patterns: Vec<HostPattern> = tokenize(value)
+                .iter()
+                .map(|t| HostPattern::parse(t))
+                .collect();
             current = Some(Section::empty(patterns));
             continue;
         }
@@ -453,9 +442,7 @@ fn parse_into(
                     .get_or_insert_with(|| value.to_string());
             }
             "proxyjump" => {
-                section
-                    .proxy_jump
-                    .get_or_insert_with(|| value.to_string());
+                section.proxy_jump.get_or_insert_with(|| value.to_string());
             }
             "proxycommand" => {
                 section
@@ -626,8 +613,8 @@ mod tests {
     #[test]
     fn parse_supports_equals_separator() {
         // OpenSSH accepts `key=value` as well as `key value`.
-        let cfg = SshConfigFile::parse_str("Host=r1\nHostName=10.0.0.1\nPort=2222\n", None)
-            .unwrap();
+        let cfg =
+            SshConfigFile::parse_str("Host=r1\nHostName=10.0.0.1\nPort=2222\n", None).unwrap();
         let r = cfg.resolve("r1");
         assert_eq!(r.hostname.as_deref(), Some("10.0.0.1"));
         assert_eq!(r.port, Some(2222));
@@ -663,11 +650,8 @@ mod tests {
 
     #[test]
     fn glob_host_block_applies_to_matching_aliases() {
-        let cfg = SshConfigFile::parse_str(
-            "Host *.lab\n  User lab-admin\n  Port 830\n",
-            None,
-        )
-        .unwrap();
+        let cfg =
+            SshConfigFile::parse_str("Host *.lab\n  User lab-admin\n  Port 830\n", None).unwrap();
         let r = cfg.resolve("device.lab");
         assert_eq!(r.user.as_deref(), Some("lab-admin"));
         assert_eq!(r.port, Some(830));
@@ -677,11 +661,8 @@ mod tests {
 
     #[test]
     fn host_block_with_multiple_patterns() {
-        let cfg = SshConfigFile::parse_str(
-            "Host *.lab !test.lab\n  User lab-admin\n",
-            None,
-        )
-        .unwrap();
+        let cfg =
+            SshConfigFile::parse_str("Host *.lab !test.lab\n  User lab-admin\n", None).unwrap();
         assert_eq!(cfg.resolve("ok.lab").user.as_deref(), Some("lab-admin"));
         // Negation excludes test.lab even though *.lab matches.
         assert!(cfg.resolve("test.lab").user.is_none());
@@ -716,11 +697,9 @@ mod tests {
     #[test]
     fn implicit_global_defaults_before_host() {
         // Settings before any Host line apply to all hosts (implicit Host *).
-        let cfg = SshConfigFile::parse_str(
-            "Port 830\nUser ops\n\nHost r1\n  HostName 10.0.0.1\n",
-            None,
-        )
-        .unwrap();
+        let cfg =
+            SshConfigFile::parse_str("Port 830\nUser ops\n\nHost r1\n  HostName 10.0.0.1\n", None)
+                .unwrap();
         let r = cfg.resolve("r1");
         assert_eq!(r.hostname.as_deref(), Some("10.0.0.1"));
         // Specific block had no Port/User → fall back to global defaults.
@@ -730,11 +709,7 @@ mod tests {
 
     #[test]
     fn invalid_port_is_parse_error() {
-        let err = SshConfigFile::parse_str(
-            "Host r1\n  Port not-a-number\n",
-            None,
-        )
-        .unwrap_err();
+        let err = SshConfigFile::parse_str("Host r1\n  Port not-a-number\n", None).unwrap_err();
         match err {
             SshConfigError::Parse { line, message, .. } => {
                 assert_eq!(line, 2);
@@ -774,6 +749,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_proxy_jump_defaults_to_reject_all_host_key_policy() {
+        // Each hop must fail closed by default — callers must explicitly
+        // tighten or relax the policy per hop. Regression test for the
+        // historical AcceptAll default which silently bypassed MITM
+        // protection for the entire ProxyJump chain.
+        let chain = parse_proxy_jump("bastion.example.com,h2:2222");
+        assert_eq!(chain.len(), 2);
+        for hop in &chain {
+            assert!(
+                matches!(hop.host_key_verification, HostKeyVerification::RejectAll,),
+                "expected RejectAll, got {:?}",
+                hop.host_key_verification,
+            );
+        }
+    }
+
+    #[test]
     fn proxy_jump_in_config_resolves_to_chain() {
         let cfg = SshConfigFile::parse_str(
             "Host r1\n  HostName 10.0.0.1\n  ProxyJump admin@bastion:2222,h2\n",
@@ -801,11 +793,7 @@ mod tests {
 
     #[test]
     fn quoted_host_pattern_tokenized_correctly() {
-        let cfg = SshConfigFile::parse_str(
-            "Host \"r 1\" r2\n  User admin\n",
-            None,
-        )
-        .unwrap();
+        let cfg = SshConfigFile::parse_str("Host \"r 1\" r2\n  User admin\n", None).unwrap();
         // The quoted pattern preserves the space.
         assert_eq!(cfg.resolve("r 1").user.as_deref(), Some("admin"));
         assert_eq!(cfg.resolve("r2").user.as_deref(), Some("admin"));
@@ -813,11 +801,7 @@ mod tests {
 
     #[test]
     fn nonmatching_alias_returns_empty_resolved_host() {
-        let cfg = SshConfigFile::parse_str(
-            "Host r1\n  HostName 10.0.0.1\n",
-            None,
-        )
-        .unwrap();
+        let cfg = SshConfigFile::parse_str("Host r1\n  HostName 10.0.0.1\n", None).unwrap();
         let r = cfg.resolve("not-defined");
         assert!(r.hostname.is_none());
         assert!(r.user.is_none());
@@ -849,7 +833,10 @@ mod tests {
         .unwrap();
 
         let cfg = SshConfigFile::load(&main_path).unwrap();
-        assert_eq!(cfg.resolve("main-host").hostname.as_deref(), Some("10.0.0.1"));
+        assert_eq!(
+            cfg.resolve("main-host").hostname.as_deref(),
+            Some("10.0.0.1")
+        );
         assert_eq!(
             cfg.resolve("included-host").hostname.as_deref(),
             Some("10.9.9.9")
@@ -868,11 +855,7 @@ mod tests {
         // self-including config — must error out at the depth limit.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("loop.conf");
-        std::fs::write(
-            &path,
-            format!("Include {}\n", path.display()),
-        )
-        .unwrap();
+        std::fs::write(&path, format!("Include {}\n", path.display())).unwrap();
         let err = SshConfigFile::load(&path).unwrap_err();
         assert!(matches!(err, SshConfigError::IncludeTooDeep { .. }));
     }
@@ -917,11 +900,8 @@ mod tests {
         unsafe {
             std::env::set_var("HOME", "/home/u");
         }
-        let cfg = SshConfigFile::parse_str(
-            "Host r1\n  IdentityFile ~/.ssh/id_lab\n",
-            None,
-        )
-        .unwrap();
+        let cfg =
+            SshConfigFile::parse_str("Host r1\n  IdentityFile ~/.ssh/id_lab\n", None).unwrap();
         assert_eq!(
             cfg.resolve("r1").identity_file.as_deref(),
             Some("/home/u/.ssh/id_lab")

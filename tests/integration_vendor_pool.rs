@@ -2,9 +2,9 @@
 //!
 //! Run with: `cargo test --test integration_vendor_pool`
 
-use rustnetconf::{Client, Datastore};
 use rustnetconf::pool::{DeviceConfig, DevicePool};
 use rustnetconf::transport::ssh::SshAuth;
+use rustnetconf::{Client, Datastore};
 use std::time::Duration;
 
 fn should_skip() -> bool {
@@ -42,7 +42,9 @@ fn vsrx_device_config() -> DeviceConfig {
 /// vSRX is auto-detected as Junos vendor.
 #[tokio::test]
 async fn test_vsrx_auto_detected_as_junos() {
-    if should_skip() { return; }
+    if should_skip() {
+        return;
+    }
 
     let client = connect_vsrx().await;
     assert_eq!(client.vendor_name(), "junos");
@@ -51,15 +53,21 @@ async fn test_vsrx_auto_detected_as_junos() {
 /// edit-config with Junos auto-wrapping — bare config gets <configuration> added.
 #[tokio::test]
 async fn test_edit_config_with_junos_auto_wrap() {
-    if should_skip() { return; }
+    if should_skip() {
+        return;
+    }
 
     let mut client = connect_vsrx().await;
     assert_eq!(client.vendor_name(), "junos");
 
-    client.lock(Datastore::Candidate).await.expect("lock failed");
+    client
+        .lock(Datastore::Candidate)
+        .await
+        .expect("lock failed");
 
     // Send bare config WITHOUT <configuration> — Junos vendor adds it
-    client.edit_config(Datastore::Candidate)
+    client
+        .edit_config(Datastore::Candidate)
         .config("<system><location><building>vendor-wrap-test</building></location></system>")
         .default_operation(rustnetconf::DefaultOperation::Merge)
         .send()
@@ -74,16 +82,24 @@ async fn test_edit_config_with_junos_auto_wrap() {
         .await
         .expect("get-config failed");
 
-    assert!(config.contains("vendor-wrap-test"), "should contain our building, got: {config}");
+    assert!(
+        config.contains("vendor-wrap-test"),
+        "should contain our building, got: {config}"
+    );
 
-    client.unlock(Datastore::Candidate).await.expect("unlock failed");
+    client
+        .unlock(Datastore::Candidate)
+        .await
+        .expect("unlock failed");
     client.close_session().await.expect("close failed");
 }
 
 /// get-config with Junos unwrapping strips <configuration> wrapper.
 #[tokio::test]
 async fn test_get_config_junos_unwrap() {
-    if should_skip() { return; }
+    if should_skip() {
+        return;
+    }
 
     let mut client = connect_vsrx().await;
 
@@ -95,7 +111,10 @@ async fn test_get_config_junos_unwrap() {
         .await
         .expect("get-config failed");
 
-    assert!(config.contains("host-name"), "should contain host-name, got: {config}");
+    assert!(
+        config.contains("host-name"),
+        "should contain host-name, got: {config}"
+    );
     assert!(
         !config.trim().starts_with("<configuration"),
         "Junos vendor should strip <configuration> wrapper, got: {config}"
@@ -107,7 +126,9 @@ async fn test_get_config_junos_unwrap() {
 /// Pool checkout + use + auto-checkin.
 #[tokio::test]
 async fn test_pool_checkout_and_use() {
-    if should_skip() { return; }
+    if should_skip() {
+        return;
+    }
 
     let pool = DevicePool::builder()
         .max_connections(5)
@@ -116,17 +137,26 @@ async fn test_pool_checkout_and_use() {
 
     {
         let mut conn = pool.checkout("vsrx").await.expect("checkout failed");
-        let config = conn.get_config(Datastore::Running).await.expect("get-config failed");
+        let config = conn
+            .get_config(Datastore::Running)
+            .await
+            .expect("get-config failed");
         assert!(!config.is_empty());
     } // conn returned to pool here
 
-    assert_eq!(pool.available_connections(), 5, "permit should be released after drop");
+    assert_eq!(
+        pool.available_connections(),
+        5,
+        "permit should be released after drop"
+    );
 }
 
 /// Pool reuses connections on second checkout.
 #[tokio::test]
 async fn test_pool_connection_reuse() {
-    if should_skip() { return; }
+    if should_skip() {
+        return;
+    }
 
     let pool = DevicePool::builder()
         .max_connections(5)
@@ -136,7 +166,9 @@ async fn test_pool_connection_reuse() {
     // First checkout + use + checkin
     {
         let mut conn = pool.checkout("vsrx").await.expect("first checkout failed");
-        conn.get_config(Datastore::Running).await.expect("first get-config failed");
+        conn.get_config(Datastore::Running)
+            .await
+            .expect("first get-config failed");
     }
 
     // Small delay to let the drop task complete
@@ -145,14 +177,18 @@ async fn test_pool_connection_reuse() {
     // Second checkout should reuse the connection (no new SSH handshake)
     {
         let mut conn = pool.checkout("vsrx").await.expect("second checkout failed");
-        conn.get_config(Datastore::Running).await.expect("second get-config failed (reused)");
+        conn.get_config(Datastore::Running)
+            .await
+            .expect("second get-config failed (reused)");
     }
 }
 
 /// Pool returns error for unknown device.
 #[tokio::test]
 async fn test_pool_unknown_device() {
-    if should_skip() { return; }
+    if should_skip() {
+        return;
+    }
 
     let pool = DevicePool::builder()
         .max_connections(5)
@@ -166,7 +202,9 @@ async fn test_pool_unknown_device() {
 /// Pool checkout times out when all connections in use.
 #[tokio::test]
 async fn test_pool_checkout_timeout() {
-    if should_skip() { return; }
+    if should_skip() {
+        return;
+    }
 
     let pool = DevicePool::builder()
         .max_connections(1)
@@ -185,7 +223,9 @@ async fn test_pool_checkout_timeout() {
 /// Concurrent pool checkouts to same device.
 #[tokio::test]
 async fn test_pool_concurrent_checkouts() {
-    if should_skip() { return; }
+    if should_skip() {
+        return;
+    }
 
     let pool = DevicePool::builder()
         .max_connections(3)
@@ -193,10 +233,7 @@ async fn test_pool_concurrent_checkouts() {
         .build();
 
     // Checkout 2 connections concurrently
-    let (r1, r2) = tokio::join!(
-        pool.checkout("vsrx"),
-        pool.checkout("vsrx"),
-    );
+    let (r1, r2) = tokio::join!(pool.checkout("vsrx"), pool.checkout("vsrx"),);
 
     let mut conn1 = r1.expect("conn1 checkout failed");
     let mut conn2 = r2.expect("conn2 checkout failed");
@@ -216,7 +253,9 @@ async fn test_pool_concurrent_checkouts() {
 /// Pool auto-detects Junos vendor on connections.
 #[tokio::test]
 async fn test_pool_auto_detects_vendor() {
-    if should_skip() { return; }
+    if should_skip() {
+        return;
+    }
 
     let pool = DevicePool::builder()
         .max_connections(5)
@@ -224,5 +263,9 @@ async fn test_pool_auto_detects_vendor() {
         .build();
 
     let conn = pool.checkout("vsrx").await.expect("checkout failed");
-    assert_eq!(conn.vendor_name(), "junos", "pool connection should auto-detect Junos");
+    assert_eq!(
+        conn.vendor_name(),
+        "junos",
+        "pool connection should auto-detect Junos"
+    );
 }

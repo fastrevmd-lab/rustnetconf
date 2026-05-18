@@ -75,7 +75,9 @@ async fn main() {
     if let Some(caps) = client.capabilities() {
         eprintln!(
             "Connected (session-id: {}, capabilities: {})",
-            caps.session_id().map(|id| id.to_string()).unwrap_or_else(|| "unknown".into()),
+            caps.session_id()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "unknown".into()),
             caps.all_uris().len()
         );
     }

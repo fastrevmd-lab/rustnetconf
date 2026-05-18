@@ -10,8 +10,8 @@ pub mod ssh;
 #[cfg(feature = "tls")]
 pub mod tls;
 
-use async_trait::async_trait;
 use crate::error::TransportError;
+use async_trait::async_trait;
 
 /// Byte-stream transport for NETCONF sessions.
 ///

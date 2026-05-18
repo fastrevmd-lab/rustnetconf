@@ -74,9 +74,9 @@ pub fn parse_notification(xml: &str) -> Result<Notification, RpcError> {
                 }
             }
             Ok(Event::Text(ref text)) if in_event_time => {
-                let t = text.unescape().map_err(|e| {
-                    RpcError::ParseError(format!("failed to parse eventTime: {e}"))
-                })?;
+                let t = text
+                    .unescape()
+                    .map_err(|e| RpcError::ParseError(format!("failed to parse eventTime: {e}")))?;
                 event_time = Some(t.trim().to_string());
             }
             Ok(Event::End(ref tag)) => {
@@ -177,7 +177,8 @@ mod tests {
 
     #[test]
     fn test_classify_hello() {
-        let xml = r#"<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"><capabilities/></hello>"#;
+        let xml =
+            r#"<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"><capabilities/></hello>"#;
         assert_eq!(classify_message(xml), None);
     }
 

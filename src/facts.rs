@@ -130,7 +130,10 @@ mod tests {
     #[test]
     fn test_extract_element_with_whitespace() {
         let xml = "<host-name>  my-router  </host-name>";
-        assert_eq!(extract_element(xml, "host-name"), Some("my-router".to_string()));
+        assert_eq!(
+            extract_element(xml, "host-name"),
+            Some("my-router".to_string())
+        );
     }
 
     #[test]

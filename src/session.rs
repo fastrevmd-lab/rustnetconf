@@ -29,10 +29,13 @@ use crate::framing::Framer;
 use crate::notification::{self, MessageKind, Notification};
 use crate::rpc;
 use crate::rpc::operations::{self, EditConfigParams};
+use crate::rpc::RpcErrorInfo;
 use crate::rpc::RpcReply;
 use crate::transport::Transport;
-use crate::rpc::RpcErrorInfo;
-use crate::types::{Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode, TestOption};
+use crate::types::{
+    Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,
+    TestOption,
+};
 use crate::vendor::{self, CloseSequence, VendorProfile};
 
 /// Read buffer size for transport reads.
@@ -163,15 +166,15 @@ impl Session {
 
         // Read device hello
         let device_hello = self.read_message().await?;
-        let mut caps = capability::parse_device_hello(&device_hello)
-            .map_err(ProtocolError::HelloFailed)?;
+        let mut caps =
+            capability::parse_device_hello(&device_hello).map_err(ProtocolError::HelloFailed)?;
 
         // Negotiate version and switch framing
-        let version = caps
-            .negotiate_version()
-            .ok_or_else(|| ProtocolError::HelloFailed(
+        let version = caps.negotiate_version().ok_or_else(|| {
+            ProtocolError::HelloFailed(
                 "device does not support NETCONF base:1.0 or base:1.1".to_string(),
-            ))?;
+            )
+        })?;
 
         if version == NetconfVersion::V1_1 {
             self.framer = Box::new(ChunkedFramer::new());
@@ -356,7 +359,11 @@ impl Session {
     /// When `rpc_timeout` is configured, the entire read loop is bounded by
     /// [`tokio::time::timeout()`]. If the device does not produce a matching
     /// reply within the deadline, `RpcError::Timeout` is returned.
-    async fn send_rpc_raw(&mut self, xml: &str, message_id: &str) -> Result<RpcReply, NetconfError> {
+    async fn send_rpc_raw(
+        &mut self,
+        xml: &str,
+        message_id: &str,
+    ) -> Result<RpcReply, NetconfError> {
         self.ensure_established()?;
 
         let framed = self.framer.encode(xml);
@@ -365,11 +372,9 @@ impl Session {
         self.transport.write_all(&framed).await?;
 
         match self.rpc_timeout {
-            Some(timeout) => {
-                tokio::time::timeout(timeout, self.read_rpc_reply(message_id))
-                    .await
-                    .map_err(|_| crate::error::RpcError::Timeout(timeout))?
-            }
+            Some(timeout) => tokio::time::timeout(timeout, self.read_rpc_reply(message_id))
+                .await
+                .map_err(|_| crate::error::RpcError::Timeout(timeout))?,
             None => self.read_rpc_reply(message_id).await,
         }
     }
@@ -679,10 +684,7 @@ impl Session {
     /// arrives, returns `RpcError::CommitUnknown` — the device may have
     /// committed the change. Callers should verify device state manually.
     pub async fn commit(&mut self) -> Result<(), NetconfError> {
-        self.require_capability(
-            crate::capability::uri::CANDIDATE,
-            "commit",
-        )?;
+        self.require_capability(crate::capability::uri::CANDIDATE, "commit")?;
         let msg_id = self.next_message_id();
         let xml = operations::commit_xml(&msg_id);
 
@@ -698,10 +700,7 @@ impl Session {
     ///
     /// Requires the `:validate` capability.
     pub async fn validate(&mut self, source: Datastore) -> Result<(), NetconfError> {
-        self.require_capability(
-            crate::capability::uri::VALIDATE,
-            "validate",
-        )?;
+        self.require_capability(crate::capability::uri::VALIDATE, "validate")?;
         let msg_id = self.next_message_id();
         let xml = operations::validate_xml(&msg_id, source);
         self.send_rpc(&xml, &msg_id).await?;
@@ -849,7 +848,10 @@ impl Session {
         let _ = self.transport.close().await;
         self.state = SessionState::Closed;
 
-        tracing::info!(vendor = self.vendor_profile.name(), "NETCONF session closed");
+        tracing::info!(
+            vendor = self.vendor_profile.name(),
+            "NETCONF session closed"
+        );
         Ok(())
     }
 
@@ -870,10 +872,7 @@ impl Session {
     ///
     /// Requires the `:confirmed-commit` capability.
     pub async fn confirmed_commit(&mut self, confirm_timeout: u32) -> Result<(), NetconfError> {
-        self.require_capability(
-            crate::capability::uri::CANDIDATE,
-            "confirmed-commit",
-        )?;
+        self.require_capability(crate::capability::uri::CANDIDATE, "confirmed-commit")?;
         // Check for either 1.0 or 1.1 confirmed-commit capability
         if !self.supports(crate::capability::uri::CONFIRMED_COMMIT)
             && !self.supports(crate::capability::uri::CONFIRMED_COMMIT_1_1)
@@ -1029,10 +1028,7 @@ impl Session {
         start_time: Option<&str>,
         stop_time: Option<&str>,
     ) -> Result<(), NetconfError> {
-        self.require_capability(
-            capability::uri::NOTIFICATION,
-            "create-subscription",
-        )?;
+        self.require_capability(capability::uri::NOTIFICATION, "create-subscription")?;
 
         if !self.supports(capability::uri::INTERLEAVE) {
             tracing::info!(
@@ -1046,13 +1042,8 @@ impl Session {
         }
 
         let message_id = self.next_message_id();
-        let xml = operations::create_subscription_xml(
-            &message_id,
-            stream,
-            filter,
-            start_time,
-            stop_time,
-        );
+        let xml =
+            operations::create_subscription_xml(&message_id, stream, filter, start_time, stop_time);
 
         let reply = self.send_rpc(&xml, &message_id).await?;
         match reply {
@@ -1064,10 +1055,9 @@ impl Session {
                 );
                 Ok(())
             }
-            _ => Err(ProtocolError::Xml(
-                "unexpected response to create-subscription".to_string(),
-            )
-            .into()),
+            _ => Err(
+                ProtocolError::Xml("unexpected response to create-subscription".to_string()).into(),
+            ),
         }
     }
 
@@ -1106,8 +1096,8 @@ impl Session {
 
             match notification::classify_message(&response) {
                 Some(MessageKind::Notification) => {
-                    let notif = notification::parse_notification(&response)
-                        .map_err(NetconfError::Rpc)?;
+                    let notif =
+                        notification::parse_notification(&response).map_err(NetconfError::Rpc)?;
                     return Ok(Some(notif));
                 }
                 Some(MessageKind::RpcReply) => {
@@ -1185,14 +1175,17 @@ mod tests {
         // but returns EOF during the commit (simulating connection drop).
         let mut response_data = mock_device_hello();
         response_data.extend_from_slice(&mock_ok_reply("1")); // lock reply
-        // No commit reply — EOF after lock reply simulates mid-commit disconnect
+                                                              // No commit reply — EOF after lock reply simulates mid-commit disconnect
 
         let transport = MockTransport::new(response_data);
         let mut session = Session::new(Box::new(transport));
         session.establish().await.expect("establish failed");
 
         // Lock succeeds
-        session.lock(Datastore::Candidate).await.expect("lock failed");
+        session
+            .lock(Datastore::Candidate)
+            .await
+            .expect("lock failed");
 
         // Commit should return CommitUnknown because the transport returns EOF
         let result = session.commit().await;
@@ -1239,13 +1232,22 @@ mod tests {
         let mut session = Session::new(Box::new(transport));
         session.establish().await.expect("establish failed");
 
-        session.lock(Datastore::Candidate).await.expect("lock failed");
+        session
+            .lock(Datastore::Candidate)
+            .await
+            .expect("lock failed");
         session.commit().await.expect("commit failed");
 
         // pending_commit should be false after successful commit
-        assert!(!session.pending_commit, "pending_commit should be cleared after success");
+        assert!(
+            !session.pending_commit,
+            "pending_commit should be cleared after success"
+        );
 
-        session.unlock(Datastore::Candidate).await.expect("unlock failed");
+        session
+            .unlock(Datastore::Candidate)
+            .await
+            .expect("unlock failed");
     }
 
     #[test]
@@ -1304,9 +1306,18 @@ mod tests {
         let mut session = Session::new(Box::new(transport));
         session.establish().await.expect("establish failed");
 
-        session.lock(Datastore::Candidate).await.expect("lock failed");
-        session.confirmed_commit(120).await.expect("confirmed_commit failed");
-        session.confirming_commit().await.expect("confirming_commit failed");
+        session
+            .lock(Datastore::Candidate)
+            .await
+            .expect("lock failed");
+        session
+            .confirmed_commit(120)
+            .await
+            .expect("confirmed_commit failed");
+        session
+            .confirming_commit()
+            .await
+            .expect("confirming_commit failed");
     }
 
     #[tokio::test]
@@ -1319,7 +1330,10 @@ mod tests {
         session.establish().await.expect("establish failed");
 
         let result = session.confirmed_commit(120).await;
-        assert!(result.is_err(), "confirmed_commit should fail without capability");
+        assert!(
+            result.is_err(),
+            "confirmed_commit should fail without capability"
+        );
         let err_str = format!("{:?}", result.unwrap_err());
         assert!(
             err_str.contains("CapabilityMissing"),
@@ -1357,7 +1371,11 @@ mod tests {
         session.establish().await.expect("establish failed");
 
         let result = session.lock_or_kill_stale(Datastore::Candidate).await;
-        assert_eq!(result.unwrap(), None, "no session killed when lock succeeds");
+        assert_eq!(
+            result.unwrap(),
+            None,
+            "no session killed when lock succeeds"
+        );
     }
 
     #[tokio::test]
@@ -1500,7 +1518,10 @@ mod tests {
         session.establish().await.expect("establish failed");
 
         let before = session.last_activity;
-        session.lock(Datastore::Candidate).await.expect("lock failed");
+        session
+            .lock(Datastore::Candidate)
+            .await
+            .expect("lock failed");
         let after = session.last_activity;
 
         assert!(after.is_some(), "last_activity should be set");
@@ -1557,7 +1578,10 @@ mod tests {
         session.establish().await.expect("establish failed");
 
         // Lock should succeed despite interleaved notification
-        session.lock(Datastore::Candidate).await.expect("lock failed");
+        session
+            .lock(Datastore::Candidate)
+            .await
+            .expect("lock failed");
 
         // Notification should be buffered
         let notifications = session.drain_notifications();
@@ -1578,7 +1602,10 @@ mod tests {
         let mut session = Session::new(Box::new(transport));
         session.establish().await.expect("establish failed");
 
-        session.lock(Datastore::Candidate).await.expect("lock failed");
+        session
+            .lock(Datastore::Candidate)
+            .await
+            .expect("lock failed");
 
         let notifications = session.drain_notifications();
         assert_eq!(notifications.len(), 3);
@@ -1603,7 +1630,10 @@ mod tests {
         session.establish().await.expect("establish failed");
 
         // Should succeed — notifications are not stale replies
-        session.lock(Datastore::Candidate).await.expect("lock failed");
+        session
+            .lock(Datastore::Candidate)
+            .await
+            .expect("lock failed");
 
         let notifications = session.drain_notifications();
         assert_eq!(notifications.len(), 15);
@@ -1638,7 +1668,10 @@ mod tests {
         session.establish().await.expect("establish failed");
 
         // Lock buffers the first notification
-        session.lock(Datastore::Candidate).await.expect("lock failed");
+        session
+            .lock(Datastore::Candidate)
+            .await
+            .expect("lock failed");
         assert!(session.has_notifications());
 
         // recv_notification should return the buffered one first
@@ -1673,7 +1706,10 @@ mod tests {
         let mut session = Session::new(Box::new(transport));
         session.establish().await.expect("establish failed");
 
-        session.lock(Datastore::Candidate).await.expect("lock failed");
+        session
+            .lock(Datastore::Candidate)
+            .await
+            .expect("lock failed");
         assert_eq!(session.drain_notifications().len(), 1);
         assert_eq!(session.drain_notifications().len(), 0); // buffer cleared
     }

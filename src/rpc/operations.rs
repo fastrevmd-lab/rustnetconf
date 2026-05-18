@@ -52,9 +52,7 @@ pub(crate) fn escape_xml_attr(value: &str) -> String {
 /// input without validation.
 pub fn get_config_xml(message_id: &str, source: Datastore, filter: Option<&str>) -> String {
     let filter_xml = match filter {
-        Some(f) => format!(
-            "\n    <nc:filter type=\"subtree\">\n      {f}\n    </nc:filter>"
-        ),
+        Some(f) => format!("\n    <nc:filter type=\"subtree\">\n      {f}\n    </nc:filter>"),
         None => String::new(),
     };
 
@@ -79,9 +77,7 @@ pub fn get_config_xml(message_id: &str, source: Datastore, filter: Option<&str>)
 /// input without validation.
 pub fn get_xml(message_id: &str, filter: Option<&str>) -> String {
     let filter_xml = match filter {
-        Some(f) => format!(
-            "\n    <nc:filter type=\"subtree\">\n      {f}\n    </nc:filter>"
-        ),
+        Some(f) => format!("\n    <nc:filter type=\"subtree\">\n      {f}\n    </nc:filter>"),
         None => String::new(),
     };
 
@@ -441,11 +437,7 @@ mod tests {
 
     #[test]
     fn test_get_config_with_filter() {
-        let xml = get_config_xml(
-            "2",
-            Datastore::Running,
-            Some("<interfaces/>"),
-        );
+        let xml = get_config_xml("2", Datastore::Running, Some("<interfaces/>"));
         assert!(xml.contains("<nc:filter type=\"subtree\">"));
         assert!(xml.contains("<interfaces/>"));
     }
@@ -560,7 +552,8 @@ mod tests {
         );
         assert!(xml.contains(r#"action="set""#));
         assert!(xml.contains(r#"format="text""#));
-        assert!(xml.contains("<nc:configuration-set>set system host-name test123</nc:configuration-set>"));
+        assert!(xml
+            .contains("<nc:configuration-set>set system host-name test123</nc:configuration-set>"));
     }
 
     #[test]
@@ -621,7 +614,9 @@ mod tests {
     fn test_create_subscription_default() {
         let xml = create_subscription_xml("10", None, None, None, None);
         assert!(xml.contains("message-id=\"10\""));
-        assert!(xml.contains("<create-subscription xmlns=\"urn:ietf:params:xml:ns:netconf:notification:1.0\""));
+        assert!(xml.contains(
+            "<create-subscription xmlns=\"urn:ietf:params:xml:ns:netconf:notification:1.0\""
+        ));
         assert!(xml.contains("</create-subscription>"));
         assert!(!xml.contains("<stream>"));
         assert!(!xml.contains("<filter"));
@@ -660,15 +655,30 @@ mod tests {
     fn test_no_xmlns_empty() {
         // Verify that no generated XML contains xmlns=""
         let xml = load_configuration_xml("99", LoadAction::Set, LoadFormat::Text, "test");
-        assert!(!xml.contains(r#"xmlns="""#), "xmlns=\"\" must not appear in output");
+        assert!(
+            !xml.contains(r#"xmlns="""#),
+            "xmlns=\"\" must not appear in output"
+        );
         let xml2 = open_configuration_xml("99", OpenConfigurationMode::Private);
-        assert!(!xml2.contains(r#"xmlns="""#), "xmlns=\"\" must not appear in output");
+        assert!(
+            !xml2.contains(r#"xmlns="""#),
+            "xmlns=\"\" must not appear in output"
+        );
         let xml3 = commit_configuration_xml("99");
-        assert!(!xml3.contains(r#"xmlns="""#), "xmlns=\"\" must not appear in output");
+        assert!(
+            !xml3.contains(r#"xmlns="""#),
+            "xmlns=\"\" must not appear in output"
+        );
         let xml4 = rollback_configuration_xml("99", 0);
-        assert!(!xml4.contains(r#"xmlns="""#), "xmlns=\"\" must not appear in output");
+        assert!(
+            !xml4.contains(r#"xmlns="""#),
+            "xmlns=\"\" must not appear in output"
+        );
         let xml5 = get_configuration_compare_xml("99", 0);
-        assert!(!xml5.contains(r#"xmlns="""#), "xmlns=\"\" must not appear in output");
+        assert!(
+            !xml5.contains(r#"xmlns="""#),
+            "xmlns=\"\" must not appear in output"
+        );
     }
 
     #[test]

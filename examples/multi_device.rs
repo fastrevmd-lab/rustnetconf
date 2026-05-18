@@ -61,7 +61,10 @@ async fn main() {
         process::exit(1);
     }
 
-    eprintln!("Fetching config from {} devices concurrently...", hosts.len());
+    eprintln!(
+        "Fetching config from {} devices concurrently...",
+        hosts.len()
+    );
     let start = Instant::now();
 
     // Spawn concurrent tasks for each device
@@ -90,7 +93,11 @@ async fn main() {
             let result = match client.get_config(Datastore::Running).await {
                 Ok(config) => {
                     let elapsed = device_start.elapsed();
-                    Ok(format!("{} bytes in {:.1}s", config.len(), elapsed.as_secs_f64()))
+                    Ok(format!(
+                        "{} bytes in {:.1}s",
+                        config.len(),
+                        elapsed.as_secs_f64()
+                    ))
                 }
                 Err(e) => Err(format!("get-config failed: {e}")),
             };
