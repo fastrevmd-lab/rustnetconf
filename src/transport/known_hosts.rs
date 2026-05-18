@@ -21,6 +21,10 @@ use std::path::Path;
 #[derive(Debug, Clone)]
 pub(crate) struct Entry {
     pub host_spec: HostSpec,
+    /// SSH key type label (e.g. `ssh-ed25519`, `ssh-rsa`). Parsed and validated
+    /// during line parsing but not currently used at lookup time — the
+    /// fingerprint comparison subsumes it.
+    #[allow(dead_code)]
     pub key_type: String,
     pub key_blob_b64: String,
     pub marker: Option<Marker>,
