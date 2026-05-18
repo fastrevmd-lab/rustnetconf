@@ -1,14 +1,22 @@
 //! Integration tests against a real Juniper vSRX.
 //!
-//! These tests require a running vSRX at 192.168.1.226 with NETCONF enabled
-//! and SSH key auth configured for user "rustnetconf".
+//! These tests are **opt-in**: they run only when the
+//! `RUSTNETCONF_TEST_VSRX_HOST` env var points at a reachable vSRX. See
+//! [`tests/common/mod.rs`] for the full env-var list. Without it, every
+//! test returns immediately as a no-op so the suite is friendly to
+//! contributors without a Junos lab.
 //!
-//! Run with: `cargo test --test integration_vsrx`
-//!
-//! Skip with: set env `SKIP_INTEGRATION=1` to skip these tests when no device
-//! is available.
+//! Run with:
+//! ```sh
+//! RUSTNETCONF_TEST_VSRX_HOST=192.168.1.227:830 \
+//!     cargo test --test integration_vsrx
+//! ```
 
+mod common;
+
+use common::VsrxTarget;
 use rustnetconf::error::NetconfError;
+use rustnetconf::transport::ssh::HostKeyVerification;
 use rustnetconf::{Client, Datastore, DefaultOperation};
 use tokio::sync::Mutex as TokioMutex;
 
@@ -17,22 +25,17 @@ use tokio::sync::Mutex as TokioMutex;
 static CANDIDATE_LOCK: std::sync::LazyLock<TokioMutex<()>> =
     std::sync::LazyLock::new(|| TokioMutex::new(()));
 
-/// Check if integration tests should be skipped.
-fn should_skip() -> bool {
-    std::env::var("SKIP_INTEGRATION").is_ok()
-}
-
-/// Resolve ~ in key path.
-fn resolve_key_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/mharman".to_string());
-    format!("{home}/.ssh/rustnetconf_test")
-}
-
-/// Create a connected client to the vSRX using key auth.
-async fn connect_vsrx() -> Client {
-    Client::connect("192.168.1.226:830")
-        .username("rustnetconf")
-        .key_file(&resolve_key_path())
+/// Create a connected client to the configured vSRX using key auth.
+///
+/// Uses `HostKeyVerification::AcceptAll` because the integration suite is
+/// designed for a transient lab device (VM114 / CI-tester-vSRX) whose host
+/// key may rotate on every reboot — pinning would only add CI churn here.
+/// Production users should pin via `Fingerprint(...)` or `KnownHosts(...)`.
+async fn connect_vsrx(target: &VsrxTarget) -> Client {
+    Client::connect(target.endpoint())
+        .username(&target.username)
+        .key_file(&target.key_path)
+        .host_key_verification(HostKeyVerification::AcceptAll)
         .connect()
         .await
         .expect("failed to connect to vSRX — is the device reachable?")
@@ -43,11 +46,11 @@ async fn connect_vsrx() -> Client {
 /// T34/T35: SSH connect + key auth, session establishment.
 #[tokio::test]
 async fn test_connect_and_hello() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
 
     // Verify capabilities were negotiated
     let caps = client
@@ -67,14 +70,16 @@ async fn test_connect_and_hello() {
 /// T38: Connection refused — wrong port should fail with TransportError.
 #[tokio::test]
 async fn test_connection_refused() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    // Port 12345 should be unreachable
-    let result = Client::connect("192.168.1.226:12345")
-        .username("rustnetconf")
-        .key_file(&resolve_key_path())
+    // Port 12345 should be unreachable on the test device
+    let (host, _port) = common::split_host_port(target.endpoint());
+    let bogus_endpoint = format!("{host}:12345");
+    let result = Client::connect(&bogus_endpoint)
+        .username(&target.username)
+        .key_file(&target.key_path)
         .connect()
         .await;
 
@@ -88,13 +93,16 @@ async fn test_connection_refused() {
 /// T39: Auth failure — wrong credentials should fail with TransportError::Auth.
 #[tokio::test]
 async fn test_auth_failure() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let result = Client::connect("192.168.1.226:830")
-        .username("rustnetconf")
+    // We want to assert *auth* failure, so opt out of host-key checking — the
+    // default RejectAll would mask the auth error path we're testing.
+    let result = Client::connect(target.endpoint())
+        .username(&target.username)
         .password("definitely-wrong-password")
+        .host_key_verification(HostKeyVerification::AcceptAll)
         .connect()
         .await;
 
@@ -113,9 +121,12 @@ async fn test_auth_failure() {
 /// T38: Connection to unreachable host should fail with TransportError.
 #[tokio::test]
 async fn test_connection_unreachable_host() {
-    if should_skip() {
+    // Still gated on opt-in env so this stays paired with the rest of the
+    // integration suite, but the test itself targets RFC 5737 TEST-NET-1
+    // rather than the configured device.
+    let Some(_target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
     // 192.0.2.1 is TEST-NET-1 (RFC 5737) — guaranteed unreachable
     let result = tokio::time::timeout(
@@ -141,11 +152,11 @@ async fn test_connection_unreachable_host() {
 /// T42: get-config round trip — fetch running config.
 #[tokio::test]
 async fn test_get_config_running() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
 
     let config = client
         .get_config(Datastore::Running)
@@ -167,11 +178,11 @@ async fn test_get_config_running() {
 /// T42: get-config with subtree filter.
 #[tokio::test]
 async fn test_get_config_filtered() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
 
     let config = client
         .get_config_filtered(
@@ -192,11 +203,11 @@ async fn test_get_config_filtered() {
 /// Get candidate config — should match running when no uncommitted changes.
 #[tokio::test]
 async fn test_get_config_candidate() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
 
     let candidate = client
         .get_config(Datastore::Candidate)
@@ -219,11 +230,11 @@ async fn test_get_config_candidate() {
 /// Get-config with a filter that returns no data — should succeed with empty/minimal response.
 #[tokio::test]
 async fn test_get_config_empty_filter_result() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
 
     // Filter for a specific element that almost certainly doesn't exist
     let config = client
@@ -246,12 +257,12 @@ async fn test_get_config_empty_filter_result() {
 /// T41: Full edit-config round trip — lock → edit → validate → commit → unlock.
 #[tokio::test]
 async fn test_edit_config_round_trip() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
     let _guard = CANDIDATE_LOCK.lock().await;
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
 
     // Lock candidate
     client
@@ -312,12 +323,12 @@ async fn test_edit_config_round_trip() {
 /// Edit-config with replace operation — replaces entire subtree.
 #[tokio::test]
 async fn test_edit_config_replace() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
     let _guard = CANDIDATE_LOCK.lock().await;
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
 
     client
         .lock(Datastore::Candidate)
@@ -366,12 +377,12 @@ async fn test_edit_config_replace() {
 /// Validate with intentionally invalid config — expect a structured RPC error.
 #[tokio::test]
 async fn test_edit_config_invalid_rejected() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
     let _guard = CANDIDATE_LOCK.lock().await;
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
 
     client
         .lock(Datastore::Candidate)
@@ -408,20 +419,20 @@ async fn test_edit_config_invalid_rejected() {
 /// Lock contention — second lock on same datastore should fail with lock-denied.
 #[tokio::test]
 async fn test_lock_contention() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
     let _guard = CANDIDATE_LOCK.lock().await;
 
     // First client locks candidate
-    let mut client1 = connect_vsrx().await;
+    let mut client1 = connect_vsrx(&target).await;
     client1
         .lock(Datastore::Candidate)
         .await
         .expect("first lock should succeed");
 
     // Second client tries to lock the same datastore
-    let mut client2 = connect_vsrx().await;
+    let mut client2 = connect_vsrx(&target).await;
     let result = client2.lock(Datastore::Candidate).await;
 
     assert!(result.is_err(), "second lock should be denied");
@@ -444,12 +455,12 @@ async fn test_lock_contention() {
 /// Unlock without lock — should fail with an RPC error.
 #[tokio::test]
 async fn test_unlock_without_lock() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
     let _guard = CANDIDATE_LOCK.lock().await;
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
 
     let result = client.unlock(Datastore::Candidate).await;
     assert!(result.is_err(), "unlock without lock should fail");
@@ -462,11 +473,11 @@ async fn test_unlock_without_lock() {
 /// T33: Operation after session closed should fail gracefully.
 #[tokio::test]
 async fn test_operation_after_close() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
     client.close_session().await.expect("close_session failed");
 
     // Attempting get-config on a closed session should error
@@ -477,11 +488,11 @@ async fn test_operation_after_close() {
 /// Double close-session should be idempotent — no panic, no error.
 #[tokio::test]
 async fn test_double_close_session() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
     client
         .close_session()
         .await
@@ -495,12 +506,12 @@ async fn test_double_close_session() {
 /// Multiple sequential RPCs on one session — verify message-id incrementing.
 #[tokio::test]
 async fn test_multiple_sequential_rpcs() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
     let _guard = CANDIDATE_LOCK.lock().await;
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
 
     // Issue several RPCs in sequence on the same session
     let config1 = client
@@ -549,11 +560,11 @@ async fn test_multiple_sequential_rpcs() {
 /// T32: Capability-gated operations — commit requires :candidate.
 #[tokio::test]
 async fn test_capability_check() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let client = connect_vsrx().await;
+    let client = connect_vsrx(&target).await;
 
     // vSRX supports :candidate, so this should be true
     assert!(client.supports("urn:ietf:params:netconf:capability:candidate:1.0"));
@@ -570,11 +581,11 @@ async fn test_capability_check() {
 /// Verify all capability URIs are returned and non-empty.
 #[tokio::test]
 async fn test_capabilities_all_uris() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let client = connect_vsrx().await;
+    let client = connect_vsrx(&target).await;
 
     let caps = client.capabilities().expect("capabilities should exist");
     let uris = caps.all_uris();
@@ -600,11 +611,11 @@ async fn test_capabilities_all_uris() {
 /// T37: NETCONF subsystem channel — verify we get proper XML responses.
 #[tokio::test]
 async fn test_get_operational() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
 
     // Junos uses subtree filters on <get> with the Junos operational namespace.
     let data = client
@@ -633,11 +644,11 @@ async fn test_get_operational() {
 /// Get without filter — should return all operational + config data.
 #[tokio::test]
 async fn test_get_unfiltered() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
 
     let data = client.get(None).await.expect("unfiltered get failed");
 
@@ -656,12 +667,12 @@ async fn test_get_unfiltered() {
 /// Multiple independent sessions to the same device — no interference.
 #[tokio::test]
 async fn test_concurrent_sessions() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
     // Open two sessions simultaneously
-    let (mut client1, mut client2) = tokio::join!(connect_vsrx(), connect_vsrx(),);
+    let (mut client1, mut client2) = tokio::join!(connect_vsrx(&target), connect_vsrx(&target));
 
     // Both should have different session IDs
     let id1 = client1.capabilities().unwrap().session_id().unwrap();
@@ -693,11 +704,11 @@ async fn test_concurrent_sessions() {
 /// Large config fetch — verify the framing layer handles multi-read responses.
 #[tokio::test]
 async fn test_large_config_payload() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
 
     // Fetch the entire running config (unfiltered) — typically several KB on a vSRX
     let config = client
@@ -725,12 +736,12 @@ async fn test_large_config_payload() {
 /// Verify that RPC errors from the device include the structured error fields.
 #[tokio::test]
 async fn test_rpc_error_structure() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
     let _guard = CANDIDATE_LOCK.lock().await;
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
 
     client
         .lock(Datastore::Candidate)

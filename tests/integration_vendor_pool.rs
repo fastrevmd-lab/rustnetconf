@@ -1,38 +1,40 @@
 //! Integration tests for vendor profiles and connection pool against live vSRX.
 //!
-//! Run with: `cargo test --test integration_vendor_pool`
+//! Opt-in via `RUSTNETCONF_TEST_VSRX_HOST` — see `tests/common/mod.rs`.
+//!
+//! Run with:
+//! ```sh
+//! RUSTNETCONF_TEST_VSRX_HOST=192.168.1.227:830 \
+//!     cargo test --test integration_vendor_pool
+//! ```
 
+mod common;
+
+use common::VsrxTarget;
 use rustnetconf::pool::{DeviceConfig, DevicePool};
-use rustnetconf::transport::ssh::SshAuth;
+use rustnetconf::transport::ssh::{HostKeyVerification, SshAuth};
 use rustnetconf::{Client, Datastore};
 use std::time::Duration;
 
-fn should_skip() -> bool {
-    std::env::var("SKIP_INTEGRATION").is_ok()
-}
-
-fn resolve_key_path() -> String {
-    let home = std::env::var("HOME").unwrap_or_else(|_| "/home/mharman".to_string());
-    format!("{home}/.ssh/rustnetconf_test")
-}
-
-async fn connect_vsrx() -> Client {
-    Client::connect("192.168.1.226:830")
-        .username("rustnetconf")
-        .key_file(&resolve_key_path())
+async fn connect_vsrx(target: &VsrxTarget) -> Client {
+    Client::connect(target.endpoint())
+        .username(&target.username)
+        .key_file(&target.key_path)
+        .host_key_verification(HostKeyVerification::AcceptAll)
         .connect()
         .await
         .expect("failed to connect to vSRX")
 }
 
-fn vsrx_device_config() -> DeviceConfig {
+fn vsrx_device_config(target: &VsrxTarget) -> DeviceConfig {
     DeviceConfig {
-        host: "192.168.1.226:830".to_string(),
-        username: "rustnetconf".to_string(),
+        host: target.endpoint().to_string(),
+        username: target.username.clone(),
         auth: SshAuth::KeyFile {
-            path: resolve_key_path(),
+            path: target.key_path.clone(),
             passphrase: None,
         },
+        host_key_verification: Some(HostKeyVerification::AcceptAll),
         vendor: None,
     }
 }
@@ -42,22 +44,22 @@ fn vsrx_device_config() -> DeviceConfig {
 /// vSRX is auto-detected as Junos vendor.
 #[tokio::test]
 async fn test_vsrx_auto_detected_as_junos() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let client = connect_vsrx().await;
+    let client = connect_vsrx(&target).await;
     assert_eq!(client.vendor_name(), "junos");
 }
 
 /// edit-config with Junos auto-wrapping — bare config gets <configuration> added.
 #[tokio::test]
 async fn test_edit_config_with_junos_auto_wrap() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
     assert_eq!(client.vendor_name(), "junos");
 
     client
@@ -97,11 +99,11 @@ async fn test_edit_config_with_junos_auto_wrap() {
 /// get-config with Junos unwrapping strips <configuration> wrapper.
 #[tokio::test]
 async fn test_get_config_junos_unwrap() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
-    let mut client = connect_vsrx().await;
+    let mut client = connect_vsrx(&target).await;
 
     let config = client
         .get_config_filtered(
@@ -126,13 +128,13 @@ async fn test_get_config_junos_unwrap() {
 /// Pool checkout + use + auto-checkin.
 #[tokio::test]
 async fn test_pool_checkout_and_use() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
     let pool = DevicePool::builder()
         .max_connections(5)
-        .add_device("vsrx", vsrx_device_config())
+        .add_device("vsrx", vsrx_device_config(&target))
         .build();
 
     {
@@ -154,13 +156,13 @@ async fn test_pool_checkout_and_use() {
 /// Pool reuses connections on second checkout.
 #[tokio::test]
 async fn test_pool_connection_reuse() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
     let pool = DevicePool::builder()
         .max_connections(5)
-        .add_device("vsrx", vsrx_device_config())
+        .add_device("vsrx", vsrx_device_config(&target))
         .build();
 
     // First checkout + use + checkin
@@ -186,13 +188,13 @@ async fn test_pool_connection_reuse() {
 /// Pool returns error for unknown device.
 #[tokio::test]
 async fn test_pool_unknown_device() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
     let pool = DevicePool::builder()
         .max_connections(5)
-        .add_device("vsrx", vsrx_device_config())
+        .add_device("vsrx", vsrx_device_config(&target))
         .build();
 
     let result = pool.checkout("nonexistent").await;
@@ -202,14 +204,14 @@ async fn test_pool_unknown_device() {
 /// Pool checkout times out when all connections in use.
 #[tokio::test]
 async fn test_pool_checkout_timeout() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
     let pool = DevicePool::builder()
         .max_connections(1)
         .checkout_timeout(Duration::from_secs(2))
-        .add_device("vsrx", vsrx_device_config())
+        .add_device("vsrx", vsrx_device_config(&target))
         .build();
 
     // Hold a connection
@@ -223,13 +225,13 @@ async fn test_pool_checkout_timeout() {
 /// Concurrent pool checkouts to same device.
 #[tokio::test]
 async fn test_pool_concurrent_checkouts() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
     let pool = DevicePool::builder()
         .max_connections(3)
-        .add_device("vsrx", vsrx_device_config())
+        .add_device("vsrx", vsrx_device_config(&target))
         .build();
 
     // Checkout 2 connections concurrently
@@ -253,13 +255,13 @@ async fn test_pool_concurrent_checkouts() {
 /// Pool auto-detects Junos vendor on connections.
 #[tokio::test]
 async fn test_pool_auto_detects_vendor() {
-    if should_skip() {
+    let Some(target) = common::skip_unless_vsrx_configured() else {
         return;
-    }
+    };
 
     let pool = DevicePool::builder()
         .max_connections(5)
-        .add_device("vsrx", vsrx_device_config())
+        .add_device("vsrx", vsrx_device_config(&target))
         .build();
 
     let conn = pool.checkout("vsrx").await.expect("checkout failed");

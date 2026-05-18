@@ -65,6 +65,9 @@ pub struct InventoryDefaults {
     pub confirm_timeout: Option<u32>,
     pub username: Option<String>,
     pub vendor: Option<String>,
+    /// Default known_hosts file path applied to every device that doesn't
+    /// override it. Tilde (`~`) is expanded to `$HOME`.
+    pub known_hosts_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,7 +85,17 @@ pub struct DeviceEntry {
     /// Obtain with `ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the
     /// device. When set, the SSH host key must match exactly or the
     /// connection is rejected.
+    ///
+    /// Mutually exclusive with `known_hosts_path` — setting both is a hard
+    /// error to avoid ambiguity about which policy is in effect.
     pub host_key_fingerprint: Option<String>,
+    /// Path to an OpenSSH-format `known_hosts` file. When set, the device's
+    /// host key is verified against entries in this file on every connect.
+    /// Tilde (`~`) is expanded to `$HOME`.
+    ///
+    /// Overrides `defaults.known_hosts_path` for this device only.
+    /// Mutually exclusive with `host_key_fingerprint`.
+    pub known_hosts_path: Option<String>,
 }
 
 impl Inventory {
@@ -115,6 +128,28 @@ impl Inventory {
 
         let key_file = entry.key_file.as_ref().map(|p| resolve_home(p));
 
+        if entry.host_key_fingerprint.is_some() && entry.known_hosts_path.is_some() {
+            return Err(format!(
+                "device '{name}': host_key_fingerprint and known_hosts_path are mutually exclusive — choose one"
+            ));
+        }
+
+        // Per-device explicit setting overrides defaults entirely:
+        //   - if device sets known_hosts_path → that wins
+        //   - else if device sets host_key_fingerprint → no known_hosts inherited
+        //     (fingerprint is the policy for this device)
+        //   - else → inherit defaults.known_hosts_path
+        let known_hosts_path = if let Some(p) = entry.known_hosts_path.as_ref() {
+            Some(resolve_home(p))
+        } else if entry.host_key_fingerprint.is_some() {
+            None
+        } else {
+            self.defaults
+                .known_hosts_path
+                .as_ref()
+                .map(|p| resolve_home(p))
+        };
+
         Ok(ResolvedDevice {
             name: name.to_string(),
             host: entry.host.clone(),
@@ -127,6 +162,7 @@ impl Inventory {
                 .or_else(|| self.defaults.vendor.clone()),
             confirm_timeout: self.defaults.confirm_timeout.unwrap_or(60),
             host_key_fingerprint: entry.host_key_fingerprint.clone(),
+            known_hosts_path,
         })
     }
 }
@@ -145,6 +181,9 @@ pub struct ResolvedDevice {
     pub confirm_timeout: u32,
     /// Optional SHA-256 host key fingerprint to pin for this device.
     pub host_key_fingerprint: Option<String>,
+    /// Optional `known_hosts` file (already tilde-expanded). When set, host
+    /// key is verified against this file at connect time.
+    pub known_hosts_path: Option<String>,
 }
 
 /// Resolve ~ to home directory in a path.
@@ -267,5 +306,120 @@ host = "10.0.0.1"
         let resolved = resolve_home("~/.ssh/id_ed25519");
         assert!(!resolved.starts_with("~"));
         assert!(resolved.contains(".ssh/id_ed25519"));
+    }
+
+    #[test]
+    fn known_hosts_path_set_on_device_resolves_directly() {
+        let toml = r#"
+[devices.router-01]
+host = "10.0.0.1"
+username = "admin"
+known_hosts_path = "/etc/jmcp/known_hosts"
+"#;
+        let inv: Inventory = toml::from_str(toml).unwrap();
+        let dev = inv.device("router-01").unwrap();
+        assert_eq!(
+            dev.known_hosts_path.as_deref(),
+            Some("/etc/jmcp/known_hosts")
+        );
+    }
+
+    #[test]
+    fn known_hosts_path_falls_back_to_defaults() {
+        let toml = r#"
+[defaults]
+known_hosts_path = "/etc/jmcp/known_hosts"
+
+[devices.router-01]
+host = "10.0.0.1"
+username = "admin"
+"#;
+        let inv: Inventory = toml::from_str(toml).unwrap();
+        let dev = inv.device("router-01").unwrap();
+        assert_eq!(
+            dev.known_hosts_path.as_deref(),
+            Some("/etc/jmcp/known_hosts")
+        );
+    }
+
+    #[test]
+    fn device_known_hosts_path_overrides_defaults() {
+        let toml = r#"
+[defaults]
+known_hosts_path = "/etc/jmcp/known_hosts"
+
+[devices.router-01]
+host = "10.0.0.1"
+username = "admin"
+known_hosts_path = "/var/lib/jmcp/router-01_known_hosts"
+"#;
+        let inv: Inventory = toml::from_str(toml).unwrap();
+        let dev = inv.device("router-01").unwrap();
+        assert_eq!(
+            dev.known_hosts_path.as_deref(),
+            Some("/var/lib/jmcp/router-01_known_hosts")
+        );
+    }
+
+    #[test]
+    fn known_hosts_path_expands_tilde() {
+        std::env::set_var("HOME", "/home/test-user");
+        let toml = r#"
+[devices.router-01]
+host = "10.0.0.1"
+username = "admin"
+known_hosts_path = "~/.ssh/known_hosts"
+"#;
+        let inv: Inventory = toml::from_str(toml).unwrap();
+        let dev = inv.device("router-01").unwrap();
+        assert_eq!(
+            dev.known_hosts_path.as_deref(),
+            Some("/home/test-user/.ssh/known_hosts")
+        );
+    }
+
+    /// Setting both `host_key_fingerprint` and `known_hosts_path` on the same
+    /// device is ambiguous — fail loudly at inventory-resolution time rather
+    /// than silently preferring one.
+    #[test]
+    fn fingerprint_and_known_hosts_path_conflict_errors() {
+        let toml = r#"
+[devices.router-01]
+host = "10.0.0.1"
+username = "admin"
+host_key_fingerprint = "SHA256:aaa"
+known_hosts_path = "/etc/jmcp/known_hosts"
+"#;
+        let inv: Inventory = toml::from_str(toml).unwrap();
+        let err = inv.device("router-01").unwrap_err();
+        assert!(
+            err.contains("mutually exclusive"),
+            "expected conflict error, got: {err}"
+        );
+        assert!(err.contains("router-01"), "error should name device: {err}");
+    }
+
+    /// A device-level `host_key_fingerprint` opts the device out of the
+    /// defaults-level `known_hosts_path`. The two are NOT both set on the
+    /// resolved device — the device's explicit choice wins cleanly so
+    /// policy selection in `connect.rs` has no ambiguity to resolve.
+    #[test]
+    fn device_fingerprint_suppresses_defaults_known_hosts() {
+        let toml = r#"
+[defaults]
+known_hosts_path = "/etc/jmcp/known_hosts"
+
+[devices.router-01]
+host = "10.0.0.1"
+username = "admin"
+host_key_fingerprint = "SHA256:aaa"
+"#;
+        let inv: Inventory = toml::from_str(toml).unwrap();
+        let dev = inv.device("router-01").expect("should resolve");
+        assert_eq!(dev.host_key_fingerprint.as_deref(), Some("SHA256:aaa"));
+        assert!(
+            dev.known_hosts_path.is_none(),
+            "defaults known_hosts must not be inherited when device pins fingerprint"
+        );
     }
 }

@@ -74,6 +74,30 @@ pub enum TransportError {
     #[cfg(feature = "tls")]
     #[error("TLS error: {0}")]
     Tls(String),
+
+    /// Server presented a host key whose fingerprint does not match the one
+    /// recorded in the known_hosts file for this host. Possible MITM attack
+    /// or the device's host key was rotated — investigate before reconnecting.
+    #[error("host key mismatch for {host}: known_hosts has {expected}, server presented {actual}")]
+    HostKeyMismatch {
+        host: String,
+        expected: String,
+        actual: String,
+    },
+
+    /// No entry for this host exists in the known_hosts file. Fail closed —
+    /// pre-populate the file with `ssh-keyscan` before connecting.
+    #[error("host {host}:{port} not found in known_hosts file {path}")]
+    HostKeyNotInKnownHosts {
+        host: String,
+        port: u16,
+        path: String,
+    },
+
+    /// The known_hosts file contains an `@revoked` entry for the host key
+    /// presented by the server. Fail closed.
+    #[error("host key for {host} is marked @revoked in known_hosts")]
+    HostKeyRevoked { host: String },
 }
 
 /// Framing layer errors (EOM or chunked framing).
@@ -159,4 +183,44 @@ pub enum ProtocolError {
     /// XML parsing error during protocol message handling.
     #[error("XML error: {0}")]
     Xml(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_key_mismatch_display_includes_all_fields() {
+        let err = TransportError::HostKeyMismatch {
+            host: "device-a.lab".into(),
+            expected: "SHA256:aaa".into(),
+            actual: "SHA256:bbb".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("device-a.lab"), "got {s:?}");
+        assert!(s.contains("SHA256:aaa"), "got {s:?}");
+        assert!(s.contains("SHA256:bbb"), "got {s:?}");
+    }
+
+    #[test]
+    fn host_key_not_in_known_hosts_display_includes_port_and_path() {
+        let err = TransportError::HostKeyNotInKnownHosts {
+            host: "device-a.lab".into(),
+            port: 830,
+            path: "/etc/jmcp/known_hosts".into(),
+        };
+        let s = err.to_string();
+        assert!(s.contains("device-a.lab"), "got {s:?}");
+        assert!(s.contains("830"), "got {s:?}");
+        assert!(s.contains("/etc/jmcp/known_hosts"), "got {s:?}");
+    }
+
+    #[test]
+    fn host_key_revoked_display_includes_host() {
+        let err = TransportError::HostKeyRevoked {
+            host: "device-a.lab".into(),
+        };
+        assert!(err.to_string().contains("device-a.lab"));
+        assert!(err.to_string().contains("revoked"));
+    }
 }

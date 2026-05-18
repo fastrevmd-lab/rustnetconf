@@ -87,6 +87,27 @@ pub enum HostKeyVerification {
     ///
     /// Also useful in tests to exercise error paths.
     RejectAll,
+
+    /// Validate the device's host key against entries in an OpenSSH-format
+    /// `known_hosts` file.
+    ///
+    /// On connect, the host (and port if non-default) is looked up in the
+    /// file. A SHA-256 fingerprint match accepts the key; mismatch, missing
+    /// entry, or `@revoked` marker fails closed with a structured
+    /// [`crate::error::TransportError`] variant
+    /// ([`HostKeyMismatch`](crate::error::TransportError::HostKeyMismatch),
+    /// [`HostKeyNotInKnownHosts`](crate::error::TransportError::HostKeyNotInKnownHosts),
+    /// or [`HostKeyRevoked`](crate::error::TransportError::HostKeyRevoked)).
+    ///
+    /// Supported file features: plain hostnames, comma-separated host lists,
+    /// `[host]:port` form, wildcards (`*`, `?`), CIDR networks, hashed
+    /// entries (`|1|salt|hmac`), and `@revoked` markers. Pre-populate with
+    /// `ssh-keyscan -t ed25519,rsa,ecdsa <host>` (add `-H` for hashed,
+    /// `-p <port>` for non-default ports).
+    ///
+    /// `@cert-authority` lines are silently skipped (SSH host certs not yet
+    /// supported).
+    KnownHosts(std::path::PathBuf),
 }
 
 /// Configuration for establishing an SSH transport.
@@ -138,9 +159,39 @@ pub struct JumpHostConfig {
     pub host_key_verification: HostKeyVerification,
 }
 
+/// Slot for surfacing structured host-key errors from inside the russh
+/// callback to the outer `connect()` call.
+///
+/// `check_server_key` can only return `Result<bool, russh::Error>` — there's
+/// no way to thread our own error type through. When `KnownHosts` policy
+/// rejects, we record the structured error here; after `client::connect`
+/// fails with a generic auth/key error, the caller swaps in this error.
+#[derive(Clone, Default)]
+struct HostKeyErrorSlot(Arc<std::sync::Mutex<Option<TransportError>>>);
+
+impl HostKeyErrorSlot {
+    fn set(&self, err: TransportError) {
+        if let Ok(mut guard) = self.0.lock() {
+            *guard = Some(err);
+        }
+    }
+
+    fn take(&self) -> Option<TransportError> {
+        self.0.lock().ok().and_then(|mut g| g.take())
+    }
+}
+
 /// Internal SSH client handler for russh callbacks.
 struct SshHandler {
     host_key_verification: HostKeyVerification,
+    /// Host this handler is verifying — used for known_hosts lookup and
+    /// for structured error messages.
+    host: String,
+    port: u16,
+    /// Shared slot to surface structured rejection errors back to the
+    /// outer connect call. Cloned `Arc` so it's visible after the handler
+    /// is moved into `client::connect`.
+    error_slot: HostKeyErrorSlot,
 }
 
 impl client::Handler for SshHandler {
@@ -153,24 +204,25 @@ impl client::Handler for SshHandler {
         let fingerprint = server_public_key
             .fingerprint(keys::HashAlg::Sha256)
             .to_string();
-        let allowed = evaluate_host_key_policy(&self.host_key_verification, &fingerprint);
-        match &self.host_key_verification {
+        let allowed = match &self.host_key_verification {
             HostKeyVerification::AcceptAll => {
                 tracing::warn!(
                     "accepting SSH host key without verification — \
                      set host_key_verification() for production use"
                 );
+                true
             }
-            HostKeyVerification::Fingerprint(expected) if allowed => {
-                tracing::debug!("SSH host key fingerprint verified");
-                let _ = expected;
-            }
-            HostKeyVerification::Fingerprint(expected) => {
-                tracing::error!(
-                    expected = %expected,
-                    actual = %fingerprint,
-                    "SSH host key fingerprint mismatch — possible MITM attack"
-                );
+            HostKeyVerification::Fingerprint(_) => {
+                let ok = evaluate_host_key_policy(&self.host_key_verification, &fingerprint);
+                if ok {
+                    tracing::debug!("SSH host key fingerprint verified");
+                } else {
+                    tracing::error!(
+                        actual = %fingerprint,
+                        "SSH host key fingerprint mismatch — possible MITM attack"
+                    );
+                }
+                ok
             }
             HostKeyVerification::RejectAll => {
                 tracing::error!(
@@ -179,9 +231,90 @@ impl client::Handler for SshHandler {
                      Pin the device's fingerprint with HostKeyVerification::Fingerprint \
                      or explicitly opt in to HostKeyVerification::AcceptAll for lab use."
                 );
+                false
             }
-        }
+            HostKeyVerification::KnownHosts(path) => {
+                match crate::transport::known_hosts::lookup(
+                    path,
+                    &self.host,
+                    self.port,
+                    &fingerprint,
+                ) {
+                    Ok(outcome) => {
+                        let res = known_hosts_outcome_to_result(
+                            outcome,
+                            &self.host,
+                            self.port,
+                            path,
+                            &fingerprint,
+                        );
+                        match res {
+                            Ok(()) => {
+                                tracing::debug!(
+                                    file = %path.display(),
+                                    "SSH host key verified via known_hosts"
+                                );
+                                true
+                            }
+                            Err(err) => {
+                                tracing::error!(
+                                    file = %path.display(),
+                                    host = %self.host,
+                                    error = %err,
+                                    "SSH host key rejected by known_hosts policy"
+                                );
+                                self.error_slot.set(err);
+                                false
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        // I/O or unrecoverable error reading the file.
+                        let transport_err = TransportError::Io(std::io::Error::other(format!(
+                            "known_hosts file {path}: {err}",
+                            path = path.display()
+                        )));
+                        tracing::error!(
+                            file = %path.display(),
+                            error = %err,
+                            "could not read known_hosts file — failing closed"
+                        );
+                        self.error_slot.set(transport_err);
+                        false
+                    }
+                }
+            }
+        };
         std::future::ready(Ok(allowed))
+    }
+}
+
+/// Convert a `known_hosts::LookupOutcome` into either `Ok(())` (accept) or a
+/// structured [`TransportError`] (reject). Pure — no I/O — so the mapping is
+/// unit-testable.
+fn known_hosts_outcome_to_result(
+    outcome: crate::transport::known_hosts::LookupOutcome,
+    host: &str,
+    port: u16,
+    path: &Path,
+    actual_fp: &str,
+) -> Result<(), TransportError> {
+    use crate::transport::known_hosts::LookupOutcome;
+    match outcome {
+        LookupOutcome::Match => Ok(()),
+        LookupOutcome::Mismatch { file_fp } => Err(TransportError::HostKeyMismatch {
+            host: host.to_string(),
+            expected: file_fp,
+            actual: actual_fp.to_string(),
+        }),
+        LookupOutcome::NotFound => Err(TransportError::HostKeyNotInKnownHosts {
+            host: host.to_string(),
+            port,
+            path: path.display().to_string(),
+        }),
+        LookupOutcome::Revoked => Err(TransportError::HostKeyRevoked {
+            host: host.to_string(),
+        }),
     }
 }
 
@@ -196,6 +329,7 @@ impl client::Handler for SshHandler {
 /// prefix on the expected side.
 fn evaluate_host_key_policy(policy: &HostKeyVerification, actual_fingerprint: &str) -> bool {
     match policy {
+        HostKeyVerification::KnownHosts(_) => false,
         HostKeyVerification::AcceptAll => true,
         HostKeyVerification::RejectAll => false,
         HostKeyVerification::Fingerprint(expected) => {
@@ -455,16 +589,24 @@ impl SshTransport {
 
         for (idx, hop) in config.jump_hosts.iter().enumerate() {
             let label = format!("jump-host {} ({}:{})", idx, hop.host, hop.port);
+            let slot = HostKeyErrorSlot::default();
             let handle = match prev {
                 None => {
                     // First hop: direct TCP connection.
                     let handler = SshHandler {
                         host_key_verification: hop.host_key_verification.clone(),
+                        host: hop.host.clone(),
+                        port: hop.port,
+                        error_slot: slot.clone(),
                     };
                     client::connect(russh_config.clone(), (&*hop.host, hop.port), handler)
                         .await
                         .map_err(|e| {
-                            TransportError::Connect(format!("SSH connect to {label} failed: {e}"))
+                            slot.take().unwrap_or_else(|| {
+                                TransportError::Connect(format!(
+                                    "SSH connect to {label} failed: {e}"
+                                ))
+                            })
                         })?
                 }
                 Some(parent) => {
@@ -478,13 +620,18 @@ impl SshTransport {
                     let stream = channel.into_stream();
                     let handler = SshHandler {
                         host_key_verification: hop.host_key_verification.clone(),
+                        host: hop.host.clone(),
+                        port: hop.port,
+                        error_slot: slot.clone(),
                     };
                     client::connect_stream(russh_config.clone(), stream, handler)
                         .await
                         .map_err(|e| {
-                            TransportError::Connect(format!(
-                                "SSH handshake with {label} failed: {e}"
-                            ))
+                            slot.take().unwrap_or_else(|| {
+                                TransportError::Connect(format!(
+                                    "SSH handshake with {label} failed: {e}"
+                                ))
+                            })
                         })?
                 }
             };
@@ -514,18 +661,24 @@ impl SshTransport {
         //   3. otherwise → direct TCP connection to the target
         let target_label = format!("{}:{}", config.host, config.port);
         let mut proxy_process: Option<Child> = None;
+        let target_slot = HostKeyErrorSlot::default();
         let mut handle = if let Some(cmd) = config.proxy_command.as_deref() {
             let (stream, child) = spawn_proxy_command(cmd, &config.host, config.port)?;
             proxy_process = Some(child);
             let handler = SshHandler {
                 host_key_verification: config.host_key_verification.clone(),
+                host: config.host.clone(),
+                port: config.port,
+                error_slot: target_slot.clone(),
             };
             client::connect_stream(russh_config.clone(), stream, handler)
                 .await
                 .map_err(|e| {
-                    TransportError::Connect(format!(
-                        "SSH handshake with target {target_label} (via ProxyCommand) failed: {e}"
-                    ))
+                    target_slot.take().unwrap_or_else(|| {
+                        TransportError::Connect(format!(
+                            "SSH handshake with target {target_label} (via ProxyCommand) failed: {e}"
+                        ))
+                    })
                 })?
         } else if let Some(parent) = jump_handles.last() {
             let channel = parent
@@ -539,22 +692,34 @@ impl SshTransport {
             let stream = channel.into_stream();
             let handler = SshHandler {
                 host_key_verification: config.host_key_verification.clone(),
+                host: config.host.clone(),
+                port: config.port,
+                error_slot: target_slot.clone(),
             };
             client::connect_stream(russh_config.clone(), stream, handler)
                 .await
                 .map_err(|e| {
-                    TransportError::Connect(format!(
-                        "SSH handshake with target {target_label} failed: {e}"
-                    ))
+                    target_slot.take().unwrap_or_else(|| {
+                        TransportError::Connect(format!(
+                            "SSH handshake with target {target_label} failed: {e}"
+                        ))
+                    })
                 })?
         } else {
             let handler = SshHandler {
                 host_key_verification: config.host_key_verification.clone(),
+                host: config.host.clone(),
+                port: config.port,
+                error_slot: target_slot.clone(),
             };
             client::connect(russh_config.clone(), (&*config.host, config.port), handler)
                 .await
                 .map_err(|e| {
-                    TransportError::Connect(format!("SSH connect to {target_label} failed: {e}"))
+                    target_slot.take().unwrap_or_else(|| {
+                        TransportError::Connect(format!(
+                            "SSH connect to {target_label} failed: {e}"
+                        ))
+                    })
                 })?
         };
 
@@ -912,5 +1077,92 @@ mod tests {
         let policy = HostKeyVerification::Fingerprint("SHA256:abc123".to_string());
         assert!(!evaluate_host_key_policy(&policy, "SHA256:def456"));
         assert!(!evaluate_host_key_policy(&policy, ""));
+    }
+
+    #[test]
+    fn host_key_policy_known_hosts_defers_to_file_lookup_returns_false_here() {
+        // evaluate_host_key_policy is pure (no I/O) — for KnownHosts the
+        // actual decision happens in the handler via known_hosts::lookup().
+        // The pure function must NOT accept on its own.
+        let policy = HostKeyVerification::KnownHosts(std::path::PathBuf::from("/tmp/x"));
+        assert!(!evaluate_host_key_policy(&policy, "SHA256:abc"));
+    }
+
+    #[test]
+    fn known_hosts_outcome_to_error_match_is_ok() {
+        use crate::transport::known_hosts::LookupOutcome;
+        let res = known_hosts_outcome_to_result(
+            LookupOutcome::Match,
+            "device-a.lab",
+            22,
+            std::path::Path::new("/etc/known_hosts"),
+            "SHA256:abc",
+        );
+        assert!(res.is_ok(), "Match must produce Ok(())");
+    }
+
+    #[test]
+    fn known_hosts_outcome_to_error_mismatch_yields_host_key_mismatch() {
+        use crate::error::TransportError;
+        use crate::transport::known_hosts::LookupOutcome;
+        let err = known_hosts_outcome_to_result(
+            LookupOutcome::Mismatch {
+                file_fp: "SHA256:OLD".into(),
+            },
+            "device-a.lab",
+            22,
+            std::path::Path::new("/etc/known_hosts"),
+            "SHA256:NEW",
+        )
+        .unwrap_err();
+        match err {
+            TransportError::HostKeyMismatch {
+                host,
+                expected,
+                actual,
+            } => {
+                assert_eq!(host, "device-a.lab");
+                assert_eq!(expected, "SHA256:OLD");
+                assert_eq!(actual, "SHA256:NEW");
+            }
+            other => panic!("expected HostKeyMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn known_hosts_outcome_to_error_not_found_yields_not_in_known_hosts() {
+        use crate::error::TransportError;
+        use crate::transport::known_hosts::LookupOutcome;
+        let err = known_hosts_outcome_to_result(
+            LookupOutcome::NotFound,
+            "device-a.lab",
+            830,
+            std::path::Path::new("/etc/known_hosts"),
+            "SHA256:any",
+        )
+        .unwrap_err();
+        match err {
+            TransportError::HostKeyNotInKnownHosts { host, port, path } => {
+                assert_eq!(host, "device-a.lab");
+                assert_eq!(port, 830);
+                assert_eq!(path, "/etc/known_hosts");
+            }
+            other => panic!("expected HostKeyNotInKnownHosts, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn known_hosts_outcome_to_error_revoked_yields_host_key_revoked() {
+        use crate::error::TransportError;
+        use crate::transport::known_hosts::LookupOutcome;
+        let err = known_hosts_outcome_to_result(
+            LookupOutcome::Revoked,
+            "device-a.lab",
+            22,
+            std::path::Path::new("/etc/known_hosts"),
+            "SHA256:bad",
+        )
+        .unwrap_err();
+        assert!(matches!(err, TransportError::HostKeyRevoked { host } if host == "device-a.lab"));
     }
 }

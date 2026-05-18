@@ -32,9 +32,10 @@ jobs:
         run: cargo build --workspace --all-features --verbose
 
       - name: Test
+        # Live-device integration tests (`integration_vsrx`,
+        # `integration_vendor_pool`) opt in via `RUSTNETCONF_TEST_VSRX_HOST`
+        # and are no-ops here in hosted CI without lab access.
         run: cargo test --workspace --all-features --verbose
-        env:
-          SKIP_INTEGRATION: "1"
 
   clippy:
     name: Clippy (workspace, all features)

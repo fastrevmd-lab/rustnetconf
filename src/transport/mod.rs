@@ -6,6 +6,7 @@
 //! - Transports are independently testable
 //! - Future transports (TLS, RESTCONF) plug in without reimplementing framing
 
+pub mod known_hosts;
 pub mod ssh;
 #[cfg(feature = "tls")]
 pub mod tls;

@@ -13,7 +13,7 @@
 //!
 //! ```rust,no_run
 //! use rustnetconf::pool::{DevicePool, DeviceConfig};
-//! use rustnetconf::transport::ssh::SshAuth;
+//! use rustnetconf::transport::ssh::{HostKeyVerification, SshAuth};
 //! use rustnetconf::Datastore;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -23,6 +23,9 @@
 //!         host: "10.0.0.1:830".into(),
 //!         username: "admin".into(),
 //!         auth: SshAuth::Password(zeroize::Zeroizing::new("secret".into())),
+//!         host_key_verification: Some(HostKeyVerification::Fingerprint(
+//!             "SHA256:AAAA...".into(),
+//!         )),
 //!         vendor: None,
 //!     })
 //!     .build();
@@ -42,7 +45,7 @@ use tokio::sync::{Mutex, Semaphore, SemaphorePermit};
 
 use crate::client::Client;
 use crate::error::NetconfError;
-use crate::transport::ssh::SshAuth;
+use crate::transport::ssh::{HostKeyVerification, SshAuth};
 use crate::vendor::VendorProfile;
 
 /// Configuration for a single device in the pool.
@@ -53,6 +56,13 @@ pub struct DeviceConfig {
     pub username: String,
     /// SSH authentication method.
     pub auth: SshAuth,
+    /// SSH host-key verification policy for this device.
+    ///
+    /// `None` means "use the library default" (`HostKeyVerification::RejectAll`),
+    /// which fails closed — connections will refuse to complete. Pool users
+    /// must set this to one of `Fingerprint(...)`, `KnownHosts(path)`, or
+    /// (for labs only) `AcceptAll`.
+    pub host_key_verification: Option<HostKeyVerification>,
     /// Optional explicit vendor profile. `None` = auto-detect.
     ///
     /// TODO: This field is not yet wired into connection setup. `connect_device()`
@@ -284,6 +294,10 @@ async fn connect_device(config: &DeviceConfig) -> Result<Client, NetconfError> {
         SshAuth::Agent => {
             builder = builder.ssh_agent();
         }
+    }
+
+    if let Some(policy) = &config.host_key_verification {
+        builder = builder.host_key_verification(policy.clone());
     }
 
     builder.connect().await
