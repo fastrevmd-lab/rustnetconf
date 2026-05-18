@@ -10,7 +10,7 @@ mod tests {
         let iface = Interface {
             name: Some("ge-0/0/0".into()),
             description: Some("uplink to spine".into()),
-            r#type: Some("ethernetCsmacd".into()),
+            type_: Some("ethernetCsmacd".into()),
             enabled: Some(true),
             ..Default::default()
         };
@@ -88,7 +88,7 @@ mod tests {
         let iface = Interface::default();
         assert!(iface.name.is_none());
         assert!(iface.description.is_none());
-        assert!(iface.r#type.is_none());
+        assert!(iface.type_.is_none());
         assert!(iface.enabled.is_none());
         assert!(iface.speed.is_none());
         assert!(iface.statistics.is_none());
