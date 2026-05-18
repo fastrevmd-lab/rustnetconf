@@ -151,7 +151,8 @@ fn looks_like_eom_data(data: &[u8]) -> bool {
         None => return false,
     };
     // XML document or element start
-    if trimmed.starts_with(b"<?xml") || trimmed.starts_with(b"<rpc") || trimmed.starts_with(b"<!--") {
+    if trimmed.starts_with(b"<?xml") || trimmed.starts_with(b"<rpc") || trimmed.starts_with(b"<!--")
+    {
         return true;
     }
     // EOM delimiter anywhere in the buffer
@@ -237,7 +238,8 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip() {
         let framer = ChunkedFramer::new();
-        let original = "<rpc message-id=\"1\"><get-config><source><running/></source></get-config></rpc>";
+        let original =
+            "<rpc message-id=\"1\"><get-config><source><running/></source></get-config></rpc>";
         let encoded = framer.encode(original);
         let (decoded, consumed) = framer.decode(&encoded).unwrap().unwrap();
         assert_eq!(decoded, original);

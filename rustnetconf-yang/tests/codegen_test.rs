@@ -54,9 +54,7 @@ mod tests {
 
     #[test]
     fn test_interfaces_to_xml() {
-        let interfaces = Interfaces {
-            interface: vec![],
-        };
+        let interfaces = Interfaces { interface: vec![] };
 
         let xml = interfaces.to_xml().expect("to_xml failed");
         assert!(xml.contains("urn:ietf:params:xml:ns:yang:ietf-interfaces"));
@@ -107,8 +105,7 @@ mod tests {
         };
 
         let json = serde_json::to_string(&original).expect("serialize failed");
-        let deserialized: Interface =
-            serde_json::from_str(&json).expect("deserialize failed");
+        let deserialized: Interface = serde_json::from_str(&json).expect("deserialize failed");
 
         assert_eq!(original.name, deserialized.name);
         assert_eq!(original.description, deserialized.description);

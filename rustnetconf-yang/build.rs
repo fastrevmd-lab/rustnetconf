@@ -48,8 +48,8 @@ fn main() {
     }
 
     // Create libyang2 context with search path
-    let mut ctx = Context::new(ContextFlags::NO_YANGLIBRARY)
-        .expect("failed to create libyang2 context");
+    let mut ctx =
+        Context::new(ContextFlags::NO_YANGLIBRARY).expect("failed to create libyang2 context");
     ctx.set_searchdir(&yang_dir)
         .expect("failed to set yang search directory");
 
@@ -117,7 +117,10 @@ fn main() {
     }
 
     fs::write(&output_file, &output).unwrap();
-    eprintln!("cargo:warning=Generated YANG types to {}", output_file.display());
+    eprintln!(
+        "cargo:warning=Generated YANG types to {}",
+        output_file.display()
+    );
 }
 
 /// Generate a Rust struct for a YANG container or list node.
@@ -142,7 +145,11 @@ fn generate_node(
             emitted.insert(rust_name.clone());
 
             writeln!(output, "{ind}/// YANG container: `{node_name}`").unwrap();
-            writeln!(output, "{ind}#[derive(Debug, Clone, Default, Serialize, Deserialize)]").unwrap();
+            writeln!(
+                output,
+                "{ind}#[derive(Debug, Clone, Default, Serialize, Deserialize)]"
+            )
+            .unwrap();
             writeln!(output, "{ind}pub struct {rust_name} {{").unwrap();
 
             for child in node.children() {
@@ -160,7 +167,10 @@ fn generate_node(
             }
 
             for child in node.children() {
-                if matches!(child.kind(), SchemaNodeKind::Container | SchemaNodeKind::List) {
+                if matches!(
+                    child.kind(),
+                    SchemaNodeKind::Container | SchemaNodeKind::List
+                ) {
                     generate_node(output, &child, indent, false, emitted);
                 }
             }
@@ -169,7 +179,11 @@ fn generate_node(
             emitted.insert(rust_name.clone());
 
             writeln!(output, "{ind}/// YANG list entry: `{node_name}`").unwrap();
-            writeln!(output, "{ind}#[derive(Debug, Clone, Default, Serialize, Deserialize)]").unwrap();
+            writeln!(
+                output,
+                "{ind}#[derive(Debug, Clone, Default, Serialize, Deserialize)]"
+            )
+            .unwrap();
             writeln!(output, "{ind}pub struct {rust_name} {{").unwrap();
 
             for child in node.children() {
@@ -183,7 +197,10 @@ fn generate_node(
             generate_write_xml_fields_impl(output, node, &rust_name, indent);
 
             for child in node.children() {
-                if matches!(child.kind(), SchemaNodeKind::Container | SchemaNodeKind::List) {
+                if matches!(
+                    child.kind(),
+                    SchemaNodeKind::Container | SchemaNodeKind::List
+                ) {
                     generate_node(output, &child, indent, false, emitted);
                 }
             }
@@ -202,25 +219,41 @@ fn generate_field(output: &mut String, node: &SchemaNode, indent: usize) {
         SchemaNodeKind::Leaf => {
             let rust_type = yang_type_to_rust(node);
             writeln!(output, "{ind}/// YANG leaf: `{node_name}`").unwrap();
-            writeln!(output, "{ind}#[serde(skip_serializing_if = \"Option::is_none\")]").unwrap();
+            writeln!(
+                output,
+                "{ind}#[serde(skip_serializing_if = \"Option::is_none\")]"
+            )
+            .unwrap();
             writeln!(output, "{ind}pub {field_name}: Option<{rust_type}>,").unwrap();
         }
         SchemaNodeKind::LeafList => {
             let rust_type = yang_type_to_rust(node);
             writeln!(output, "{ind}/// YANG leaf-list: `{node_name}`").unwrap();
-            writeln!(output, "{ind}#[serde(default, skip_serializing_if = \"Vec::is_empty\")]").unwrap();
+            writeln!(
+                output,
+                "{ind}#[serde(default, skip_serializing_if = \"Vec::is_empty\")]"
+            )
+            .unwrap();
             writeln!(output, "{ind}pub {field_name}: Vec<{rust_type}>,").unwrap();
         }
         SchemaNodeKind::Container => {
             let type_name = to_rust_type_name(&node_name);
             writeln!(output, "{ind}/// YANG container: `{node_name}`").unwrap();
-            writeln!(output, "{ind}#[serde(skip_serializing_if = \"Option::is_none\")]").unwrap();
+            writeln!(
+                output,
+                "{ind}#[serde(skip_serializing_if = \"Option::is_none\")]"
+            )
+            .unwrap();
             writeln!(output, "{ind}pub {field_name}: Option<{type_name}>,").unwrap();
         }
         SchemaNodeKind::List => {
             let type_name = to_rust_type_name(&node_name);
             writeln!(output, "{ind}/// YANG list: `{node_name}`").unwrap();
-            writeln!(output, "{ind}#[serde(default, skip_serializing_if = \"Vec::is_empty\")]").unwrap();
+            writeln!(
+                output,
+                "{ind}#[serde(default, skip_serializing_if = \"Vec::is_empty\")]"
+            )
+            .unwrap();
             writeln!(output, "{ind}pub {field_name}: Vec<{type_name}>,").unwrap();
         }
         _ => {} // Skip choice, anyxml, etc. for now
@@ -248,7 +281,11 @@ fn generate_write_xml_fields_impl(
 
         match child.kind() {
             SchemaNodeKind::Leaf => {
-                writeln!(output, "{ind}        if let Some(ref val) = self.{field} {{").unwrap();
+                writeln!(
+                    output,
+                    "{ind}        if let Some(ref val) = self.{field} {{"
+                )
+                .unwrap();
                 writeln!(output, "{ind}            write_text_element(writer, \"{child_name}\", &val.to_string())?;").unwrap();
                 writeln!(output, "{ind}        }}").unwrap();
             }
@@ -258,13 +295,25 @@ fn generate_write_xml_fields_impl(
                 writeln!(output, "{ind}        }}").unwrap();
             }
             SchemaNodeKind::Container => {
-                writeln!(output, "{ind}        if let Some(ref child) = self.{field} {{").unwrap();
-                writeln!(output, "{ind}            write_element_with_fields(writer, \"{child_name}\", child)?;").unwrap();
+                writeln!(
+                    output,
+                    "{ind}        if let Some(ref child) = self.{field} {{"
+                )
+                .unwrap();
+                writeln!(
+                    output,
+                    "{ind}            write_element_with_fields(writer, \"{child_name}\", child)?;"
+                )
+                .unwrap();
                 writeln!(output, "{ind}        }}").unwrap();
             }
             SchemaNodeKind::List => {
                 writeln!(output, "{ind}        for item in &self.{field} {{").unwrap();
-                writeln!(output, "{ind}            write_element_with_fields(writer, \"{child_name}\", item)?;").unwrap();
+                writeln!(
+                    output,
+                    "{ind}            write_element_with_fields(writer, \"{child_name}\", item)?;"
+                )
+                .unwrap();
                 writeln!(output, "{ind}        }}").unwrap();
             }
             _ => {
@@ -283,22 +332,37 @@ fn generate_write_xml_fields_impl(
 ///
 /// Delegates to WriteXmlFields for field serialization so containers and
 /// lists at any nesting depth are serialized correctly.
-fn generate_to_xml_impl(
-    output: &mut String,
-    rust_name: &str,
-    node_name: &str,
-    indent: usize,
-) {
+fn generate_to_xml_impl(output: &mut String, rust_name: &str, node_name: &str, indent: usize) {
     let ind = "    ".repeat(indent);
 
     writeln!(output, "{ind}impl ToNetconfXml for {rust_name} {{").unwrap();
-    writeln!(output, "{ind}    fn namespace(&self) -> &str {{ NAMESPACE }}").unwrap();
-    writeln!(output, "{ind}    fn root_element(&self) -> &str {{ \"{node_name}\" }}").unwrap();
-    writeln!(output, "{ind}    fn to_xml(&self) -> Result<String, XmlError> {{").unwrap();
+    writeln!(
+        output,
+        "{ind}    fn namespace(&self) -> &str {{ NAMESPACE }}"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "{ind}    fn root_element(&self) -> &str {{ \"{node_name}\" }}"
+    )
+    .unwrap();
+    writeln!(
+        output,
+        "{ind}    fn to_xml(&self) -> Result<String, XmlError> {{"
+    )
+    .unwrap();
     writeln!(output, "{ind}        let mut writer = new_writer();").unwrap();
-    writeln!(output, "{ind}        write_start_with_ns(&mut writer, \"{node_name}\", NAMESPACE)?;").unwrap();
+    writeln!(
+        output,
+        "{ind}        write_start_with_ns(&mut writer, \"{node_name}\", NAMESPACE)?;"
+    )
+    .unwrap();
     writeln!(output, "{ind}        self.write_xml_fields(&mut writer)?;").unwrap();
-    writeln!(output, "{ind}        write_end(&mut writer, \"{node_name}\")?;").unwrap();
+    writeln!(
+        output,
+        "{ind}        write_end(&mut writer, \"{node_name}\")?;"
+    )
+    .unwrap();
     writeln!(output, "{ind}        finish_writer(writer)").unwrap();
     writeln!(output, "{ind}    }}").unwrap();
     writeln!(output, "{ind}}}").unwrap();
@@ -324,13 +388,14 @@ fn to_rust_field_name(yang_name: &str) -> String {
     let name = yang_name.replace('-', "_");
     // Full set of Rust keywords (stable + reserved) that must be escaped.
     match name.as_str() {
-        "as" | "async" | "await" | "break" | "const" | "continue" | "crate" | "dyn"
-        | "else" | "enum" | "extern" | "false" | "fn" | "for" | "if" | "impl" | "in"
-        | "let" | "loop" | "match" | "mod" | "move" | "mut" | "pub" | "ref" | "return"
-        | "self" | "Self" | "static" | "struct" | "super" | "trait" | "true" | "type"
-        | "unsafe" | "use" | "where" | "while" | "abstract" | "become" | "box" | "do"
-        | "final" | "macro" | "override" | "priv" | "try" | "typeof" | "unsized"
-        | "virtual" | "yield" => format!("{name}_"),
+        "as" | "async" | "await" | "break" | "const" | "continue" | "crate" | "dyn" | "else"
+        | "enum" | "extern" | "false" | "fn" | "for" | "if" | "impl" | "in" | "let" | "loop"
+        | "match" | "mod" | "move" | "mut" | "pub" | "ref" | "return" | "self" | "Self"
+        | "static" | "struct" | "super" | "trait" | "true" | "type" | "unsafe" | "use"
+        | "where" | "while" | "abstract" | "become" | "box" | "do" | "final" | "macro"
+        | "override" | "priv" | "try" | "typeof" | "unsized" | "virtual" | "yield" => {
+            format!("{name}_")
+        }
         _ => name,
     }
 }

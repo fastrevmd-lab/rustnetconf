@@ -195,7 +195,10 @@ mod tests {
         let vendor = JunosVendor::default();
         let config = r#"<configuration xmlns="http://xml.juniper.net/xnm/1.1/xnm"><system/></configuration>"#;
         let wrapped = vendor.wrap_config(config);
-        assert_eq!(wrapped, config, "should not wrap when <configuration already present");
+        assert_eq!(
+            wrapped, config,
+            "should not wrap when <configuration already present"
+        );
     }
 
     #[test]
@@ -237,12 +240,19 @@ mod tests {
     fn test_normalize_standard_capability() {
         let vendor = JunosVendor::default();
         let standard = "urn:ietf:params:netconf:capability:candidate:1.0";
-        assert_eq!(vendor.normalize_capability(standard), None, "standard URIs need no normalization");
+        assert_eq!(
+            vendor.normalize_capability(standard),
+            None,
+            "standard URIs need no normalization"
+        );
     }
 
     #[test]
     fn test_close_sequence() {
-        assert_eq!(JunosVendor::default().close_sequence(), CloseSequence::DiscardThenClose);
+        assert_eq!(
+            JunosVendor::default().close_sequence(),
+            CloseSequence::DiscardThenClose
+        );
     }
 
     #[test]

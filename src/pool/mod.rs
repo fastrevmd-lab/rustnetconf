@@ -221,13 +221,17 @@ impl<'a> Deref for PoolGuard<'a> {
     type Target = Client;
 
     fn deref(&self) -> &Client {
-        self.client.as_ref().expect("PoolGuard client already taken")
+        self.client
+            .as_ref()
+            .expect("PoolGuard client already taken")
     }
 }
 
 impl<'a> DerefMut for PoolGuard<'a> {
     fn deref_mut(&mut self) -> &mut Client {
-        self.client.as_mut().expect("PoolGuard client already taken")
+        self.client
+            .as_mut()
+            .expect("PoolGuard client already taken")
     }
 }
 

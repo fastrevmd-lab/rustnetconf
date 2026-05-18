@@ -116,7 +116,8 @@ mod tests {
     #[test]
     fn test_encode_decode_roundtrip() {
         let framer = EomFramer::new();
-        let original = "<rpc message-id=\"1\"><get-config><source><running/></source></get-config></rpc>";
+        let original =
+            "<rpc message-id=\"1\"><get-config><source><running/></source></get-config></rpc>";
         let encoded = framer.encode(original);
         let (decoded, consumed) = framer.decode(&encoded).unwrap().unwrap();
         assert_eq!(decoded, original);

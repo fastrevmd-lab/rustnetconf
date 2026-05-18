@@ -85,17 +85,11 @@ pub enum FramingError {
 
     /// Received incomplete frame (connection may have dropped).
     #[error("incomplete frame: expected {expected} bytes, got {actual}")]
-    Incomplete {
-        expected: usize,
-        actual: usize,
-    },
+    Incomplete { expected: usize, actual: usize },
 
     /// Device sent frames using a different framing than negotiated.
     #[error("framing mismatch: device advertised NETCONF {advertised} but sent {actual}-style frames. Try forcing the other version.")]
-    Mismatch {
-        advertised: String,
-        actual: String,
-    },
+    Mismatch { advertised: String, actual: String },
 }
 
 /// RPC layer errors — the device responded with `<rpc-error>`.
@@ -137,10 +131,7 @@ pub enum RpcError {
 
     /// Response message-id does not match the request.
     #[error("message-id mismatch: expected {expected}, got {actual}")]
-    MessageIdMismatch {
-        expected: String,
-        actual: String,
-    },
+    MessageIdMismatch { expected: String, actual: String },
 }
 
 /// Protocol layer errors (capability negotiation, session state).

@@ -91,10 +91,7 @@ pub fn write_start_with_ns(
 }
 
 /// Helper to write a closing element.
-pub fn write_end(
-    writer: &mut Writer<Cursor<Vec<u8>>>,
-    name: &str,
-) -> Result<(), XmlError> {
+pub fn write_end(writer: &mut Writer<Cursor<Vec<u8>>>, name: &str) -> Result<(), XmlError> {
     writer
         .write_event(Event::End(BytesEnd::new(name)))
         .map_err(|e| XmlError::Write(e.to_string()))?;
@@ -145,7 +142,12 @@ mod tests {
     #[test]
     fn test_write_start_with_ns() {
         let mut writer = new_writer();
-        write_start_with_ns(&mut writer, "interfaces", "urn:ietf:params:xml:ns:yang:ietf-interfaces").unwrap();
+        write_start_with_ns(
+            &mut writer,
+            "interfaces",
+            "urn:ietf:params:xml:ns:yang:ietf-interfaces",
+        )
+        .unwrap();
         write_end(&mut writer, "interfaces").unwrap();
         let xml = finish_writer(writer).unwrap();
         assert!(xml.contains("xmlns=\"urn:ietf:params:xml:ns:yang:ietf-interfaces\""));

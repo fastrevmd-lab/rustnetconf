@@ -17,7 +17,8 @@ pub mod uri {
     /// Confirmed commit capability.
     pub const CONFIRMED_COMMIT: &str = "urn:ietf:params:netconf:capability:confirmed-commit:1.0";
     /// Confirmed commit 1.1 capability.
-    pub const CONFIRMED_COMMIT_1_1: &str = "urn:ietf:params:netconf:capability:confirmed-commit:1.1";
+    pub const CONFIRMED_COMMIT_1_1: &str =
+        "urn:ietf:params:netconf:capability:confirmed-commit:1.1";
     /// Validate capability.
     pub const VALIDATE: &str = "urn:ietf:params:netconf:capability:validate:1.0";
     /// Validate 1.1 capability.

@@ -8,8 +8,8 @@
 //!                         └──► JSON output
 //! ```
 
-pub mod tree;
 pub mod format;
+pub mod tree;
 
-pub use tree::diff_xml;
 pub use format::{format_colored, format_json};
+pub use tree::diff_xml;
