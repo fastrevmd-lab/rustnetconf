@@ -10,9 +10,9 @@ A Rust network automation platform: async NETCONF client library, YANG code gene
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.11.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.11.0)** (security remediation pass).
-> Now on crates.io: `rustnetconf` 0.11.0 · `rustnetconf-cli` 0.2.0 · `rustnetconf-yang` 0.1.1.
-> See [What's New in v0.11.0](#whats-new-in-v0110) below for breaking changes and the RNC-SEC-001..006 fixes.
+> **Latest release — [v0.12.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.12.0)** (OpenSSH `known_hosts` host-key pinning).
+> Now on crates.io: `rustnetconf` 0.12.0 · `rustnetconf-cli` 0.3.0 · `rustnetconf-yang` 0.1.1.
+> See [What's New in v0.12.0](#whats-new-in-v0120) below for the `HostKeyVerification::KnownHosts` variant and `known_hosts_path` inventory key.
 
 ## Workspace
 
@@ -21,6 +21,22 @@ Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and
 | **rustnetconf** | Async NETCONF 1.0/1.1 client library |
 | **rustnetconf-yang** | YANG model code generation (compile-time config validation) |
 | **rustnetconf-cli** | Terraform-like CLI tool (`netconf` binary) |
+
+## What's New in v0.12.0
+
+OpenSSH `known_hosts`-style host-key pinning for fleet operation. Merged via PR #29 (closes #28).
+
+**New features:**
+- `HostKeyVerification::KnownHosts(PathBuf)` — verify the server's SHA-256 fingerprint against an OpenSSH `known_hosts(5)` file on every connect. Supports plain hostnames, `[host]:port`, wildcards (`*`/`?`), CIDR networks, hashed `|1|salt|hmac-sha1` entries, and `@revoked` markers. The file is re-read on every connect — no caching, so external rotation tools are picked up immediately.
+- New structured errors on `TransportError`: `HostKeyMismatch { host, expected, actual }`, `HostKeyNotInKnownHosts { host, port, path }`, `HostKeyRevoked { host }`.
+- CLI: new optional `known_hosts_path` field on `[devices.*]` and `[defaults]` in `inventory.toml`. Per-device value wins; setting both `host_key_fingerprint` and `known_hosts_path` on the same device is a hard error.
+- `examples/known_hosts.rs` demonstrates the `ssh-keyscan` → `KnownHosts(path)` workflow with comments on each failure mode.
+
+**Breaking changes:**
+- `DeviceConfig` (the connection-pool config struct) gained a new field `host_key_verification: Option<HostKeyVerification>`. Existing struct-literal callers must add the field. `None` means "use library default" (`RejectAll` since v0.11.0).
+
+**Quality:**
+- Live-device integration tests (`integration_vsrx`, `integration_vendor_pool`) are now opt-in via `RUSTNETCONF_TEST_VSRX_HOST` — without it, the suite is a clean no-op for contributors without a Junos lab.
 
 ## What's New in v0.11.0
 
