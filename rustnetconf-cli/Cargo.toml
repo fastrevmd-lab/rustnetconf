@@ -1,6 +1,6 @@
 [package]
 name = "rustnetconf-cli"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 authors = ["fastrevmd-lab"]
 description = "Terraform-like CLI for declarative NETCONF network config management"
