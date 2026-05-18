@@ -99,7 +99,9 @@ fn main() {
         writeln!(output, "/// Generated from YANG module `{name}`").unwrap();
         writeln!(output, "/// Namespace: `{namespace}`").unwrap();
         writeln!(output, "pub mod {mod_name} {{").unwrap();
+        writeln!(output, "    #[allow(unused_imports)]").unwrap();
         writeln!(output, "    use super::*;").unwrap();
+        writeln!(output, "    #[allow(unused_imports)]").unwrap();
         writeln!(output, "    use crate::serialize::*;").unwrap();
         writeln!(output).unwrap();
         writeln!(output, "    /// Namespace URI for this YANG module.").unwrap();
