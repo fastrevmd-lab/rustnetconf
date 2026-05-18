@@ -1,8 +1,18 @@
 # rustnetconf
 
+[![crates.io — rustnetconf](https://img.shields.io/crates/v/rustnetconf.svg?label=rustnetconf)](https://crates.io/crates/rustnetconf)
+[![crates.io — rustnetconf-cli](https://img.shields.io/crates/v/rustnetconf-cli.svg?label=rustnetconf-cli)](https://crates.io/crates/rustnetconf-cli)
+[![crates.io — rustnetconf-yang](https://img.shields.io/crates/v/rustnetconf-yang.svg?label=rustnetconf-yang)](https://crates.io/crates/rustnetconf-yang)
+[![CI](https://github.com/fastrevmd-lab/rustnetconf/actions/workflows/ci.yml/badge.svg)](https://github.com/fastrevmd-lab/rustnetconf/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 A Rust network automation platform: async NETCONF client library, YANG code generation, vendor profiles, connection pooling, and a Terraform-like CLI for declarative network config management.
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
+
+> **Latest release — [v0.11.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.11.0)** (security remediation pass).
+> Now on crates.io: `rustnetconf` 0.11.0 · `rustnetconf-cli` 0.2.0 · `rustnetconf-yang` 0.1.1.
+> See [What's New in v0.11.0](#whats-new-in-v0110) below for breaking changes and the RNC-SEC-001..006 fixes.
 
 ## Workspace
 
