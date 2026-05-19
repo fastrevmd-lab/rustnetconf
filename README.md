@@ -11,7 +11,7 @@ A Rust network automation platform: async NETCONF client library, YANG code gene
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
 > **Latest release — [v0.12.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.12.0)** (OpenSSH `known_hosts` host-key pinning).
-> Now on crates.io: `rustnetconf` 0.12.0 · `rustnetconf-cli` 0.3.0 · `rustnetconf-yang` 0.1.1.
+> Now on crates.io: `rustnetconf` 0.12.0 · `rustnetconf-cli` 0.3.0 · `rustnetconf-yang` 0.1.2.
 > See [What's New in v0.12.0](#whats-new-in-v0120) below for the `HostKeyVerification::KnownHosts` variant and `known_hosts_path` inventory key.
 
 ## Workspace
