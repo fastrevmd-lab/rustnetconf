@@ -11,7 +11,7 @@ A Rust network automation platform: async NETCONF client library, YANG code gene
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
 > **Latest release — [v0.12.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.12.0)** (OpenSSH `known_hosts` host-key pinning).
-> Now on crates.io: `rustnetconf` 0.12.0 · `rustnetconf-cli` 0.3.0 · `rustnetconf-yang` 0.1.2.
+> Now on crates.io: `rustnetconf` 0.12.0 · `rustnetconf-cli` 0.3.0 · `rustnetconf-yang` 0.1.3.
 > See [What's New in v0.12.0](#whats-new-in-v0120) below for the `HostKeyVerification::KnownHosts` variant and `known_hosts_path` inventory key.
 
 ## Workspace
@@ -21,6 +21,14 @@ Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and
 | **rustnetconf** | Async NETCONF 1.0/1.1 client library |
 | **rustnetconf-yang** | YANG model code generation (compile-time config validation) |
 | **rustnetconf-cli** | Terraform-like CLI tool (`netconf` binary) |
+
+## What's New in rustnetconf-yang v0.1.3
+
+Documentation-only patch release of the `rustnetconf-yang` crate (closes #30). No API or behavior changes.
+
+- Module docs now state that generated types require enabling the `generated` Cargo feature (off by default) — without it the `ietf_*` modules are absent.
+- Clarified that codegen reads the crate's own bundled `yang-models/`, not the consumer's project; documented how to vendor the crate to use custom YANG files.
+- Corrected the usage example to the real generated API (`Option`-wrapped fields, `type` leaf emitted as `type_`).
 
 ## What's New in v0.12.0
 

@@ -2083,7 +2083,7 @@ dependencies = [
 
 [[package]]
 name = "rustnetconf-yang"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "quick-xml",
  "rustnetconf",
