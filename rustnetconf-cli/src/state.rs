@@ -29,6 +29,12 @@ fn enforce_dir_mode_0o700(dir: &Path) -> Result<(), String> {
 ///    mode `0o600`, then atomically `rename(2)`d over the destination.
 ///    This guarantees the destination always lands at `0o600`, even when
 ///    a pre-existing file was looser, and avoids partial-write windows.
+///
+/// On non-Unix platforms there is no portable equivalent of `chmod`, so the
+/// file is written with the platform's default permissions (typically
+/// inherited from the parent directory's ACL). Since the snapshot may contain
+/// sensitive device configuration, a warning is emitted so the operator can
+/// restrict access manually. Unix is the supported and recommended platform.
 pub fn save_state(project_dir: &Path, device_name: &str, config: &str) -> Result<(), String> {
     let netconf_dir = project_dir.join(".netconf");
     let dir = netconf_dir.join("state");
@@ -82,6 +88,13 @@ pub fn save_state(project_dir: &Path, device_name: &str, config: &str) -> Result
 
     #[cfg(not(unix))]
     {
+        // No portable chmod here — warn so the operator knows the snapshot may
+        // contain sensitive config and is not guaranteed to be owner-only.
+        eprintln!(
+            "WARNING: writing state file {} with default platform permissions — \
+             restrict access manually; this snapshot may contain sensitive config",
+            path.display()
+        );
         std::fs::write(&path, config)
             .map_err(|e| format!("failed to save state to {}: {e}", path.display()))?;
     }

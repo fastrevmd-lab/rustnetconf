@@ -7,6 +7,7 @@ pub mod filter;
 pub mod operations;
 
 use crate::error::{ProtocolError, RpcError};
+use crate::rpc::operations::escape_xml_text;
 use crate::types::{ErrorSeverity, ErrorTag, RpcErrorType};
 
 /// Validate that an XML fragment is well-formed before insertion into an RPC.
@@ -268,9 +269,11 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
                 let value = text.unescape().unwrap_or_default().to_string();
 
                 if in_data {
-                    data_xml.push_str(&value);
+                    // Re-escape: `unescape()` decoded entities, so we must
+                    // re-encode them to keep the reconstructed XML well-formed.
+                    data_xml.push_str(&escape_xml_text(&value));
                 } else if in_error_info {
-                    error_info_xml.push_str(&value);
+                    error_info_xml.push_str(&escape_xml_text(&value));
                 } else if in_rpc_error {
                     if let (Some(ref mut builder), Some(ref field)) =
                         (&mut current_error, &current_field)
@@ -557,7 +560,8 @@ fn extract_rpc_reply_inner_content(xml: &str) -> Option<String> {
             }
             Ok(Event::Text(ref text)) if in_rpc_reply && depth > 0 => {
                 let value = text.unescape().unwrap_or_default().to_string();
-                content.push_str(&value);
+                // Re-escape decoded entities so the reconstructed XML stays well-formed.
+                content.push_str(&escape_xml_text(&value));
             }
             Ok(Event::End(ref tag)) => {
                 let local = tag.local_name();
@@ -792,5 +796,42 @@ mod tests {
 </rpc-reply>"#;
         let result = parse_rpc_reply(xml, "42").unwrap();
         assert!(matches!(result, RpcReply::Ok));
+    }
+
+    #[test]
+    fn test_reconstructed_data_reescapes_special_chars() {
+        // A device returns text containing XML special characters (encoded on
+        // the wire). The reconstructed `data` must re-escape them so the result
+        // is itself well-formed XML, not a corrupted string.
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="1">
+  <data><description>a &amp; b &lt; c</description></data>
+</rpc-reply>"#;
+        let result = parse_rpc_reply(xml, "1").unwrap();
+        let data = match result {
+            RpcReply::Data(data) => data,
+            other => panic!("expected Data, got {other:?}"),
+        };
+        // The raw `&` / `<` must NOT appear unescaped in element text.
+        assert!(
+            data.contains("a &amp; b &lt; c"),
+            "special chars must be re-escaped: {data}"
+        );
+        // The reconstructed fragment must re-parse as well-formed XML.
+        validate_xml_fragment(&data).expect("reconstructed data must be well-formed");
+    }
+
+    #[test]
+    fn test_reconstructed_junos_inner_reescapes_special_chars() {
+        // Same guarantee for the Junos custom-RPC path (no <data> wrapper).
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="2">
+  <output>value with &amp; ampersand</output>
+</rpc-reply>"#;
+        let result = parse_rpc_reply(xml, "2").unwrap();
+        let data = match result {
+            RpcReply::Data(data) => data,
+            other => panic!("expected Data, got {other:?}"),
+        };
+        assert!(data.contains("&amp;"), "ampersand must stay escaped: {data}");
+        validate_xml_fragment(&data).expect("reconstructed inner content must be well-formed");
     }
 }
