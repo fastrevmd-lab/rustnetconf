@@ -10,9 +10,9 @@ A Rust network automation platform: async NETCONF client library, YANG code gene
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.12.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.12.0)** (OpenSSH `known_hosts` host-key pinning).
-> Now on crates.io: `rustnetconf` 0.12.0 · `rustnetconf-cli` 0.3.0 · `rustnetconf-yang` 0.1.3.
-> See [What's New in v0.12.0](#whats-new-in-v0120) below for the `HostKeyVerification::KnownHosts` variant and `known_hosts_path` inventory key.
+> **Latest release — [v0.12.1](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.12.1)** (security/robustness patch).
+> Now on crates.io: `rustnetconf` 0.12.1 · `rustnetconf-cli` 0.3.1 · `rustnetconf-yang` 0.1.3.
+> See [What's New in v0.12.1](#whats-new-in-v0121) below for the XML re-escaping fix, cleared yanked dependency, and non-Unix state-file warning.
 
 ## Workspace
 
@@ -21,6 +21,14 @@ Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and
 | **rustnetconf** | Async NETCONF 1.0/1.1 client library |
 | **rustnetconf-yang** | YANG model code generation (compile-time config validation) |
 | **rustnetconf-cli** | Terraform-like CLI tool (`netconf` binary) |
+
+## What's New in v0.12.1
+
+Security and robustness patch for `rustnetconf` (0.12.1) and `rustnetconf-cli` (0.3.1). No API changes.
+
+- **Well-formed reconstructed XML:** the RPC reply parser now re-escapes decoded entities (`&`, `<`, `>`) when reconstructing `<data>`, `error-info`, and Junos inner content. Previously `unescape()`-decoded text was re-emitted raw, which could yield malformed XML for device data containing special characters. Covered by new regression tests.
+- **Cleared yanked dependency:** bumped `russh` 0.60 → 0.61 and `aes` to 0.9.1, clearing the `cargo audit` yanked-crate warning (and reducing the dependency count).
+- **Non-Unix state-file safety:** on non-Unix platforms (no portable `chmod`), `netconf` now emits a warning that saved state snapshots are not guaranteed owner-only and documents the caveat, since snapshots may contain sensitive device config.
 
 ## What's New in rustnetconf-yang v0.1.3
 
