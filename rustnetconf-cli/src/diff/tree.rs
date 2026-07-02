@@ -342,7 +342,10 @@ mod tests {
         // a split/truncated capture would produce spurious diffs.
         let xml = "<interfaces><interface><name>ge-0/0/0</name><description>up &amp; down link</description></interface></interfaces>";
         let entries = diff_xml(xml, xml).unwrap();
-        assert!(entries.is_empty(), "identical entity values should not diff: {entries:?}");
+        assert!(
+            entries.is_empty(),
+            "identical entity values should not diff: {entries:?}"
+        );
     }
 
     #[test]

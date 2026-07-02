@@ -860,7 +860,10 @@ mod tests {
             RpcReply::Data(data) => data,
             other => panic!("expected Data, got {other:?}"),
         };
-        assert!(data.contains("&amp;"), "ampersand must stay escaped: {data}");
+        assert!(
+            data.contains("&amp;"),
+            "ampersand must stay escaped: {data}"
+        );
         validate_xml_fragment(&data).expect("reconstructed inner content must be well-formed");
     }
 
@@ -920,7 +923,9 @@ mod tests {
 </rpc-reply>"#;
         let err = parse_rpc_reply(xml, "7").unwrap_err();
         match err {
-            RpcError::ServerError { info: Some(info), .. } => {
+            RpcError::ServerError {
+                info: Some(info), ..
+            } => {
                 validate_xml_fragment(&info).expect("error-info must stay well-formed");
                 let decoded = quick_xml::escape::unescape(&info).expect("must unescape");
                 assert!(
