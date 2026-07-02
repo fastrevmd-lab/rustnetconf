@@ -12,9 +12,9 @@ A Rust network automation platform: async NETCONF client library, YANG code gene
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.12.2](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.12.2)** (security patch).
-> Now on crates.io: `rustnetconf` 0.12.2 · `rustnetconf-cli` 0.3.2 · `rustnetconf-yang` 0.1.4.
-> See [What's New in v0.12.2](#whats-new-in-v0122) below for the quick-xml 0.41 upgrade clearing RUSTSEC-2026-0194/-0195.
+> **Latest release — [v0.12.3](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.12.3)** (parser correctness patch).
+> Now on crates.io: `rustnetconf` 0.12.3 · `rustnetconf-cli` 0.3.3 · `rustnetconf-yang` 0.1.4.
+> See [What's New in v0.12.3](#whats-new-in-v0123) below for five XML parser fixes from a full code review.
 
 ## Workspace
 
@@ -23,6 +23,17 @@ Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and
 | **rustnetconf** | Async NETCONF 1.0/1.1 client library |
 | **rustnetconf-yang** | YANG model code generation (compile-time config validation) |
 | **rustnetconf-cli** | Terraform-like CLI tool (`netconf` binary) |
+
+## What's New in v0.12.3
+
+Parser correctness patch for `rustnetconf` (0.12.3) and `rustnetconf-cli` (0.3.3), from a full code review (closes #33 via PR #34). No API changes; `rustnetconf-yang` is unchanged at 0.1.4.
+
+- **Namespace prefixes preserved** when reconstructing `<data>`/`error-info`/Junos inner XML — `<if:interfaces xmlns:if="…">` no longer collapses to `<interfaces>`.
+- **CDATA sections captured** in every parser (reply data, error fields, capabilities, eventTime, session-id, CLI diff) instead of being silently dropped.
+- **Attribute values fully re-escaped** on reconstruction, so single-quoted source attributes containing `"` can't produce malformed output.
+- **Text-format Junos config is XML-escaped** in `load_configuration` — set commands containing `&`/`<`/`>` previously generated malformed RPCs.
+- **Top-level empty elements** under `<rpc-reply>` (e.g. `<software-information/>`) now parse as data instead of a bare `<ok/>`.
+- Dependency hygiene: `anyhow` 1.0.103 (clears RUSTSEC-2026-0190) and un-yanked `crypto-bigint` 0.7.5 — `cargo audit` is fully clean.
 
 ## What's New in v0.12.2
 
