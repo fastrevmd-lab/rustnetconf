@@ -106,6 +106,9 @@ fn parse_xml_tree(xml: &str) -> Result<Vec<XmlNode>, String> {
                     pending_text.push_str(&resolved);
                 }
             }
+            Ok(Event::CData(ref cdata)) => {
+                pending_text.push_str(&cdata.decode().unwrap_or_default());
+            }
             Ok(Event::Empty(ref tag)) => {
                 flush_text(&mut pending_text, &mut stack);
                 let name = String::from_utf8_lossy(tag.local_name().as_ref()).to_string();
@@ -345,6 +348,22 @@ mod tests {
         assert!(
             entries.is_empty(),
             "identical entity values should not diff: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn test_cdata_leaf_value_is_captured() {
+        // CDATA sections are ordinary character data and must contribute to
+        // the leaf value, not be silently dropped.
+        let desired =
+            "<interface><description><![CDATA[uplink & transit]]></description></interface>";
+        let running = "<interface><description>old</description></interface>";
+        let entries = diff_xml(desired, running).unwrap();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(
+            matches!(&entries[0].kind, DiffKind::Modified { from, to }
+                if from == "old" && to == "uplink & transit"),
+            "CDATA value must be captured as the leaf text: {entries:?}"
         );
     }
 

@@ -89,6 +89,12 @@ pub fn parse_notification(xml: &str) -> Result<Notification, RpcError> {
                     time_buf.get_or_insert_with(String::new).push_str(&resolved);
                 }
             }
+            Ok(Event::CData(ref cdata)) if in_event_time => {
+                let t = cdata
+                    .decode()
+                    .map_err(|e| RpcError::ParseError(format!("failed to parse eventTime: {e}")))?;
+                time_buf.get_or_insert_with(String::new).push_str(&t);
+            }
             Ok(Event::End(ref tag)) => {
                 if tag.local_name().as_ref() == b"eventTime" {
                     in_event_time = false;

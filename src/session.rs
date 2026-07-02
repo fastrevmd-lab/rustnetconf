@@ -988,6 +988,11 @@ fn parse_session_id_from_info(info: &str) -> Option<u32> {
                         id_buf.push_str(&resolved);
                     }
                 }
+                Ok(Event::CData(ref cdata)) if in_session_id => {
+                    if let Ok(value) = cdata.decode() {
+                        id_buf.push_str(&value);
+                    }
+                }
                 Ok(Event::End(_)) => {
                     if in_session_id {
                         if let Ok(id) = id_buf.trim().parse::<u32>() {
