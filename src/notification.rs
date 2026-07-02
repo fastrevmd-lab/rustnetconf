@@ -57,6 +57,7 @@ pub fn classify_message(xml: &str) -> Option<MessageKind> {
 /// event content as raw XML using string slicing to preserve the original
 /// XML structure (namespaces, attributes, etc.).
 pub fn parse_notification(xml: &str) -> Result<Notification, RpcError> {
+    use crate::xml_entity::resolve_entity_ref;
     use quick_xml::events::Event;
     use quick_xml::Reader;
 
@@ -65,23 +66,35 @@ pub fn parse_notification(xml: &str) -> Result<Notification, RpcError> {
     let mut buf = Vec::new();
     let mut event_time: Option<String> = None;
     let mut in_event_time = false;
+    // Accumulates across Text/GeneralRef events (quick-xml splits text
+    // around entity references); None until any text is seen.
+    let mut time_buf: Option<String> = None;
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref tag)) => {
                 if tag.local_name().as_ref() == b"eventTime" {
                     in_event_time = true;
+                    time_buf = None;
                 }
             }
             Ok(Event::Text(ref text)) if in_event_time => {
                 let t = text
-                    .unescape()
+                    .decode()
                     .map_err(|e| RpcError::ParseError(format!("failed to parse eventTime: {e}")))?;
-                event_time = Some(t.trim().to_string());
+                time_buf.get_or_insert_with(String::new).push_str(&t);
+            }
+            Ok(Event::GeneralRef(ref entity)) if in_event_time => {
+                if let Some(resolved) = resolve_entity_ref(entity) {
+                    time_buf.get_or_insert_with(String::new).push_str(&resolved);
+                }
             }
             Ok(Event::End(ref tag)) => {
                 if tag.local_name().as_ref() == b"eventTime" {
                     in_event_time = false;
+                    if let Some(t) = time_buf.take() {
+                        event_time = Some(t.trim().to_string());
+                    }
                 }
             }
             Ok(Event::Eof) => break,
@@ -207,6 +220,18 @@ mod tests {
         assert_eq!(notif.event_time, "2026-04-01T12:00:00Z");
         assert!(notif.event_xml.contains("netconf-config-change"));
         assert!(notif.event_xml.contains("admin"));
+    }
+
+    #[test]
+    fn test_parse_notification_event_time_with_char_ref() {
+        // A character reference inside <eventTime> must be resolved in place,
+        // not dropped or allowed to truncate the surrounding text.
+        let xml = r#"<notification xmlns="urn:ietf:params:xml:ns:netconf:notification:1.0">
+  <eventTime>2026-04-01T12&#58;00:00Z</eventTime>
+  <some-event/>
+</notification>"#;
+        let notif = parse_notification(xml).unwrap();
+        assert_eq!(notif.event_time, "2026-04-01T12:00:00Z");
     }
 
     #[test]

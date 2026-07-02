@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "rustnetconf"
-version = "0.12.1"
+version = "0.12.2"
 edition = "2021"
 authors = ["fastrevmd-lab"]
 description = "An async-first NETCONF 1.0/1.1 client library for Rust"
@@ -22,7 +22,7 @@ tokio = { version = "1", features = ["full"] }
 russh = { version = "0.61", default-features = false, features = ["flate2", "aws-lc-rs"] }
 aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
 base64ct = { version = "1", features = ["std"] }
-quick-xml = "0.37"
+quick-xml = "0.41"
 thiserror = "2"
 tracing = "0.1"
 async-trait = "0.1"

@@ -48,6 +48,7 @@ pub mod ssh_config;
 pub mod transport;
 pub mod types;
 pub mod vendor;
+pub(crate) mod xml_entity;
 
 // Re-export the primary public API types
 pub use client::{Client, ClientBuilder, EditConfigBuilder};

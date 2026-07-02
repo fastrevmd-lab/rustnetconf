@@ -957,12 +957,16 @@ impl Session {
 fn parse_session_id_from_info(info: &str) -> Option<u32> {
     // Try structured XML parsing with quick_xml
     if info.contains('<') {
+        use crate::xml_entity::resolve_entity_ref;
         use quick_xml::events::Event;
         use quick_xml::Reader;
 
         let mut reader = Reader::from_str(info);
         let mut buf = Vec::new();
         let mut in_session_id = false;
+        // Accumulates across Text/GeneralRef events (quick-xml splits text
+        // around entity references); parsed at the closing tag.
+        let mut id_buf = String::new();
 
         loop {
             match reader.read_event_into(&mut buf) {
@@ -971,17 +975,25 @@ fn parse_session_id_from_info(info: &str) -> Option<u32> {
                     let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
                     if name == "session-id" {
                         in_session_id = true;
+                        id_buf.clear();
                     }
                 }
                 Ok(Event::Text(ref text)) if in_session_id => {
-                    if let Ok(value) = text.unescape() {
-                        if let Ok(id) = value.trim().parse::<u32>() {
+                    if let Ok(value) = text.decode() {
+                        id_buf.push_str(&value);
+                    }
+                }
+                Ok(Event::GeneralRef(ref entity)) if in_session_id => {
+                    if let Some(resolved) = resolve_entity_ref(entity) {
+                        id_buf.push_str(&resolved);
+                    }
+                }
+                Ok(Event::End(_)) => {
+                    if in_session_id {
+                        if let Ok(id) = id_buf.trim().parse::<u32>() {
                             return Some(id);
                         }
                     }
-                    in_session_id = false;
-                }
-                Ok(Event::End(_)) => {
                     in_session_id = false;
                 }
                 Ok(Event::Eof) => break,
@@ -1260,6 +1272,14 @@ mod tests {
     fn test_parse_session_id_from_xml_with_whitespace() {
         let info = "\n<session-id> 99 </session-id>\n";
         assert_eq!(parse_session_id_from_info(info), Some(99));
+    }
+
+    #[test]
+    fn test_parse_session_id_from_xml_with_char_ref() {
+        // A numeric character reference splitting the digits must still parse
+        // to the full session-id (not a truncated prefix/suffix).
+        let info = "<session-id>4&#50;</session-id>";
+        assert_eq!(parse_session_id_from_info(info), Some(42));
     }
 
     #[test]

@@ -10,9 +10,9 @@ A Rust network automation platform: async NETCONF client library, YANG code gene
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.12.1](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.12.1)** (security/robustness patch).
-> Now on crates.io: `rustnetconf` 0.12.1 · `rustnetconf-cli` 0.3.1 · `rustnetconf-yang` 0.1.3.
-> See [What's New in v0.12.1](#whats-new-in-v0121) below for the XML re-escaping fix, cleared yanked dependency, and non-Unix state-file warning.
+> **Latest release — [v0.12.2](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.12.2)** (security patch).
+> Now on crates.io: `rustnetconf` 0.12.2 · `rustnetconf-cli` 0.3.2 · `rustnetconf-yang` 0.1.4.
+> See [What's New in v0.12.2](#whats-new-in-v0122) below for the quick-xml 0.41 upgrade clearing RUSTSEC-2026-0194/-0195.
 
 ## Workspace
 
@@ -21,6 +21,14 @@ Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and
 | **rustnetconf** | Async NETCONF 1.0/1.1 client library |
 | **rustnetconf-yang** | YANG model code generation (compile-time config validation) |
 | **rustnetconf-cli** | Terraform-like CLI tool (`netconf` binary) |
+
+## What's New in v0.12.2
+
+Security patch for all three crates (`rustnetconf` 0.12.2, `rustnetconf-cli` 0.3.2, `rustnetconf-yang` 0.1.4), closing #31. No API changes.
+
+- **quick-xml 0.37 → 0.41:** clears two RUSTSEC advisories in the XML parser that handles device-returned NETCONF data — [RUSTSEC-2026-0194](https://rustsec.org/advisories/RUSTSEC-2026-0194) (quadratic duplicate-attribute check) and [RUSTSEC-2026-0195](https://rustsec.org/advisories/RUSTSEC-2026-0195) (unbounded namespace-declaration allocation, memory-exhaustion DoS).
+- **Entity handling adapted to quick-xml 0.38+ semantics:** entity references (`&amp;`, `&#38;`, …) now stream as separate `GeneralRef` events instead of arriving decoded inside text. All reader loops accumulate and resolve them, so element values containing `&`, `<`, `>` (Junos descriptions, URLs, error messages) round-trip whole instead of being silently truncated. Covered by new round-trip regression tests in every parser.
+- **Dropped the unused `serialize` (serde) feature** of quick-xml in `rustnetconf-yang` — the crate only uses the manual `Writer` API.
 
 ## What's New in v0.12.1
 
