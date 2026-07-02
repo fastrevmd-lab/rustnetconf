@@ -199,6 +199,10 @@ pub fn parse_device_hello(xml: &str) -> Result<Capabilities, String> {
                     text_buf.push_str(&resolved);
                 }
             }
+            Ok(Event::CData(ref cdata)) if in_capability || in_session_id => {
+                let value = cdata.decode().map_err(|e| e.to_string())?;
+                text_buf.push_str(&value);
+            }
             Ok(Event::End(ref tag)) => {
                 let local_name = tag.local_name();
                 if local_name.as_ref() == b"capability" {
@@ -287,6 +291,23 @@ mod tests {
             caps.all_uris()
         );
         assert_eq!(caps.session_id(), Some(7));
+    }
+
+    #[test]
+    fn test_parse_capability_cdata() {
+        // CDATA is valid character data inside <capability>.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability><![CDATA[urn:ietf:params:netconf:base:1.0]]></capability>
+  </capabilities>
+</hello>"#;
+        let caps = parse_device_hello(xml).unwrap();
+        assert!(
+            caps.supports("urn:ietf:params:netconf:base:1.0"),
+            "CDATA capability must be captured: {:?}",
+            caps.all_uris()
+        );
     }
 
     #[test]

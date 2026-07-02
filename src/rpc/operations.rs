@@ -340,11 +340,10 @@ pub fn get_configuration_compare_xml(message_id: &str, rollback: u32) -> String 
 /// Generate a Junos `<load-configuration>` RPC request.
 ///
 /// The `config` parameter must be well-formed for the given format:
-/// - `Text` format: Junos set/delete commands or curly-brace config
-/// - `Xml` format: Junos XML configuration elements
-///
-/// `config` is inserted verbatim — do not pass untrusted user input
-/// without validation.
+/// - `Text` format: Junos set/delete commands or curly-brace config —
+///   XML-escaped automatically before insertion
+/// - `Xml` format: Junos XML configuration elements — inserted verbatim;
+///   do not pass untrusted user input without validation
 pub fn load_configuration_xml(
     message_id: &str,
     action: LoadAction,
@@ -359,11 +358,18 @@ pub fn load_configuration_xml(
         },
         LoadFormat::Xml => "configuration",
     };
+    // Text-format config is character data and routinely contains `&`, `<`,
+    // `>` (descriptions, login messages, URLs) — escape it so the generated
+    // RPC stays well-formed. XML-format config is real XML: verbatim.
+    let payload = match format {
+        LoadFormat::Text => escape_xml_text(config),
+        LoadFormat::Xml => config.to_string(),
+    };
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
   <nc:load-configuration action="{action}" format="{format}">
-    <nc:{wrapper}>{config}</nc:{wrapper}>
+    <nc:{wrapper}>{payload}</nc:{wrapper}>
   </nc:load-configuration>
 </nc:rpc>"#,
         action = action.as_str(),
@@ -566,6 +572,42 @@ mod tests {
         );
         assert!(xml.contains(r#"action="merge""#));
         assert!(xml.contains("<nc:configuration-text>"));
+    }
+
+    #[test]
+    fn test_load_configuration_text_escapes_special_chars() {
+        // Junos text/set config legitimately contains &, <, > (descriptions,
+        // login messages, URLs). It must be XML-escaped on the wire or the
+        // generated RPC is malformed.
+        let xml = load_configuration_xml(
+            "26",
+            LoadAction::Set,
+            LoadFormat::Text,
+            r#"set system login message "a & b <ok>""#,
+        );
+        assert!(
+            xml.contains("a &amp; b &lt;ok&gt;"),
+            "text config must be XML-escaped: {xml}"
+        );
+        // The generated RPC (minus the XML declaration) must parse as
+        // well-formed XML.
+        let body = xml
+            .split_once('\n')
+            .map(|(_, rest)| rest)
+            .expect("body after declaration");
+        crate::rpc::validate_xml_fragment(body).expect("generated RPC must be well-formed");
+    }
+
+    #[test]
+    fn test_load_configuration_xml_format_stays_verbatim() {
+        // XML-format config is real XML and must NOT be escaped.
+        let xml = load_configuration_xml(
+            "27",
+            LoadAction::Merge,
+            LoadFormat::Xml,
+            "<system><host-name>a</host-name></system>",
+        );
+        assert!(xml.contains("<nc:configuration><system><host-name>a</host-name></system>"));
     }
 
     #[test]

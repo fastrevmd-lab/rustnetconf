@@ -152,6 +152,18 @@ pub struct RpcErrorInfo {
     pub info: Option<String>,
 }
 
+/// Re-escape a raw attribute value for emission inside double quotes.
+///
+/// The raw value keeps its original entity escaping but may contain a raw
+/// `"` (when the source used single quotes). Decode entities best-effort,
+/// then escape fully so the reconstructed attribute is always well-formed.
+fn reescape_attr_value(raw: &str) -> String {
+    let decoded = quick_xml::escape::unescape(raw)
+        .map(|cow| cow.into_owned())
+        .unwrap_or_else(|_| raw.to_string());
+    crate::rpc::operations::escape_xml_attr(&decoded)
+}
+
 /// Parse an `<rpc-reply>` XML response.
 ///
 /// Returns `Ok(RpcReply)` for successful responses, or `Err(RpcError)` if
@@ -216,14 +228,19 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
                     }
                     _ if in_data => {
                         data_depth += 1;
-                        // Reconstruct the inner XML
+                        // Reconstruct the inner XML, keeping the qualified
+                        // name so namespace prefixes survive.
+                        let tag_name = tag.name();
+                        let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
                         data_xml.push('<');
-                        data_xml.push_str(name);
+                        data_xml.push_str(qname);
                         for attr in tag.attributes().flatten() {
                             data_xml.push(' ');
                             data_xml.push_str(std::str::from_utf8(attr.key.as_ref()).unwrap_or(""));
                             data_xml.push_str("=\"");
-                            data_xml.push_str(&String::from_utf8_lossy(&attr.value));
+                            data_xml.push_str(&reescape_attr_value(&String::from_utf8_lossy(
+                                &attr.value,
+                            )));
                             data_xml.push('"');
                         }
                         data_xml.push('>');
@@ -231,8 +248,10 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
                     _ if in_error_info => {
                         // Inside <error-info>: accumulate child elements as XML
                         _error_info_depth += 1;
+                        let tag_name = tag.name();
+                        let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
                         error_info_xml.push('<');
-                        error_info_xml.push_str(name);
+                        error_info_xml.push_str(qname);
                         error_info_xml.push('>');
                     }
                     _ if in_rpc_error => {
@@ -255,20 +274,37 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
                 if name == "ok" && in_rpc_reply {
                     found_ok = true;
                 } else if in_data {
+                    let tag_name = tag.name();
+                    let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
                     data_xml.push('<');
-                    data_xml.push_str(name);
+                    data_xml.push_str(qname);
                     for attr in tag.attributes().flatten() {
                         data_xml.push(' ');
                         data_xml.push_str(std::str::from_utf8(attr.key.as_ref()).unwrap_or(""));
                         data_xml.push_str("=\"");
-                        data_xml.push_str(&String::from_utf8_lossy(&attr.value));
+                        data_xml
+                            .push_str(&reescape_attr_value(&String::from_utf8_lossy(&attr.value)));
                         data_xml.push('"');
                     }
                     data_xml.push_str("/>");
                 } else if in_error_info {
+                    let tag_name = tag.name();
+                    let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
                     error_info_xml.push('<');
-                    error_info_xml.push_str(name);
+                    error_info_xml.push_str(qname);
                     error_info_xml.push_str("/>");
+                }
+            }
+            Ok(Event::CData(ref cdata)) => {
+                // CDATA is ordinary character data; re-escape it as text when
+                // reconstructing XML, capture it raw for field values.
+                let value = cdata.decode().unwrap_or_default();
+                if in_data {
+                    data_xml.push_str(&escape_xml_text(&value));
+                } else if in_error_info {
+                    error_info_xml.push_str(&escape_xml_text(&value));
+                } else if in_rpc_error && current_field.is_some() {
+                    field_text.push_str(&value);
                 }
             }
             Ok(Event::Text(ref text)) => {
@@ -318,8 +354,10 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
                     }
                     _ if in_data => {
                         data_depth -= 1;
+                        let tag_name = tag.name();
+                        let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
                         data_xml.push_str("</");
-                        data_xml.push_str(name);
+                        data_xml.push_str(qname);
                         data_xml.push('>');
                     }
                     "error-info" if in_error_info => {
@@ -333,8 +371,10 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
                     }
                     _ if in_error_info => {
                         _error_info_depth -= 1;
+                        let tag_name = tag.name();
+                        let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
                         error_info_xml.push_str("</");
-                        error_info_xml.push_str(name);
+                        error_info_xml.push_str(qname);
                         error_info_xml.push('>');
                     }
                     _ if in_rpc_error => {
@@ -556,31 +596,44 @@ fn extract_rpc_reply_inner_content(xml: &str) -> Option<String> {
                         has_content = true;
                     }
                     depth += 1;
+                    let tag_name = tag.name();
+                    let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
                     content.push('<');
-                    content.push_str(name);
+                    content.push_str(qname);
                     for attr in tag.attributes().flatten() {
                         content.push(' ');
                         content.push_str(std::str::from_utf8(attr.key.as_ref()).unwrap_or(""));
                         content.push_str("=\"");
-                        content.push_str(&String::from_utf8_lossy(&attr.value));
+                        content
+                            .push_str(&reescape_attr_value(&String::from_utf8_lossy(&attr.value)));
                         content.push('"');
                     }
                     content.push('>');
                 }
             }
-            Ok(Event::Empty(ref tag)) if in_rpc_reply && depth > 0 => {
+            Ok(Event::Empty(ref tag)) if in_rpc_reply => {
                 let local = tag.local_name();
                 let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
-                content.push('<');
-                content.push_str(name);
-                for attr in tag.attributes().flatten() {
-                    content.push(' ');
-                    content.push_str(std::str::from_utf8(attr.key.as_ref()).unwrap_or(""));
-                    content.push_str("=\"");
-                    content.push_str(&String::from_utf8_lossy(&attr.value));
-                    content.push('"');
+                // A top-level empty element (other than <ok/> / <rpc-error/>)
+                // is still reply content.
+                if depth > 0 || (name != "ok" && name != "rpc-error") {
+                    if depth == 0 {
+                        has_content = true;
+                    }
+                    let tag_name = tag.name();
+                    let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
+                    content.push('<');
+                    content.push_str(qname);
+                    for attr in tag.attributes().flatten() {
+                        content.push(' ');
+                        content.push_str(std::str::from_utf8(attr.key.as_ref()).unwrap_or(""));
+                        content.push_str("=\"");
+                        content
+                            .push_str(&reescape_attr_value(&String::from_utf8_lossy(&attr.value)));
+                        content.push('"');
+                    }
+                    content.push_str("/>");
                 }
-                content.push_str("/>");
             }
             Ok(Event::Text(ref text)) if in_rpc_reply && depth > 0 => {
                 let value = text.decode().unwrap_or_default();
@@ -592,6 +645,11 @@ fn extract_rpc_reply_inner_content(xml: &str) -> Option<String> {
                 // Keep entity references escaped verbatim.
                 content.push_str(&raw_entity_ref(entity));
             }
+            Ok(Event::CData(ref cdata)) if in_rpc_reply && depth > 0 => {
+                // CDATA is character data; re-escape it as ordinary text.
+                let value = cdata.decode().unwrap_or_default();
+                content.push_str(&escape_xml_text(&value));
+            }
             Ok(Event::End(ref tag)) => {
                 let local = tag.local_name();
                 let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
@@ -600,8 +658,10 @@ fn extract_rpc_reply_inner_content(xml: &str) -> Option<String> {
                 }
                 if in_rpc_reply && depth > 0 {
                     depth -= 1;
+                    let tag_name = tag.name();
+                    let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
                     content.push_str("</");
-                    content.push_str(name);
+                    content.push_str(qname);
                     content.push('>');
                 }
             }
@@ -934,6 +994,104 @@ mod tests {
                 );
             }
             other => panic!("expected ServerError with info, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_data_preserves_namespace_prefixes() {
+        // Prefixed elements must keep their prefix in reconstructed data;
+        // stripping it detaches the element from its namespace.
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="8">
+  <data><if:interfaces xmlns:if="urn:ietf:params:xml:ns:yang:ietf-interfaces"><if:interface/></if:interfaces></data>
+</rpc-reply>"#;
+        let result = parse_rpc_reply(xml, "8").unwrap();
+        let data = match result {
+            RpcReply::Data(data) => data,
+            other => panic!("expected Data, got {other:?}"),
+        };
+        assert!(
+            data.contains("<if:interfaces") && data.contains("</if:interfaces>"),
+            "namespace prefix must be preserved: {data}"
+        );
+        assert!(
+            data.contains("<if:interface/>"),
+            "prefix on empty element must be preserved: {data}"
+        );
+    }
+
+    #[test]
+    fn test_data_preserves_cdata_content() {
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="9">
+  <data><description><![CDATA[uplink & transit]]></description></data>
+</rpc-reply>"#;
+        let result = parse_rpc_reply(xml, "9").unwrap();
+        let data = match result {
+            RpcReply::Data(data) => data,
+            other => panic!("expected Data, got {other:?}"),
+        };
+        validate_xml_fragment(&data).expect("reconstructed data must be well-formed");
+        let decoded = quick_xml::escape::unescape(&data).expect("must unescape");
+        assert!(
+            decoded.contains("uplink & transit"),
+            "CDATA content must not be dropped: {decoded}"
+        );
+    }
+
+    #[test]
+    fn test_error_message_cdata_is_captured() {
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="10">
+  <rpc-error>
+    <error-type>application</error-type>
+    <error-tag>operation-failed</error-tag>
+    <error-severity>error</error-severity>
+    <error-message><![CDATA[bad & input]]></error-message>
+  </rpc-error>
+</rpc-reply>"#;
+        let err = parse_rpc_reply(xml, "10").unwrap_err();
+        match err {
+            RpcError::ServerError { message, .. } => {
+                assert_eq!(message, "bad & input");
+            }
+            other => panic!("expected ServerError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_data_escapes_double_quote_in_attribute() {
+        // A single-quoted source attribute may contain a raw double quote;
+        // reconstruction wraps attributes in double quotes, so it must be
+        // escaped or the output is malformed.
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="11">
+  <data><x note='he said "up"'/></data>
+</rpc-reply>"#;
+        let result = parse_rpc_reply(xml, "11").unwrap();
+        let data = match result {
+            RpcReply::Data(data) => data,
+            other => panic!("expected Data, got {other:?}"),
+        };
+        validate_xml_fragment(&data).expect("reconstructed data must be well-formed");
+        assert!(
+            data.contains("&quot;up&quot;"),
+            "double quotes in attribute values must be escaped: {data}"
+        );
+    }
+
+    #[test]
+    fn test_top_level_empty_element_is_data() {
+        // A Junos custom RPC can answer with a single empty element directly
+        // under <rpc-reply>; that is data, not a bare <ok/>.
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="12">
+  <software-information/>
+</rpc-reply>"#;
+        let result = parse_rpc_reply(xml, "12").unwrap();
+        match result {
+            RpcReply::Data(data) => {
+                assert!(
+                    data.contains("<software-information/>"),
+                    "empty element must be captured: {data}"
+                );
+            }
+            other => panic!("expected Data, got {other:?}"),
         }
     }
 }
