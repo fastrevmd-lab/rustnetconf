@@ -47,20 +47,48 @@ pub fn diff_xml(desired: &str, running: &str) -> Result<Vec<DiffEntry>, String> 
     Ok(entries)
 }
 
+/// Resolve a `GeneralRef` entity reference (`&amp;`, `&#38;`, …) to its text.
+///
+/// Returns `None` for unknown user-defined entities, which are skipped.
+fn resolve_entity_ref(entity: &quick_xml::events::BytesRef<'_>) -> Option<String> {
+    if let Ok(Some(ch)) = entity.resolve_char_ref() {
+        return Some(ch.to_string());
+    }
+    let name = entity.decode().ok()?;
+    quick_xml::escape::resolve_predefined_entity(&name).map(|s| s.to_string())
+}
+
 /// Parse an XML string into a simplified tree.
 fn parse_xml_tree(xml: &str) -> Result<Vec<XmlNode>, String> {
     let mut reader = Reader::from_str(xml);
     let mut buf = Vec::new();
     let mut stack: Vec<(String, Vec<XmlNode>)> = Vec::new();
     let mut root_children: Vec<XmlNode> = Vec::new();
+    // Element text accumulates across events: quick-xml splits text around
+    // entity references (GeneralRef), so a leaf value may span several
+    // events. Flushed as one Text node at the next structural event.
+    let mut pending_text = String::new();
+
+    fn flush_text(pending: &mut String, stack: &mut [(String, Vec<XmlNode>)]) {
+        let value = pending.trim().to_string();
+        pending.clear();
+        if value.is_empty() {
+            return;
+        }
+        if let Some(parent) = stack.last_mut() {
+            parent.1.push(XmlNode::Text(value));
+        }
+    }
 
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref tag)) => {
+                flush_text(&mut pending_text, &mut stack);
                 let name = String::from_utf8_lossy(tag.local_name().as_ref()).to_string();
                 stack.push((name, Vec::new()));
             }
             Ok(Event::End(_)) => {
+                flush_text(&mut pending_text, &mut stack);
                 if let Some((name, children)) = stack.pop() {
                     let node = XmlNode::Element { name, children };
                     if let Some(parent) = stack.last_mut() {
@@ -71,14 +99,15 @@ fn parse_xml_tree(xml: &str) -> Result<Vec<XmlNode>, String> {
                 }
             }
             Ok(Event::Text(ref text)) => {
-                let value = text.unescape().unwrap_or_default().trim().to_string();
-                if !value.is_empty() {
-                    if let Some(parent) = stack.last_mut() {
-                        parent.1.push(XmlNode::Text(value));
-                    }
+                pending_text.push_str(&text.decode().unwrap_or_default());
+            }
+            Ok(Event::GeneralRef(ref entity)) => {
+                if let Some(resolved) = resolve_entity_ref(entity) {
+                    pending_text.push_str(&resolved);
                 }
             }
             Ok(Event::Empty(ref tag)) => {
+                flush_text(&mut pending_text, &mut stack);
                 let name = String::from_utf8_lossy(tag.local_name().as_ref()).to_string();
                 let node = XmlNode::Element {
                     name,
@@ -305,6 +334,28 @@ mod tests {
         assert!(matches!(&entries[0].kind, DiffKind::Modified { from, to }
             if from == "old uplink" && to == "new uplink"));
         assert!(entries[0].path.contains("description"));
+    }
+
+    #[test]
+    fn test_identical_entity_values_no_diff() {
+        // Leaf values containing XML entities must decode to one whole string;
+        // a split/truncated capture would produce spurious diffs.
+        let xml = "<interfaces><interface><name>ge-0/0/0</name><description>up &amp; down link</description></interface></interfaces>";
+        let entries = diff_xml(xml, xml).unwrap();
+        assert!(
+            entries.is_empty(),
+            "identical entity values should not diff: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn test_modified_leaf_with_entity_value() {
+        let desired = "<interface><description>a &amp; b</description></interface>";
+        let running = "<interface><description>a</description></interface>";
+        let entries = diff_xml(desired, running).unwrap();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert!(matches!(&entries[0].kind, DiffKind::Modified { from, to }
+            if from == "a" && to == "a & b"));
     }
 
     #[test]

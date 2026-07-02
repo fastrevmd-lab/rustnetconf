@@ -157,6 +157,7 @@ pub struct RpcErrorInfo {
 /// Returns `Ok(RpcReply)` for successful responses, or `Err(RpcError)` if
 /// the reply contains `<rpc-error>` elements.
 pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply, RpcError> {
+    use crate::xml_entity::{raw_entity_ref, resolve_entity_ref};
     use quick_xml::events::Event;
     use quick_xml::Reader;
 
@@ -178,6 +179,10 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
     // rpc-error field tracking
     let mut current_error: Option<RpcErrorBuilder> = None;
     let mut current_field: Option<ErrorField> = None;
+    // Element text accumulates across events: quick-xml 0.38+ splits text
+    // around entity references (`GeneralRef`), so a field's value may span
+    // several Text/GeneralRef events before the closing tag.
+    let mut field_text = String::new();
     // error-info can contain child elements — accumulate inner XML
     let mut in_error_info = false;
     let mut _error_info_depth: u32 = 0;
@@ -237,6 +242,7 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
                             error_info_xml.clear();
                         } else {
                             current_field = ErrorField::from_name(name);
+                            field_text.clear();
                         }
                     }
                     _ => {}
@@ -266,19 +272,29 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
                 }
             }
             Ok(Event::Text(ref text)) => {
-                let value = text.unescape().unwrap_or_default().to_string();
+                // Text events never contain entity refs (those arrive as
+                // GeneralRef), so decoding the encoding is all that's needed.
+                let value = text.decode().unwrap_or_default();
 
                 if in_data {
-                    // Re-escape: `unescape()` decoded entities, so we must
-                    // re-encode them to keep the reconstructed XML well-formed.
+                    // Re-escape any raw special chars so the reconstructed
+                    // XML stays well-formed.
                     data_xml.push_str(&escape_xml_text(&value));
                 } else if in_error_info {
                     error_info_xml.push_str(&escape_xml_text(&value));
-                } else if in_rpc_error {
-                    if let (Some(ref mut builder), Some(ref field)) =
-                        (&mut current_error, &current_field)
-                    {
-                        builder.set_field(field, &value);
+                } else if in_rpc_error && current_field.is_some() {
+                    field_text.push_str(&value);
+                }
+            }
+            Ok(Event::GeneralRef(ref entity)) => {
+                if in_data {
+                    // Keep the reference escaped verbatim in reconstructed XML.
+                    data_xml.push_str(&raw_entity_ref(entity));
+                } else if in_error_info {
+                    error_info_xml.push_str(&raw_entity_ref(entity));
+                } else if in_rpc_error && current_field.is_some() {
+                    if let Some(resolved) = resolve_entity_ref(entity) {
+                        field_text.push_str(&resolved);
                     }
                 }
             }
@@ -322,7 +338,14 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
                         error_info_xml.push('>');
                     }
                     _ if in_rpc_error => {
-                        current_field = None;
+                        // Field text is complete at the closing tag; flush the
+                        // accumulated value into the builder.
+                        if let (Some(ref mut builder), Some(field)) =
+                            (&mut current_error, current_field.take())
+                        {
+                            builder.set_field(&field, &field_text);
+                        }
+                        field_text.clear();
                     }
                     _ => {}
                 }
@@ -508,6 +531,7 @@ impl RpcErrorBuilder {
 /// directly under `<rpc-reply>` without a `<data>` wrapper. This function
 /// extracts all child element content from the reply.
 fn extract_rpc_reply_inner_content(xml: &str) -> Option<String> {
+    use crate::xml_entity::raw_entity_ref;
     use quick_xml::events::Event;
     use quick_xml::Reader;
 
@@ -559,9 +583,14 @@ fn extract_rpc_reply_inner_content(xml: &str) -> Option<String> {
                 content.push_str("/>");
             }
             Ok(Event::Text(ref text)) if in_rpc_reply && depth > 0 => {
-                let value = text.unescape().unwrap_or_default().to_string();
-                // Re-escape decoded entities so the reconstructed XML stays well-formed.
+                let value = text.decode().unwrap_or_default();
+                // Re-escape any raw special chars so the reconstructed XML
+                // stays well-formed.
                 content.push_str(&escape_xml_text(&value));
+            }
+            Ok(Event::GeneralRef(ref entity)) if in_rpc_reply && depth > 0 => {
+                // Keep entity references escaped verbatim.
+                content.push_str(&raw_entity_ref(entity));
             }
             Ok(Event::End(ref tag)) => {
                 let local = tag.local_name();
@@ -831,7 +860,80 @@ mod tests {
             RpcReply::Data(data) => data,
             other => panic!("expected Data, got {other:?}"),
         };
-        assert!(data.contains("&amp;"), "ampersand must stay escaped: {data}");
+        assert!(
+            data.contains("&amp;"),
+            "ampersand must stay escaped: {data}"
+        );
         validate_xml_fragment(&data).expect("reconstructed inner content must be well-formed");
+    }
+
+    #[test]
+    fn test_error_message_with_entities_is_fully_decoded() {
+        // Junos error messages routinely contain <, >, & (e.g. quoting config
+        // syntax). The decoded message must contain the full text, not a
+        // truncated fragment around the entity.
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="5">
+  <rpc-error>
+    <error-type>protocol</error-type>
+    <error-tag>operation-failed</error-tag>
+    <error-severity>error</error-severity>
+    <error-message>syntax error before &lt;get&gt; &amp; after</error-message>
+  </rpc-error>
+</rpc-reply>"#;
+        let err = parse_rpc_reply(xml, "5").unwrap_err();
+        match err {
+            RpcError::ServerError { message, .. } => {
+                assert_eq!(message, "syntax error before <get> & after");
+            }
+            other => panic!("expected ServerError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_data_text_with_char_ref_roundtrips() {
+        // Numeric character references must survive data reconstruction.
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="6">
+  <data><description>A &#38; B &#x3C; C</description></data>
+</rpc-reply>"#;
+        let result = parse_rpc_reply(xml, "6").unwrap();
+        let data = match result {
+            RpcReply::Data(data) => data,
+            other => panic!("expected Data, got {other:?}"),
+        };
+        validate_xml_fragment(&data).expect("reconstructed data must be well-formed");
+        // Semantic check: independently unescaping the reconstructed XML must
+        // yield the full original text (no truncation around the refs).
+        let decoded = quick_xml::escape::unescape(&data).expect("must unescape");
+        assert!(
+            decoded.contains("A & B < C"),
+            "char refs must round-trip: {decoded}"
+        );
+    }
+
+    #[test]
+    fn test_error_info_with_entities_stays_well_formed() {
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="7">
+  <rpc-error>
+    <error-type>application</error-type>
+    <error-tag>operation-failed</error-tag>
+    <error-severity>error</error-severity>
+    <error-message>bad element</error-message>
+    <error-info><bad-element>a &amp; b</bad-element></error-info>
+  </rpc-error>
+</rpc-reply>"#;
+        let err = parse_rpc_reply(xml, "7").unwrap_err();
+        match err {
+            RpcError::ServerError {
+                info: Some(info), ..
+            } => {
+                validate_xml_fragment(&info).expect("error-info must stay well-formed");
+                let decoded = quick_xml::escape::unescape(&info).expect("must unescape");
+                assert!(
+                    decoded.contains("a & b"),
+                    "entity in error-info must round-trip: {decoded}"
+                );
+            }
+            other => panic!("expected ServerError with info, got {other:?}"),
+        }
     }
 }

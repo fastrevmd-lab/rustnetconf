@@ -163,6 +163,7 @@ pub fn client_hello_xml() -> String {
 
 /// Parse a device `<hello>` message and extract capabilities and session-id.
 pub fn parse_device_hello(xml: &str) -> Result<Capabilities, String> {
+    use crate::xml_entity::resolve_entity_ref;
     use quick_xml::events::Event;
     use quick_xml::Reader;
 
@@ -171,6 +172,10 @@ pub fn parse_device_hello(xml: &str) -> Result<Capabilities, String> {
     let mut session_id: Option<u32> = None;
     let mut in_capability = false;
     let mut in_session_id = false;
+    // Element text accumulates across events: quick-xml splits text around
+    // entity references, so a URI like `...?a=1&amp;b=2` spans several
+    // Text/GeneralRef events. Flush at the closing tag.
+    let mut text_buf = String::new();
     let mut buf = Vec::new();
 
     loop {
@@ -179,28 +184,34 @@ pub fn parse_device_hello(xml: &str) -> Result<Capabilities, String> {
                 let local_name = tag.local_name();
                 if local_name.as_ref() == b"capability" {
                     in_capability = true;
+                    text_buf.clear();
                 } else if local_name.as_ref() == b"session-id" {
                     in_session_id = true;
+                    text_buf.clear();
                 }
             }
-            Ok(Event::Text(ref text)) => {
-                if in_capability {
-                    let cap_text = text.unescape().map_err(|e| e.to_string())?;
-                    let trimmed = cap_text.trim().to_string();
-                    if !trimmed.is_empty() {
-                        capabilities.insert(trimmed);
-                    }
-                } else if in_session_id {
-                    let id_text = text.unescape().map_err(|e| e.to_string())?;
-                    session_id = id_text.trim().parse().ok();
+            Ok(Event::Text(ref text)) if in_capability || in_session_id => {
+                let value = text.decode().map_err(|e| e.to_string())?;
+                text_buf.push_str(&value);
+            }
+            Ok(Event::GeneralRef(ref entity)) if in_capability || in_session_id => {
+                if let Some(resolved) = resolve_entity_ref(entity) {
+                    text_buf.push_str(&resolved);
                 }
             }
             Ok(Event::End(ref tag)) => {
                 let local_name = tag.local_name();
                 if local_name.as_ref() == b"capability" {
                     in_capability = false;
+                    let trimmed = text_buf.trim();
+                    if !trimmed.is_empty() {
+                        capabilities.insert(trimmed.to_string());
+                    }
+                    text_buf.clear();
                 } else if local_name.as_ref() == b"session-id" {
                     in_session_id = false;
+                    session_id = text_buf.trim().parse().ok();
+                    text_buf.clear();
                 }
             }
             Ok(Event::Eof) => break,
@@ -254,6 +265,28 @@ mod tests {
         assert_eq!(caps.negotiate_version(), Some(NetconfVersion::V1_1));
         assert!(caps.has_candidate());
         assert!(caps.has_validate());
+    }
+
+    #[test]
+    fn test_parse_capability_uri_with_entities() {
+        // Capability URIs carry query parameters joined by '&', escaped as
+        // &amp; on the wire. The parsed URI must contain the full decoded
+        // string, not a fragment truncated at the entity.
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability>urn:ietf:params:netconf:base:1.0</capability>
+    <capability>http://example.com/yang?module=foo&amp;revision=2020-01-01</capability>
+  </capabilities>
+  <session-id>7</session-id>
+</hello>"#;
+        let caps = parse_device_hello(xml).unwrap();
+        assert!(
+            caps.supports("http://example.com/yang?module=foo&revision=2020-01-01"),
+            "entity in capability URI must be decoded without truncation: {:?}",
+            caps.all_uris()
+        );
+        assert_eq!(caps.session_id(), Some(7));
     }
 
     #[test]
