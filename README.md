@@ -1,14 +1,26 @@
-# rustnetconf
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/mechub-mark.svg">
+    <img src="docs/assets/mechub-mark-light.svg" width="72" alt="mechub mark">
+  </picture>
+</p>
 
-[![crates.io — rustnetconf](https://img.shields.io/crates/v/rustnetconf.svg?label=rustnetconf)](https://crates.io/crates/rustnetconf)
-[![crates.io — rustnetconf-cli](https://img.shields.io/crates/v/rustnetconf-cli.svg?label=rustnetconf-cli)](https://crates.io/crates/rustnetconf-cli)
-[![crates.io — rustnetconf-yang](https://img.shields.io/crates/v/rustnetconf-yang.svg?label=rustnetconf-yang)](https://crates.io/crates/rustnetconf-yang)
-[![CI](https://github.com/fastrevmd-lab/rustnetconf/actions/workflows/ci.yml/badge.svg)](https://github.com/fastrevmd-lab/rustnetconf/actions/workflows/ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+<h1 align="center">rustnetconf</h1>
 
-Unofficial / community project. This repository is an independent, community-driven project. It is not affiliated with, endorsed by, sponsored by, or supported by Hewlett Packard Enterprise or Juniper Networks. "HPE", "Juniper", "SRX", "JUNOS", "Security Director" and "Juniper Mist" are trademarks of their respective owners and are used here only to describe what this software interoperates with. Please direct support and licensing questions about those products to the respective vendors
+<p align="center"><strong>A Rust network automation platform</strong><br>
+<em>a mechub project — sovereign network-security automation</em></p>
 
-A Rust network automation platform: async NETCONF client library, YANG code generation, vendor profiles, connection pooling, and a Terraform-like CLI for declarative network config management.
+<p align="center">
+  <a href="https://crates.io/crates/rustnetconf"><img alt="crates.io — rustnetconf" src="https://img.shields.io/crates/v/rustnetconf.svg?label=rustnetconf&color=0D9488"></a>
+  <a href="https://crates.io/crates/rustnetconf-cli"><img alt="crates.io — rustnetconf-cli" src="https://img.shields.io/crates/v/rustnetconf-cli.svg?label=rustnetconf-cli&color=262B38"></a>
+  <a href="https://crates.io/crates/rustnetconf-yang"><img alt="crates.io — rustnetconf-yang" src="https://img.shields.io/crates/v/rustnetconf-yang.svg?label=rustnetconf-yang&color=262B38"></a>
+  <a href="https://github.com/fastrevmd-lab/rustnetconf/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/fastrevmd-lab/rustnetconf/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="#license"><img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-262B38.svg"></a>
+</p>
+
+> **Unofficial / community project.** This repository is an independent, community-driven project. It is not affiliated with, endorsed by, sponsored by, or supported by Hewlett Packard Enterprise or Juniper Networks. "HPE", "Juniper", "SRX", "JUNOS", "Security Director" and "Juniper Mist" are trademarks of their respective owners and are used here only to describe what this software interoperates with. Please direct support and licensing questions about those products to the respective vendors.
+
+Async NETCONF client library, YANG code generation, vendor profiles, connection pooling, and a Terraform-like CLI for declarative network config management.
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
@@ -589,3 +601,14 @@ MIT OR Apache-2.0
 ## Contributing
 
 Contributions welcome! See [ARCHITECTURE.md](ARCHITECTURE.md) for the codebase design and [TODOS.md](TODOS.md) for tracked work items.
+
+---
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/mechub-mark.svg">
+    <img src="docs/assets/mechub-mark-light.svg" width="28" alt="">
+  </picture><br>
+  <sub><code>a mechub project</code> · deterministic decides · the model explains · a human approves<br>
+  <a href="https://github.com/fastrevmd-lab">github.com/fastrevmd-lab</a></sub>
+</p>
