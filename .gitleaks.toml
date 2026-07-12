@@ -1,0 +1,9 @@
+# Gitleaks configuration — extends the default ruleset with allowlists for
+# known false positives in this repo.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Cargo.lock contains crate names and checksums, not secrets"
+paths = ['''(^|/)Cargo\.lock$''']
