@@ -124,7 +124,7 @@
 ### Publish to crates.io
 **What:** Publish rustnetconf to crates.io for `cargo add rustnetconf` installation.
 **Why:** Makes the library discoverable and installable by the Rust ecosystem. Not blocking — library works as a git dependency today.
-**Depends on:** Finalize license choice (Apache-2.0/MIT dual-license), crates.io account setup
+**Depends on:** Finalize crates.io account setup
 **Added:** 2026-03-19
 
 ## v0.1 Implementation

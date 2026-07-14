@@ -4,7 +4,7 @@ version = "0.3.3"
 edition = "2021"
 authors = ["fastrevmd-lab"]
 description = "Terraform-like CLI for declarative NETCONF network config management"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/fastrevmd-lab/rustnetconf"
 keywords = ["netconf", "network", "cli", "automation", "declarative"]
 
