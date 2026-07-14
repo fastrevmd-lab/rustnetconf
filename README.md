@@ -15,7 +15,7 @@
   <a href="https://crates.io/crates/rustnetconf-cli"><img alt="crates.io — rustnetconf-cli" src="https://img.shields.io/crates/v/rustnetconf-cli.svg?label=rustnetconf-cli&color=262B38"></a>
   <a href="https://crates.io/crates/rustnetconf-yang"><img alt="crates.io — rustnetconf-yang" src="https://img.shields.io/crates/v/rustnetconf-yang.svg?label=rustnetconf-yang&color=262B38"></a>
   <a href="https://github.com/fastrevmd-lab/rustnetconf/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/fastrevmd-lab/rustnetconf/actions/workflows/ci.yml/badge.svg"></a>
-  <a href="#license"><img alt="License: MIT OR Apache-2.0" src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-262B38.svg"></a>
+  <a href="#license"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-262B38.svg"></a>
 </p>
 
 > **Unofficial / community project.** This repository is an independent, community-driven project. It is not affiliated with, endorsed by, sponsored by, or supported by Hewlett Packard Enterprise or Juniper Networks. "HPE", "Juniper", "SRX", "JUNOS", "Security Director" and "Juniper Mist" are trademarks of their respective owners and are used here only to describe what this software interoperates with. Please direct support and licensing questions about those products to the respective vendors.
@@ -596,7 +596,7 @@ Dev-only:
 
 ## License
 
-MIT OR Apache-2.0
+MIT
 
 ## Contributing
 
