@@ -243,6 +243,14 @@ impl Session {
         self.vendor_profile.name()
     }
 
+    /// Normalize a config fragment the way this session's vendor profile does
+    /// (e.g. Junos strips the outer `<configuration>` wrapper; generic passes
+    /// through). This is the same operation applied to get-config responses,
+    /// exposed so callers can normalize a *desired* config symmetrically.
+    pub fn unwrap_config(&self, xml: &str) -> String {
+        self.vendor_profile.unwrap_config(xml)
+    }
+
     /// Get the device facts.
     pub fn facts(&self) -> &Facts {
         &self.facts
