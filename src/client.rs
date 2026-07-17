@@ -495,6 +495,15 @@ impl Client {
         self.session.vendor_name()
     }
 
+    /// Normalize a config fragment using the connected device's vendor profile.
+    ///
+    /// Junos strips the outer `<configuration>` wrapper; generic vendors pass
+    /// the input through unchanged. Useful for diffing a desired config against
+    /// a (already vendor-unwrapped) running config.
+    pub fn unwrap_config(&self, xml: &str) -> String {
+        self.session.unwrap_config(xml)
+    }
+
     /// Get the device's capabilities.
     pub fn capabilities(&self) -> Option<&Capabilities> {
         self.session.capabilities()
@@ -1283,5 +1292,30 @@ mod tests {
 
         let mut client = Client::from_session_for_test(session);
         client.release_candidate_lock_best_effort().await;
+    }
+
+    #[test]
+    fn test_unwrap_config_generic_passes_through() {
+        use crate::transport::mock::MockTransport;
+        // Generic vendor is the default when no hello/detection has run.
+        let transport = MockTransport::new(Vec::new());
+        let session = Session::new(Box::new(transport));
+        let client = Client::from_session_for_test(session);
+
+        let input = "<configuration><foo>bar</foo></configuration>";
+        // Generic unwrap_config is a passthrough: input is returned unchanged.
+        assert_eq!(client.unwrap_config(input), input);
+    }
+
+    #[test]
+    fn test_unwrap_config_junos_strips_configuration_wrapper() {
+        use crate::transport::mock::MockTransport;
+        let transport = MockTransport::new(Vec::new());
+        let mut session = Session::new(Box::new(transport));
+        session.set_vendor_profile(Box::new(crate::vendor::junos::JunosVendor::default()));
+        let client = Client::from_session_for_test(session);
+
+        let input = "<configuration junos:commit-seconds=\"1\"><foo>bar</foo></configuration>";
+        assert_eq!(client.unwrap_config(input), "<foo>bar</foo>");
     }
 }
