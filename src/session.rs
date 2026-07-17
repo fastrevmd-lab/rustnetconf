@@ -18,6 +18,7 @@
 //! ```
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::capability::{self, Capabilities, NetconfVersion};
@@ -80,7 +81,7 @@ pub struct Session {
     pending_commit: bool,
     /// Vendor-specific behavior profile. Set during establish() via auto-detection,
     /// or overridden by the user via Client::vendor() / Client::vendor_profile().
-    vendor_profile: Box<dyn VendorProfile>,
+    vendor_profile: Arc<dyn VendorProfile>,
     /// Device facts gathered after session establishment.
     facts: Facts,
     /// Keepalive interval — if set, a probe is sent before RPCs when idle
@@ -118,7 +119,7 @@ impl Session {
             read_buffer: Vec::new(),
             version: None,
             pending_commit: false,
-            vendor_profile: Box::new(crate::vendor::generic::GenericVendor),
+            vendor_profile: Arc::new(crate::vendor::generic::GenericVendor),
             facts: Facts::default(),
             keepalive_interval: None,
             last_activity: None,
@@ -135,6 +136,15 @@ impl Session {
     /// Must be called before `establish()`. After establish, the vendor
     /// profile is locked in.
     pub fn set_vendor_profile(&mut self, profile: Box<dyn VendorProfile>) {
+        self.vendor_profile = Arc::from(profile);
+    }
+
+    /// Set an explicit vendor profile (Arc), overriding auto-detection.
+    ///
+    /// Must be called before `establish()`. After establish, the vendor
+    /// profile is locked in. Use this when sharing a vendor profile across
+    /// multiple sessions.
+    pub fn set_vendor_profile_arc(&mut self, profile: Arc<dyn VendorProfile>) {
         self.vendor_profile = profile;
     }
 
@@ -182,7 +192,7 @@ impl Session {
 
         // Auto-detect vendor from capabilities (unless explicitly overridden)
         if self.vendor_profile.name() == "generic" {
-            self.vendor_profile = vendor::detect_vendor(&caps);
+            self.vendor_profile = Arc::from(vendor::detect_vendor(&caps));
         }
 
         // Normalize legacy capability URIs to their standard forms using the
@@ -1737,5 +1747,29 @@ mod tests {
             .expect("lock failed");
         assert_eq!(session.drain_notifications().len(), 1);
         assert_eq!(session.drain_notifications().len(), 0); // buffer cleared
+    }
+
+    #[tokio::test]
+    async fn test_explicit_vendor_profile_arc_survives_auto_detection() {
+        use std::sync::Arc;
+
+        // Mock transport: hello WITHOUT Junos capability (generic device)
+        let response_data = mock_device_hello();
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+
+        // Set explicit Junos vendor profile via Arc BEFORE establish
+        session.set_vendor_profile_arc(Arc::new(crate::vendor::junos::JunosVendor::default()));
+
+        // Establish should NOT override the explicit vendor because it's not "generic"
+        session.establish().await.expect("establish failed");
+
+        // Vendor should still be "junos" after establish (not auto-detected to "generic")
+        assert_eq!(
+            session.vendor_name(),
+            "junos",
+            "explicit Arc vendor override should survive auto-detection"
+        );
     }
 }

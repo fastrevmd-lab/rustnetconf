@@ -104,7 +104,10 @@ pub trait VendorProfile: Send + Sync {
     /// Receives the parsed facts and the raw XML response from the facts RPC.
     /// Vendors can use this to detect device characteristics (e.g., chassis
     /// cluster mode) that are only visible in the facts response.
-    fn post_facts_hook(&mut self, _facts: &Facts, _raw_response: &str) {}
+    ///
+    /// Uses interior mutability (e.g., `AtomicBool`, `Mutex`) if the hook
+    /// needs to update vendor state, to support `Arc<dyn VendorProfile>`.
+    fn post_facts_hook(&self, _facts: &Facts, _raw_response: &str) {}
 
     /// Whether this device requires `<open-configuration>` before loading config.
     ///
