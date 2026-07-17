@@ -1,5 +1,36 @@
 # TODOS — rustnetconf
 
+## Next priorities (as of 2026-07-17, post-v0.13.0)
+
+Recommended order for upcoming work. Grounded in current state: v0.13.0 shipped;
+`DevicePool`, vendor profiles, TLS (RFC 7589), and notifications (RFC 5277) are all
+in place and published. Reorder to taste — this is an engineering recommendation, not
+a fixed roadmap.
+
+**P1 — Multi-device orchestration (`--all`).** The single biggest product gap. The CLI
+is still one-device-per-invocation while the async `DevicePool` foundation sits unused
+by it — and v0.13.0 just made per-device vendor overrides work in the pool. This is
+"the product" per the backlog entry below. Needs its own design pass (concurrency
+limits, partial-failure semantics, aggregated diff/apply output). Start with
+`plan --all`, then `apply --all`.
+
+**P2 — RFC 6470 Base Notifications.** Cheap now that the RFC 5277 notification stream
+landed — mostly typed structs + parsing over existing infrastructure. High
+value-to-effort ratio; good follow-on while the notification code is fresh.
+
+**P3 — RFC 6022 `get-schema` / `netconf-state`.** Enables capability auto-discovery and
+feeds `rustnetconf-yang` (fetch a device's YANG modules directly). Strong synergy with
+the existing yang crate; testable against devices advertising `:monitor`.
+
+**P4 — RFC 6243 with-defaults.** Improves get-config/diff fidelity (control over default
+values in responses). Self-contained, testable, moderate effort.
+
+Deferred / opportunistic (unchanged priority): IOS-XE vendor profile (blocked on a
+Cisco test device), YAML config support (depends on yang maturity), RFC 5717
+partial-lock (niche multi-operator), RFC 8526 NMDA (forward-looking, larger), RFC 8071
+Call Home (complex SSH role-reversal), RFC 8040 RESTCONF (large; likely a separate
+crate).
+
 ## Backlog
 
 ### YAML config file support (CLI v2.0)
@@ -99,12 +130,6 @@
 **Depends on:** VendorProfile trait (v0.2), access to a Cisco IOS-XE NETCONF device (CSR1000v or Cat8000v) for integration testing. Deferred from v0.2 — ship what we can test.
 **Added:** 2026-03-19 via /plan-eng-review
 
-### Publish to crates.io
-**What:** Publish rustnetconf to crates.io for `cargo add rustnetconf` installation.
-**Why:** Makes the library discoverable and installable by the Rust ecosystem. Not blocking — library works as a git dependency today.
-**Depends on:** Finalize crates.io account setup
-**Added:** 2026-03-19
-
 ## v0.1 Implementation
 
 ### ~~TODO-001: Handle mid-RPC disconnect during commit (CommitUnknown error)~~ DONE
@@ -126,3 +151,6 @@ Also fixed `<error-info>` parsing to preserve child element XML (e.g., `<session
 
 ### ~~RFC 5277 — NETCONF Event Notifications~~ DONE
 **Completed:** 2026-07-17. Implemented `create-subscription` RPC and async notification stream handling (RFC 5277) in src/notification.rs. Session tracks subscription state and buffers interleaved notifications during RPC exchanges. Client methods: `create_subscription()`, `drain_notifications()`, `recv_notification()`.
+
+### ~~Publish to crates.io~~ DONE
+**Completed:** 2026-07-17. All three crates published to crates.io — `rustnetconf` 0.13.0, `rustnetconf-cli` 0.3.4, `rustnetconf-yang` 0.1.4. Installable via `cargo add rustnetconf`. Release tagged `v0.13.0` with GitHub release notes.
