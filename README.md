@@ -24,9 +24,9 @@ Async NETCONF client library, YANG code generation, vendor profiles, connection 
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.12.3](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.12.3)** (parser correctness patch).
-> Now on crates.io: `rustnetconf` 0.12.3 · `rustnetconf-cli` 0.3.3 · `rustnetconf-yang` 0.1.4.
-> See [What's New in v0.12.3](#whats-new-in-v0123) below for five XML parser fixes from a full code review.
+> **Latest release — [v0.13.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.13.0)** (vendor-profile plumbing).
+> Now on crates.io: `rustnetconf` 0.13.0 · `rustnetconf-cli` 0.3.4 · `rustnetconf-yang` 0.1.4.
+> See [What's New in v0.13.0](#whats-new-in-v0130) below for the pool vendor-override fix and vendor-aware CLI diffs.
 
 ## Workspace
 
@@ -35,6 +35,15 @@ Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and
 | **rustnetconf** | Async NETCONF 1.0/1.1 client library |
 | **rustnetconf-yang** | YANG model code generation (compile-time config validation) |
 | **rustnetconf-cli** | Terraform-like CLI tool (`netconf` binary) |
+
+## What's New in v0.13.0
+
+Vendor-profile plumbing for `rustnetconf` (0.13.0) and `rustnetconf-cli` (0.3.4), from a project review (PRs #37, #38). `rustnetconf-yang` is unchanged at 0.1.4.
+
+- **`DevicePool` honors an explicit vendor profile.** `DeviceConfig.vendor` is now wired into connection setup — previously it was silently ignored. The field changed from `Box<dyn VendorProfile>` to `Arc<dyn VendorProfile>`; new `ClientBuilder::vendor_profile_arc()` and `Session::set_vendor_profile_arc()` support the shared-ownership path. The existing `vendor_profile(Box<…>)` API is unchanged.
+- **New `Client::unwrap_config()`** (and `Session::unwrap_config()`) exposes the connected device's vendor `unwrap_config` — additive public API.
+- **Vendor-aware CLI diffs.** `netconf plan`/`apply` now normalize the desired config through the connected device's vendor profile instead of a hardcoded `<configuration>` strip. This fixes an asymmetric, potentially wrong diff against generic (non-Junos) devices; Junos behavior is unchanged.
+- Internally, `VendorProfile::post_facts_hook` takes `&self` (with `JunosVendor` cluster state moved to interior mutability) so profiles work under `Arc`.
 
 ## What's New in v0.12.3
 
