@@ -70,7 +70,7 @@ pub async fn run(
             .await
             .map_err(|e| format!("get-config failed for {}: {e}", config.name))?;
 
-        let desired_inner = crate::commands::plan::strip_configuration_wrapper(&config.xml);
+        let desired_inner = client.unwrap_config(&config.xml);
         let entries = diff_xml(&desired_inner, &running)?;
         print!("{}", format_colored(&entries, &config.name));
 

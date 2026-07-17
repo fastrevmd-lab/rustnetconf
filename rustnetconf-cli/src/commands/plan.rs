@@ -34,7 +34,7 @@ pub async fn run(
         // Strip <configuration> wrapper from desired to match the vendor-unwrapped
         // running config. The vendor profile strips this from get-config responses,
         // so the desired XML needs the same treatment for an accurate diff.
-        let desired_inner = strip_configuration_wrapper(&config.xml);
+        let desired_inner = client.unwrap_config(&config.xml);
         let entries = diff_xml(&desired_inner, &running)?;
 
         if !entries.is_empty() {
@@ -59,21 +59,4 @@ pub async fn run(
         .map_err(|e| format!("close failed: {e}"))?;
 
     Ok(has_changes)
-}
-
-/// Strip outer `<configuration ...>...</configuration>` wrapper from XML.
-/// Matches the vendor profile's unwrap_config behavior.
-pub fn strip_configuration_wrapper(xml: &str) -> String {
-    let trimmed = xml.trim();
-    if let Some(start) = trimmed.find("<configuration") {
-        if let Some(tag_end) = trimmed[start..].find('>') {
-            let inner_start = start + tag_end + 1;
-            if let Some(close) = trimmed.rfind("</configuration>") {
-                if inner_start < close {
-                    return trimmed[inner_start..close].trim().to_string();
-                }
-            }
-        }
-    }
-    trimmed.to_string()
 }
