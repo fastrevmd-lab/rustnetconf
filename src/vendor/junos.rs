@@ -8,6 +8,8 @@
 //! - Capability normalization: Junos uses both `urn:ietf:params:netconf:` and
 //!   `urn:ietf:params:xml:ns:netconf:` prefixes for the same capabilities
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::{CloseSequence, VendorProfile};
 use crate::capability::Capabilities;
 use crate::facts::{self, Facts};
@@ -19,11 +21,20 @@ const JUNOS_CAPABILITY: &str = "http://xml.juniper.net/netconf/junos/1.0";
 ///
 /// Tracks chassis cluster state to determine whether
 /// `<open-configuration>` is required before loading configuration.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct JunosVendor {
     /// True when the device is part of a chassis cluster.
     /// Detected from `<multi-routing-engine-results>` in the facts response.
-    is_cluster: bool,
+    /// Uses AtomicBool for interior mutability (required for Arc<dyn VendorProfile>).
+    is_cluster: AtomicBool,
+}
+
+impl Default for JunosVendor {
+    fn default() -> Self {
+        Self {
+            is_cluster: AtomicBool::new(false),
+        }
+    }
 }
 
 impl JunosVendor {
@@ -41,7 +52,7 @@ impl JunosVendor {
 
     /// Whether this device is part of a chassis cluster.
     pub fn is_cluster(&self) -> bool {
-        self.is_cluster
+        self.is_cluster.load(Ordering::Relaxed)
     }
 }
 
@@ -124,17 +135,17 @@ impl VendorProfile for JunosVendor {
         facts::parse_junos_system_information(response)
     }
 
-    fn post_facts_hook(&mut self, _facts: &Facts, raw_response: &str) {
+    fn post_facts_hook(&self, _facts: &Facts, raw_response: &str) {
         // Chassis cluster devices wrap facts in <multi-routing-engine-results>.
         // Use this as a reliable signal for cluster mode.
         if raw_response.contains("<multi-routing-engine-results>") {
-            self.is_cluster = true;
+            self.is_cluster.store(true, Ordering::Relaxed);
             tracing::info!("Junos chassis cluster detected");
         }
     }
 
     fn requires_open_configuration(&self) -> bool {
-        self.is_cluster
+        self.is_cluster.load(Ordering::Relaxed)
     }
 }
 
@@ -257,7 +268,7 @@ mod tests {
 
     #[test]
     fn test_cluster_detection_from_multi_re() {
-        let mut vendor = JunosVendor::default();
+        let vendor = JunosVendor::default();
         assert!(!vendor.is_cluster());
         assert!(!vendor.requires_open_configuration());
 
@@ -277,7 +288,7 @@ mod tests {
 
     #[test]
     fn test_non_cluster_detection() {
-        let mut vendor = JunosVendor::default();
+        let vendor = JunosVendor::default();
         let response = r#"<software-information>
   <host-name>vsrx1</host-name>
   <product-model>vSRX</product-model>

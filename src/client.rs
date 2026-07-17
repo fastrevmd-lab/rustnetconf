@@ -3,6 +3,7 @@
 //! `Client` provides builder-pattern connection setup and delegates all
 //! protocol operations to the underlying `Session`. It owns no protocol state.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::capability::Capabilities;
@@ -61,7 +62,7 @@ pub struct ClientBuilder {
     /// as `password`.
     key_passphrase: Option<Zeroizing<String>>,
     use_agent: bool,
-    vendor_profile: Option<Box<dyn VendorProfile>>,
+    vendor_profile: Option<Arc<dyn VendorProfile>>,
     gather_facts: bool,
     keepalive_interval: Option<Duration>,
     host_key_verification: HostKeyVerification,
@@ -113,6 +114,15 @@ impl ClientBuilder {
     /// Use this when auto-detection doesn't work for your device, or
     /// when using a custom vendor implementation.
     pub fn vendor_profile(mut self, profile: Box<dyn VendorProfile>) -> Self {
+        self.vendor_profile = Some(Arc::from(profile));
+        self
+    }
+
+    /// Set an explicit vendor profile (Arc), overriding auto-detection.
+    ///
+    /// Use this when sharing a vendor profile across multiple clients or
+    /// when integrating with connection pooling.
+    pub fn vendor_profile_arc(mut self, profile: Arc<dyn VendorProfile>) -> Self {
         self.vendor_profile = Some(profile);
         self
     }
@@ -313,7 +323,7 @@ impl ClientBuilder {
 
         // Set explicit vendor profile if provided (overrides auto-detection)
         if let Some(profile) = self.vendor_profile {
-            session.set_vendor_profile(profile);
+            session.set_vendor_profile_arc(profile);
         }
 
         session.establish().await?;
@@ -889,7 +899,7 @@ impl<'a> EditConfigBuilder<'a> {
 #[cfg(feature = "tls")]
 pub struct TlsClientBuilder {
     tls_config: TlsConfig,
-    vendor_profile: Option<Box<dyn VendorProfile>>,
+    vendor_profile: Option<Arc<dyn VendorProfile>>,
     gather_facts: bool,
     keepalive_interval: Option<Duration>,
     rpc_timeout: Option<Duration>,
@@ -899,6 +909,12 @@ pub struct TlsClientBuilder {
 impl TlsClientBuilder {
     /// Set an explicit vendor profile, overriding auto-detection.
     pub fn vendor_profile(mut self, profile: Box<dyn VendorProfile>) -> Self {
+        self.vendor_profile = Some(Arc::from(profile));
+        self
+    }
+
+    /// Set an explicit vendor profile (Arc), overriding auto-detection.
+    pub fn vendor_profile_arc(mut self, profile: Arc<dyn VendorProfile>) -> Self {
         self.vendor_profile = Some(profile);
         self
     }
@@ -937,7 +953,7 @@ impl TlsClientBuilder {
         }
 
         if let Some(profile) = self.vendor_profile {
-            session.set_vendor_profile(profile);
+            session.set_vendor_profile_arc(profile);
         }
 
         session.establish().await?;

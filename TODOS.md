@@ -14,28 +14,6 @@
 **Depends on:** CLI v1.0, DevicePool from v0.2.
 **Added:** 2026-03-19 via /plan-eng-review
 
-### RFC 7589 — NETCONF over TLS
-**What:** Investigate and implement TLS as a second transport alongside SSH.
-**Why:** Many enterprise environments prefer or require TLS for NETCONF (especially RESTCONF-adjacent deployments). The transport trait architecture already supports pluggable transports.
-**Investigation:**
-- Evaluate `rustls` vs `native-tls` for the TLS backend (prefer `rustls` to stay pure-Rust)
-- Determine certificate-based mutual auth requirements (RFC 7589 §3)
-- Design `TlsTransport` implementing the existing `Transport` trait
-- Assess impact on connection pooling (DevicePool needs transport-agnostic checkout)
-- Test against devices that support NETCONF over TLS (port 6513)
-**Added:** 2026-04-01
-
-### RFC 5277 — NETCONF Event Notifications
-**What:** Investigate and implement `create-subscription` RPC and async notification stream handling.
-**Why:** Event notifications enable real-time monitoring of device state changes — critical for network automation platforms.
-**Investigation:**
-- Implement `create-subscription` RPC with stream, filter, startTime, stopTime parameters
-- Design async notification receiver (tokio channel or Stream trait) for incoming `<notification>` messages
-- Handle interleaved notifications with RPC replies on the same session
-- Determine if notification parsing should be generic XML or typed via YANG models
-- Test with devices that advertise `:notification` capability
-**Added:** 2026-04-01
-
 ### RFC 5717 — Partial Lock RPC
 **What:** Investigate and implement `partial-lock` and `partial-unlock` RPCs for XPath-scoped locking.
 **Why:** Partial lock enables multiple managers to lock different subtrees concurrently — essential for multi-operator environments.
@@ -142,3 +120,9 @@ Also fixed `<error-info>` parsing to preserve child element XML (e.g., `<session
 
 ### ~~TODO-003: Framing mismatch detection (device says 1.1, sends EOM)~~ DONE
 **Completed:** 2026-03-19. ChunkedFramer detects EOM-framed data (XML start, `<!--` comments, `]]>]]>` delimiter) and returns `FramingError::Mismatch` with actionable message. 5 unit tests added.
+
+### ~~RFC 7589 — NETCONF over TLS~~ DONE
+**Completed:** 2026-07-17. Implemented TLS transport (RFC 7589) via `TlsTransport` in src/transport/tls.rs using `rustls` backend. Supports both server-only and mutual TLS authentication. Exposed via `TlsClientBuilder` and `TlsConfig`, behind the `tls` feature flag. Re-exported in src/lib.rs.
+
+### ~~RFC 5277 — NETCONF Event Notifications~~ DONE
+**Completed:** 2026-07-17. Implemented `create-subscription` RPC and async notification stream handling (RFC 5277) in src/notification.rs. Session tracks subscription state and buffers interleaved notifications during RPC exchanges. Client methods: `create_subscription()`, `drain_notifications()`, `recv_notification()`.
