@@ -19,7 +19,7 @@ tls = ["rustls", "tokio-rustls", "webpki-roots"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-russh = { version = "0.61", default-features = false, features = ["flate2", "aws-lc-rs"] }
+russh = { version = "0.62", default-features = false, features = ["flate2", "aws-lc-rs"] }
 aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
 base64ct = { version = "1", features = ["std"] }
 quick-xml = "0.41"
