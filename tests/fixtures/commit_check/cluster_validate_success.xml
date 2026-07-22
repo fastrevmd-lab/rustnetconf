@@ -1,0 +1,6 @@
+<nc:rpc-reply  xmlns:junos="http://xml.juniper.net/junos/25.4R1.12/junos" xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="101">
+<routing-engine junos:style="show-name">
+<name>node1</name>
+<commit-check-success/>
+<nc:ok/>
+</nc:rpc-reply>
