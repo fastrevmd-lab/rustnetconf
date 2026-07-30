@@ -48,7 +48,10 @@ pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply,
             let Some(repaired) = repair::repair_cluster_commit_check(xml) else {
                 return Err(original);
             };
-            parser::parse_strict(&repaired, expected_message_id)
+            match parser::parse_strict(&repaired, expected_message_id) {
+                Err(RpcError::ParseError(_)) => Err(original),
+                result => result,
+            }
         }
         Err(other) => Err(other),
     }
@@ -590,6 +593,50 @@ mod tests {
   </multi-routing-engine-results>
 </rpc-reply>"#;
         assert!(matches!(parse_rpc_reply(xml, "1"), Ok(RpcReply::Ok)));
+    }
+
+    #[test]
+    fn repaired_semantic_failure_returns_original_structural_error() {
+        let xml = r#"<rpc-reply message-id="1">
+  <multi-routing-engine-results>
+    <routing-engine><commit-check-success/><ok/>
+  </multi-routing-engine-results>
+  <rpc-error>
+    <error-type>application</error-type>
+  </rpc-error>
+</rpc-reply>"#;
+        let original = match parser::parse_strict(xml, "1") {
+            Err(RpcError::ParseError(message)) => {
+                assert!(
+                    message.starts_with("XML parse error:"),
+                    "fixture must fail strict parsing structurally: {message}"
+                );
+                message
+            }
+            other => panic!("fixture must produce a strict ParseError, got {other:?}"),
+        };
+
+        let returned = match parse_rpc_reply(xml, "1") {
+            Err(RpcError::ParseError(message)) => message,
+            other => panic!("expected ParseError, got {other:?}"),
+        };
+
+        assert_eq!(returned, original);
+    }
+
+    #[test]
+    fn repaired_reply_keeps_typed_message_id_mismatch() {
+        let xml = r#"<rpc-reply message-id="actual">
+  <routing-engine><commit-check-success/><ok/>
+</rpc-reply>"#;
+
+        assert!(matches!(
+            parse_rpc_reply(xml, "expected"),
+            Err(RpcError::MessageIdMismatch {
+                expected,
+                actual
+            }) if expected == "expected" && actual == "actual"
+        ));
     }
 
     #[test]
