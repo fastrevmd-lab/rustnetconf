@@ -7,9 +7,9 @@ use quick_xml::Reader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnvelopeState {
-    BeforeReply,
-    InsideReply,
-    AfterReply,
+    Before,
+    Inside,
+    After,
 }
 
 #[derive(Debug)]
@@ -73,7 +73,7 @@ struct RpcErrorBuilder {
     info: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct ErrorState {
     builder: RpcErrorBuilder,
     field: Option<ErrorField>,
@@ -81,19 +81,6 @@ struct ErrorState {
     info_capture: Option<FragmentCapture>,
     info_depth: usize,
     info_seen: bool,
-}
-
-impl Default for ErrorState {
-    fn default() -> Self {
-        Self {
-            builder: RpcErrorBuilder::default(),
-            field: None,
-            field_text: String::new(),
-            info_capture: None,
-            info_depth: 0,
-            info_seen: false,
-        }
-    }
 }
 
 struct ReplyParser<'a> {
@@ -110,7 +97,7 @@ impl<'a> ReplyParser<'a> {
     fn new(expected_message_id: &'a str) -> Self {
         Self {
             expected_message_id,
-            envelope: EnvelopeState::BeforeReply,
+            envelope: EnvelopeState::Before,
             message_id: None,
             payload: PayloadState::None,
             protocol_ok: false,
@@ -177,21 +164,19 @@ impl ReplyParser<'_> {
         }
 
         match (self.envelope, local_name(tag.name().as_ref())) {
-            (EnvelopeState::BeforeReply, b"rpc-reply") => self.open_reply(tag),
-            (EnvelopeState::InsideReply, b"rpc-reply") => {
+            (EnvelopeState::Before, b"rpc-reply") => self.open_reply(tag),
+            (EnvelopeState::Inside, b"rpc-reply") => {
                 Err(parse_error("nested <rpc-reply> is not allowed"))
             }
-            (EnvelopeState::InsideReply, b"data") => self.open_data(),
-            (EnvelopeState::InsideReply, b"rpc-error") => {
+            (EnvelopeState::Inside, b"data") => self.open_data(),
+            (EnvelopeState::Inside, b"rpc-error") => {
                 self.current_error = Some(ErrorState::default());
                 Ok(())
             }
-            (EnvelopeState::InsideReply, b"ok") => {
-                Err(parse_error("<ok> must be an empty element"))
-            }
-            (EnvelopeState::InsideReply, _) => self.open_direct(tag),
-            (EnvelopeState::AfterReply, _) => Err(parse_error("element found after </rpc-reply>")),
-            (EnvelopeState::BeforeReply, _) => Err(parse_error("root element is not <rpc-reply>")),
+            (EnvelopeState::Inside, b"ok") => Err(parse_error("<ok> must be an empty element")),
+            (EnvelopeState::Inside, _) => self.open_direct(tag),
+            (EnvelopeState::After, _) => Err(parse_error("element found after </rpc-reply>")),
+            (EnvelopeState::Before, _) => Err(parse_error("root element is not <rpc-reply>")),
         }
     }
 
@@ -217,19 +202,19 @@ impl ReplyParser<'_> {
         }
 
         match (self.envelope, local_name(tag.name().as_ref())) {
-            (EnvelopeState::BeforeReply, b"rpc-reply") => {
+            (EnvelopeState::Before, b"rpc-reply") => {
                 self.open_reply(tag)?;
-                self.envelope = EnvelopeState::AfterReply;
+                self.envelope = EnvelopeState::After;
                 Ok(())
             }
-            (EnvelopeState::InsideReply, b"ok") => self.set_ok(),
-            (EnvelopeState::InsideReply, b"data") => self.set_empty_data(),
-            (EnvelopeState::InsideReply, b"rpc-error" | b"rpc-reply") => {
+            (EnvelopeState::Inside, b"ok") => self.set_ok(),
+            (EnvelopeState::Inside, b"data") => self.set_empty_data(),
+            (EnvelopeState::Inside, b"rpc-error" | b"rpc-reply") => {
                 Err(parse_error("invalid empty NETCONF reply element"))
             }
-            (EnvelopeState::InsideReply, _) => self.capture_direct_empty(tag),
-            (EnvelopeState::AfterReply, _) => Err(parse_error("element found after </rpc-reply>")),
-            (EnvelopeState::BeforeReply, _) => Err(parse_error("root element is not <rpc-reply>")),
+            (EnvelopeState::Inside, _) => self.capture_direct_empty(tag),
+            (EnvelopeState::After, _) => Err(parse_error("element found after </rpc-reply>")),
+            (EnvelopeState::Before, _) => Err(parse_error("root element is not <rpc-reply>")),
         }
     }
 
@@ -520,7 +505,7 @@ impl ReplyParser<'_> {
     }
 
     fn open_reply(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
-        if self.envelope != EnvelopeState::BeforeReply {
+        if self.envelope != EnvelopeState::Before {
             return Err(parse_error("multiple <rpc-reply> envelopes"));
         }
 
@@ -537,7 +522,7 @@ impl ReplyParser<'_> {
         }
 
         self.message_id = message_id;
-        self.envelope = EnvelopeState::InsideReply;
+        self.envelope = EnvelopeState::Inside;
         Ok(())
     }
 
@@ -658,15 +643,15 @@ impl ReplyParser<'_> {
         if name != b"rpc-reply" {
             return Err(parse_error("unexpected end directly inside rpc-reply"));
         }
-        if self.envelope != EnvelopeState::InsideReply {
+        if self.envelope != EnvelopeState::Inside {
             return Err(parse_error("rpc-reply closed outside its envelope"));
         }
-        self.envelope = EnvelopeState::AfterReply;
+        self.envelope = EnvelopeState::After;
         Ok(())
     }
 
     fn finish(self) -> Result<RpcReply, RpcError> {
-        if self.envelope != EnvelopeState::AfterReply {
+        if self.envelope != EnvelopeState::After {
             return Err(parse_error("RPC reply envelope did not close"));
         }
         if self.current_error.is_some() {
