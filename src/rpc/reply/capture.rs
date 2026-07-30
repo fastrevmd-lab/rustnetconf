@@ -1,16 +1,30 @@
 use crate::error::RpcError;
 use crate::rpc::operations::{escape_xml_attr, escape_xml_text};
 use quick_xml::events::{BytesCData, BytesEnd, BytesRef, BytesStart, BytesText};
+use std::collections::{BTreeMap, HashSet};
 use std::str;
+
+pub(super) type NamespaceBindings = BTreeMap<String, String>;
 
 #[derive(Debug, Default)]
 pub(super) struct FragmentCapture {
     xml: String,
+    depth: usize,
+    inherited_namespaces: NamespaceBindings,
 }
 
 impl FragmentCapture {
+    pub(super) fn with_namespaces(inherited_namespaces: NamespaceBindings) -> Self {
+        Self {
+            inherited_namespaces,
+            ..Self::default()
+        }
+    }
+
     pub(super) fn start(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
-        self.write_start_like(tag, false)
+        self.write_start_like(tag, false)?;
+        self.depth += 1;
+        Ok(())
     }
 
     pub(super) fn empty(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
@@ -18,12 +32,18 @@ impl FragmentCapture {
     }
 
     pub(super) fn end(&mut self, tag: &BytesEnd<'_>) -> Result<(), RpcError> {
+        if self.depth == 0 {
+            return Err(parse_error(
+                "captured XML fragment contains an unmatched end tag".to_string(),
+            ));
+        }
         let binding = tag.name();
         let name = str::from_utf8(binding.as_ref())
             .map_err(|error| parse_error(format!("invalid end-tag name: {error}")))?;
         self.xml.push_str("</");
         self.xml.push_str(name);
         self.xml.push('>');
+        self.depth -= 1;
         Ok(())
     }
 
@@ -47,6 +67,9 @@ impl FragmentCapture {
         let decoded = entity
             .decode()
             .map_err(|error| parse_error(format!("invalid entity encoding: {error}")))?;
+        crate::xml_entity::resolve_entity_ref(entity)
+            .filter(|value| value.chars().all(is_valid_xml_char))
+            .ok_or_else(|| parse_error("invalid entity reference".to_string()))?;
         self.xml.push('&');
         self.xml.push_str(&decoded);
         self.xml.push(';');
@@ -61,18 +84,43 @@ impl FragmentCapture {
         let binding = tag.name();
         let name = str::from_utf8(binding.as_ref())
             .map_err(|error| parse_error(format!("invalid start-tag name: {error}")))?;
-        self.xml.push('<');
-        self.xml.push_str(name);
-
+        let mut attributes = Vec::new();
+        let mut explicit_namespaces = HashSet::new();
         for attribute in tag.attributes().with_checks(true) {
             let attribute = attribute
                 .map_err(|error| parse_error(format!("invalid XML attribute: {error}")))?;
             let key = str::from_utf8(attribute.key.as_ref())
                 .map_err(|error| parse_error(format!("invalid attribute name: {error}")))?;
             let value = decode_attribute(attribute.value.as_ref())?;
+            if let Some(prefix) = namespace_prefix(key) {
+                explicit_namespaces.insert(prefix.to_string());
+            }
+            attributes.push((key.to_string(), value));
+        }
 
+        self.xml.push('<');
+        self.xml.push_str(name);
+
+        if self.depth == 0 {
+            for (prefix, value) in &self.inherited_namespaces {
+                if explicit_namespaces.contains(prefix) {
+                    continue;
+                }
+                self.xml.push(' ');
+                self.xml.push_str("xmlns");
+                if !prefix.is_empty() {
+                    self.xml.push(':');
+                    self.xml.push_str(prefix);
+                }
+                self.xml.push_str("=\"");
+                self.xml.push_str(&escape_xml_attr(value));
+                self.xml.push('"');
+            }
+        }
+
+        for (key, value) in attributes {
             self.xml.push(' ');
-            self.xml.push_str(key);
+            self.xml.push_str(&key);
             self.xml.push_str("=\"");
             self.xml.push_str(&escape_xml_attr(&value));
             self.xml.push('"');
@@ -85,6 +133,39 @@ impl FragmentCapture {
         }
         Ok(())
     }
+}
+
+pub(super) fn namespace_declarations(tag: &BytesStart<'_>) -> Result<NamespaceBindings, RpcError> {
+    let mut declarations = NamespaceBindings::new();
+    for attribute in tag.attributes().with_checks(true) {
+        let attribute =
+            attribute.map_err(|error| parse_error(format!("invalid XML attribute: {error}")))?;
+        let key = str::from_utf8(attribute.key.as_ref())
+            .map_err(|error| parse_error(format!("invalid attribute name: {error}")))?;
+        let Some(prefix) = namespace_prefix(key) else {
+            continue;
+        };
+        declarations.insert(
+            prefix.to_string(),
+            decode_attribute(attribute.value.as_ref())?,
+        );
+    }
+    Ok(declarations)
+}
+
+fn namespace_prefix(attribute_name: &str) -> Option<&str> {
+    if attribute_name == "xmlns" {
+        Some("")
+    } else {
+        attribute_name.strip_prefix("xmlns:")
+    }
+}
+
+fn is_valid_xml_char(value: char) -> bool {
+    matches!(
+        value as u32,
+        0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
+    )
 }
 
 pub(super) fn decode_attribute(raw: &[u8]) -> Result<String, RpcError> {

@@ -82,7 +82,7 @@ mod tests {
         match result {
             RpcReply::Data(data) => {
                 assert!(data.contains("ge-0/0/0"));
-                assert!(data.contains("<configuration>"));
+                assert!(data.contains("<configuration"));
             }
             _ => panic!("expected Data reply"),
         }
@@ -158,7 +158,7 @@ mod tests {
         let result = parse_rpc_reply(xml, "7").unwrap();
         match result {
             RpcReply::Data(data) => {
-                assert!(data.contains("<software-information>"));
+                assert!(data.contains("<software-information"));
                 assert!(data.contains("vsrx1"));
                 assert!(data.contains("21.4R3.15"));
             }
@@ -181,7 +181,7 @@ mod tests {
         let result = parse_rpc_reply(xml, "8").unwrap();
         match result {
             RpcReply::Data(data) => {
-                assert!(data.contains("<multi-routing-engine-results>"));
+                assert!(data.contains("<multi-routing-engine-results"));
                 assert!(data.contains("node0"));
             }
             _ => panic!("expected Data reply for multi-RE response"),
@@ -224,7 +224,7 @@ mod tests {
         let result = parse_rpc_reply(xml, "11").unwrap();
         match result {
             RpcReply::DataWithWarnings(data, warnings) => {
-                assert!(data.contains("<configuration>"));
+                assert!(data.contains("<configuration"));
                 assert_eq!(warnings.len(), 1);
                 assert!(warnings[0].message.contains("some warning"));
             }
@@ -466,7 +466,7 @@ mod tests {
         match result {
             RpcReply::Data(data) => {
                 assert!(
-                    data.contains("<software-information/>"),
+                    data.contains("<software-information"),
                     "empty element must be captured: {data}"
                 );
             }

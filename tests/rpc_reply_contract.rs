@@ -51,8 +51,10 @@ fn public_direct_payload_aggregates_siblings_contract() {
         panic!("expected Data");
     };
 
-    assert!(data.contains("<output>first</output>"));
-    assert!(data.contains("<warnings><warning>second</warning></warnings>"));
+    assert!(data.contains("<output"));
+    assert!(data.contains(">first</output>"));
+    assert!(data.contains("<warnings"));
+    assert!(data.contains("<warning>second</warning></warnings>"));
 }
 
 #[test]
