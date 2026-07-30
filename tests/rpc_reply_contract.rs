@@ -87,3 +87,14 @@ fn public_empty_reply_contract() {
     let reply = parse_rpc_reply(xml, "45").expect("valid empty reply");
     assert!(matches!(reply, RpcReply::Ok));
 }
+
+#[test]
+fn public_reply_type_paths_remain_available() {
+    fn accepts_reply(_: rustnetconf::rpc::RpcReply) {}
+    fn accepts_info(_: rustnetconf::rpc::RpcErrorInfo) {}
+    fn accepts_root_info(_: rustnetconf::RpcErrorInfo) {}
+
+    let _ = accepts_reply as fn(rustnetconf::rpc::RpcReply);
+    let _ = accepts_info as fn(rustnetconf::rpc::RpcErrorInfo);
+    let _ = accepts_root_info as fn(rustnetconf::RpcErrorInfo);
+}
