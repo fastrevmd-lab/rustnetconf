@@ -156,6 +156,12 @@ impl ReplyParser<'_> {
     fn start(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
         if self.current_error.is_none()
             && self.in_open_direct_payload()
+            && local_name(tag.name().as_ref()) == b"rpc-reply"
+        {
+            return Err(parse_error("nested <rpc-reply> is not allowed"));
+        }
+        if self.current_error.is_none()
+            && self.in_open_direct_payload()
             && local_name(tag.name().as_ref()) == b"rpc-error"
         {
             self.current_error = Some(ErrorState::default());
@@ -188,6 +194,12 @@ impl ReplyParser<'_> {
     }
 
     fn empty(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
+        if self.current_error.is_none()
+            && self.in_open_direct_payload()
+            && local_name(tag.name().as_ref()) == b"rpc-reply"
+        {
+            return Err(parse_error("nested <rpc-reply> is not allowed"));
+        }
         if self.current_error.is_none()
             && self.in_open_direct_payload()
             && local_name(tag.name().as_ref()) == b"ok"

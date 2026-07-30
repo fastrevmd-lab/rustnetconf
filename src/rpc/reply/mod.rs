@@ -2,7 +2,6 @@ mod capture;
 mod parser;
 
 use crate::error::RpcError;
-use crate::rpc::operations::escape_xml_text;
 use crate::types::{ErrorSeverity, ErrorTag, RpcErrorType};
 
 /// A parsed NETCONF `<rpc-reply>` response.
@@ -28,18 +27,6 @@ pub struct RpcErrorInfo {
     pub path: Option<String>,
     pub message: String,
     pub info: Option<String>,
-}
-
-/// Re-escape a raw attribute value for emission inside double quotes.
-///
-/// The raw value keeps its original entity escaping but may contain a raw
-/// `"` (when the source used single quotes). Decode entities best-effort,
-/// then escape fully so the reconstructed attribute is always well-formed.
-fn reescape_attr_value(raw: &str) -> String {
-    let decoded = quick_xml::escape::unescape(raw)
-        .map(|cow| cow.into_owned())
-        .unwrap_or_else(|_| raw.to_string());
-    crate::rpc::operations::escape_xml_attr(&decoded)
 }
 
 // Strip any namespace prefix from a qualified element name, returning the
@@ -201,309 +188,6 @@ fn repair_unclosed_routing_engine(xml: &str) -> Option<String> {
     String::from_utf8(writer.into_inner()).ok()
 }
 
-// Parse an `<rpc-reply>` XML response with strict well-formedness checking.
-//
-// This is the original parser — it requires perfectly well-formed XML (matching
-// end tags, proper nesting). Chassis-cluster Junos replies violate this, so the
-// public `parse_rpc_reply` wraps this with a repair step on parse failures.
-fn parse_rpc_reply_strict(xml: &str, expected_message_id: &str) -> Result<RpcReply, RpcError> {
-    use crate::xml_entity::{raw_entity_ref, resolve_entity_ref};
-    use quick_xml::events::Event;
-    use quick_xml::Reader;
-
-    let mut reader = Reader::from_str(xml);
-    let mut buf = Vec::new();
-
-    let mut found_message_id: Option<String> = None;
-    let mut found_ok = false;
-    let mut data_content: Option<String> = None;
-    let mut errors: Vec<RpcErrorInfo> = Vec::new();
-
-    // State for parsing rpc-error
-    let mut in_rpc_error = false;
-    let mut in_rpc_reply = false;
-    let mut in_data = false;
-    let mut data_depth: u32 = 0;
-    let mut data_xml = String::new();
-
-    // rpc-error field tracking
-    let mut current_error: Option<RpcErrorBuilder> = None;
-    let mut current_field: Option<ErrorField> = None;
-    // Element text accumulates across events: quick-xml 0.38+ splits text
-    // around entity references (`GeneralRef`), so a field's value may span
-    // several Text/GeneralRef events before the closing tag.
-    let mut field_text = String::new();
-    // error-info can contain child elements — accumulate inner XML
-    let mut in_error_info = false;
-    let mut _error_info_depth: u32 = 0;
-    let mut error_info_xml = String::new();
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref tag)) => {
-                let local = tag.local_name();
-                let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
-
-                match name {
-                    "rpc-reply" => {
-                        in_rpc_reply = true;
-                        // Extract message-id attribute
-                        for attr in tag.attributes().flatten() {
-                            if attr.key.local_name().as_ref() == b"message-id" {
-                                found_message_id =
-                                    Some(String::from_utf8_lossy(&attr.value).to_string());
-                            }
-                        }
-                    }
-                    "data" if in_rpc_reply && !in_rpc_error => {
-                        in_data = true;
-                        data_depth = 1;
-                        data_xml.clear();
-                    }
-                    "rpc-error" if in_rpc_reply => {
-                        in_rpc_error = true;
-                        current_error = Some(RpcErrorBuilder::new());
-                    }
-                    _ if in_data => {
-                        data_depth += 1;
-                        // Reconstruct the inner XML, keeping the qualified
-                        // name so namespace prefixes survive.
-                        let tag_name = tag.name();
-                        let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
-                        data_xml.push('<');
-                        data_xml.push_str(qname);
-                        for attr in tag.attributes().flatten() {
-                            data_xml.push(' ');
-                            data_xml.push_str(std::str::from_utf8(attr.key.as_ref()).unwrap_or(""));
-                            data_xml.push_str("=\"");
-                            data_xml.push_str(&reescape_attr_value(&String::from_utf8_lossy(
-                                &attr.value,
-                            )));
-                            data_xml.push('"');
-                        }
-                        data_xml.push('>');
-                    }
-                    _ if in_error_info => {
-                        // Inside <error-info>: accumulate child elements as XML
-                        _error_info_depth += 1;
-                        let tag_name = tag.name();
-                        let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
-                        error_info_xml.push('<');
-                        error_info_xml.push_str(qname);
-                        error_info_xml.push('>');
-                    }
-                    _ if in_rpc_error => {
-                        if name == "error-info" {
-                            in_error_info = true;
-                            _error_info_depth = 1;
-                            error_info_xml.clear();
-                        } else {
-                            current_field = ErrorField::from_name(name);
-                            field_text.clear();
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            Ok(Event::Empty(ref tag)) => {
-                let local = tag.local_name();
-                let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
-
-                if name == "ok" && in_rpc_reply {
-                    found_ok = true;
-                } else if in_data {
-                    let tag_name = tag.name();
-                    let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
-                    data_xml.push('<');
-                    data_xml.push_str(qname);
-                    for attr in tag.attributes().flatten() {
-                        data_xml.push(' ');
-                        data_xml.push_str(std::str::from_utf8(attr.key.as_ref()).unwrap_or(""));
-                        data_xml.push_str("=\"");
-                        data_xml
-                            .push_str(&reescape_attr_value(&String::from_utf8_lossy(&attr.value)));
-                        data_xml.push('"');
-                    }
-                    data_xml.push_str("/>");
-                } else if in_error_info {
-                    let tag_name = tag.name();
-                    let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
-                    error_info_xml.push('<');
-                    error_info_xml.push_str(qname);
-                    error_info_xml.push_str("/>");
-                }
-            }
-            Ok(Event::CData(ref cdata)) => {
-                // CDATA is ordinary character data; re-escape it as text when
-                // reconstructing XML, capture it raw for field values.
-                let value = cdata.decode().unwrap_or_default();
-                if in_data {
-                    data_xml.push_str(&escape_xml_text(&value));
-                } else if in_error_info {
-                    error_info_xml.push_str(&escape_xml_text(&value));
-                } else if in_rpc_error && current_field.is_some() {
-                    field_text.push_str(&value);
-                }
-            }
-            Ok(Event::Text(ref text)) => {
-                // Text events never contain entity refs (those arrive as
-                // GeneralRef), so decoding the encoding is all that's needed.
-                let value = text.decode().unwrap_or_default();
-
-                if in_data {
-                    // Re-escape any raw special chars so the reconstructed
-                    // XML stays well-formed.
-                    data_xml.push_str(&escape_xml_text(&value));
-                } else if in_error_info {
-                    error_info_xml.push_str(&escape_xml_text(&value));
-                } else if in_rpc_error && current_field.is_some() {
-                    field_text.push_str(&value);
-                }
-            }
-            Ok(Event::GeneralRef(ref entity)) => {
-                if in_data {
-                    // Keep the reference escaped verbatim in reconstructed XML.
-                    data_xml.push_str(&raw_entity_ref(entity));
-                } else if in_error_info {
-                    error_info_xml.push_str(&raw_entity_ref(entity));
-                } else if in_rpc_error && current_field.is_some() {
-                    if let Some(resolved) = resolve_entity_ref(entity) {
-                        field_text.push_str(&resolved);
-                    }
-                }
-            }
-            Ok(Event::End(ref tag)) => {
-                let local = tag.local_name();
-                let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
-
-                match name {
-                    "rpc-reply" => {
-                        in_rpc_reply = false;
-                    }
-                    "data" if in_data && data_depth == 1 => {
-                        in_data = false;
-                        data_content = Some(data_xml.clone());
-                    }
-                    "rpc-error" => {
-                        in_rpc_error = false;
-                        if let Some(builder) = current_error.take() {
-                            errors.push(builder.build());
-                        }
-                    }
-                    _ if in_data => {
-                        data_depth -= 1;
-                        let tag_name = tag.name();
-                        let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
-                        data_xml.push_str("</");
-                        data_xml.push_str(qname);
-                        data_xml.push('>');
-                    }
-                    "error-info" if in_error_info => {
-                        in_error_info = false;
-                        if let Some(ref mut builder) = current_error {
-                            let trimmed = error_info_xml.trim().to_string();
-                            if !trimmed.is_empty() {
-                                builder.info = Some(trimmed);
-                            }
-                        }
-                    }
-                    _ if in_error_info => {
-                        _error_info_depth -= 1;
-                        let tag_name = tag.name();
-                        let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
-                        error_info_xml.push_str("</");
-                        error_info_xml.push_str(qname);
-                        error_info_xml.push('>');
-                    }
-                    _ if in_rpc_error => {
-                        // Field text is complete at the closing tag; flush the
-                        // accumulated value into the builder.
-                        if let (Some(ref mut builder), Some(field)) =
-                            (&mut current_error, current_field.take())
-                        {
-                            builder.set_field(&field, &field_text);
-                        }
-                        field_text.clear();
-                    }
-                    _ => {}
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(e) => return Err(RpcError::ParseError(format!("XML parse error: {e}"))),
-            _ => {}
-        }
-        buf.clear();
-    }
-
-    // Check message-id
-    if let Some(ref msg_id) = found_message_id {
-        if msg_id != expected_message_id {
-            return Err(RpcError::MessageIdMismatch {
-                expected: expected_message_id.to_string(),
-                actual: msg_id.clone(),
-            });
-        }
-    }
-
-    // Partition errors into hard errors and warnings
-    let (hard_errors, warnings): (Vec<_>, Vec<_>) = errors
-        .into_iter()
-        .partition(|e| e.severity != Some(ErrorSeverity::Warning));
-
-    // Hard errors always fail the RPC
-    if let Some(first_error) = hard_errors.into_iter().next() {
-        return Err(RpcError::ServerError {
-            error_type: first_error.error_type,
-            tag: first_error.tag,
-            severity: first_error.severity,
-            app_tag: first_error.app_tag,
-            path: first_error.path,
-            message: first_error.message,
-            info: first_error.info,
-        });
-    }
-
-    // Log warnings so they're visible even when the caller ignores them
-    if !warnings.is_empty() {
-        for w in &warnings {
-            tracing::warn!(tag = ?w.tag, message = %w.message, "device returned RPC warning");
-        }
-    }
-
-    // Return data or ok, attaching any warnings
-    if let Some(data) = data_content {
-        if warnings.is_empty() {
-            return Ok(RpcReply::Data(data));
-        }
-        return Ok(RpcReply::DataWithWarnings(data, warnings));
-    }
-
-    if found_ok {
-        if warnings.is_empty() {
-            return Ok(RpcReply::Ok);
-        }
-        return Ok(RpcReply::OkWithWarnings(warnings));
-    }
-
-    // Junos custom RPCs return content directly under <rpc-reply> without a
-    // <data> wrapper (e.g. <software-information>, <route-engine-information>).
-    // Re-parse to extract any non-error, non-ok child elements as data.
-    if in_rpc_reply || found_message_id.is_some() {
-        if let Some(inner) = extract_rpc_reply_inner_content(xml) {
-            return Ok(RpcReply::Data(inner));
-        }
-    }
-
-    // An empty <rpc-reply> with no errors is a success (RFC 6241 §4.3).
-    if in_rpc_reply || found_message_id.is_some() {
-        return Ok(RpcReply::Ok);
-    }
-
-    Err(RpcError::ParseError(
-        "rpc-reply contained no <ok/>, <data>, or <rpc-error>".to_string(),
-    ))
-}
-
 /// Parse an `<rpc-reply>` XML response.
 ///
 /// Returns `Ok(RpcReply)` for successful responses, or `Err(RpcError)` if
@@ -517,233 +201,20 @@ fn parse_rpc_reply_strict(xml: &str, expected_message_id: &str) -> Result<RpcRep
 /// are unaffected (no repair attempt unless strict parsing fails).
 pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply, RpcError> {
     // Try strict parse first (the common well-formed path).
-    match parse_rpc_reply_strict(xml, expected_message_id) {
+    match parser::parse_strict(xml, expected_message_id) {
         Ok(reply) => Ok(reply),
         Err(RpcError::ParseError(ref e)) if xml.contains("routing-engine") => {
             // Looks like a chassis-cluster reply with unclosed routing-engine.
             // Attempt repair.
             if let Some(repaired) = repair_unclosed_routing_engine(xml) {
                 // Re-parse the repaired XML.
-                parse_rpc_reply_strict(&repaired, expected_message_id)
+                parser::parse_strict(&repaired, expected_message_id)
             } else {
                 // Repair failed; return the original parse error.
                 Err(RpcError::ParseError(e.clone()))
             }
         }
         Err(other) => Err(other),
-    }
-}
-
-/// Fields within an `<rpc-error>` element.
-#[allow(clippy::enum_variant_names)]
-enum ErrorField {
-    ErrorType,
-    ErrorTag,
-    ErrorSeverity,
-    ErrorAppTag,
-    ErrorPath,
-    ErrorMessage,
-    ErrorInfo,
-}
-
-impl ErrorField {
-    fn from_name(name: &str) -> Option<Self> {
-        match name {
-            "error-type" => Some(ErrorField::ErrorType),
-            "error-tag" => Some(ErrorField::ErrorTag),
-            "error-severity" => Some(ErrorField::ErrorSeverity),
-            "error-app-tag" => Some(ErrorField::ErrorAppTag),
-            "error-path" => Some(ErrorField::ErrorPath),
-            "error-message" => Some(ErrorField::ErrorMessage),
-            "error-info" => Some(ErrorField::ErrorInfo),
-            _ => None,
-        }
-    }
-}
-
-/// Builder for constructing RpcErrorInfo from parsed XML fields.
-struct RpcErrorBuilder {
-    error_type: Option<RpcErrorType>,
-    tag: Option<ErrorTag>,
-    severity: Option<ErrorSeverity>,
-    app_tag: Option<String>,
-    path: Option<String>,
-    message: Option<String>,
-    info: Option<String>,
-}
-
-impl RpcErrorBuilder {
-    fn new() -> Self {
-        Self {
-            error_type: None,
-            tag: None,
-            severity: None,
-            app_tag: None,
-            path: None,
-            message: None,
-            info: None,
-        }
-    }
-
-    fn set_field(&mut self, field: &ErrorField, value: &str) {
-        match field {
-            ErrorField::ErrorType => {
-                self.error_type = Some(match value {
-                    "transport" => RpcErrorType::Transport,
-                    "rpc" => RpcErrorType::Rpc,
-                    "protocol" => RpcErrorType::Protocol,
-                    "application" => RpcErrorType::Application,
-                    _ => RpcErrorType::Application,
-                });
-            }
-            ErrorField::ErrorTag => {
-                self.tag = Some(value.parse().unwrap_or(ErrorTag::Other(value.to_string())));
-            }
-            ErrorField::ErrorSeverity => {
-                self.severity = Some(match value {
-                    "warning" => ErrorSeverity::Warning,
-                    _ => ErrorSeverity::Error,
-                });
-            }
-            ErrorField::ErrorAppTag => {
-                self.app_tag = Some(value.to_string());
-            }
-            ErrorField::ErrorPath => {
-                self.path = Some(value.to_string());
-            }
-            ErrorField::ErrorMessage => {
-                self.message = Some(value.to_string());
-            }
-            ErrorField::ErrorInfo => {
-                self.info = Some(value.to_string());
-            }
-        }
-    }
-
-    fn build(self) -> RpcErrorInfo {
-        RpcErrorInfo {
-            error_type: self.error_type,
-            tag: self.tag.unwrap_or(ErrorTag::OperationFailed),
-            severity: self.severity,
-            app_tag: self.app_tag,
-            path: self.path,
-            message: self.message.unwrap_or_else(|| "unknown error".to_string()),
-            info: self.info,
-        }
-    }
-}
-
-/// Extract inner content from `<rpc-reply>` for Junos custom RPC responses.
-///
-/// Junos custom RPCs (e.g., `<get-software-information>`) return their data
-/// directly under `<rpc-reply>` without a `<data>` wrapper. This function
-/// extracts all child element content from the reply.
-fn extract_rpc_reply_inner_content(xml: &str) -> Option<String> {
-    use crate::xml_entity::raw_entity_ref;
-    use quick_xml::events::Event;
-    use quick_xml::Reader;
-
-    let mut reader = Reader::from_str(xml);
-    let mut buf = Vec::new();
-
-    let mut in_rpc_reply = false;
-    let mut depth: u32 = 0;
-    let mut content = String::new();
-    let mut has_content = false;
-
-    loop {
-        match reader.read_event_into(&mut buf) {
-            Ok(Event::Start(ref tag)) => {
-                let local = tag.local_name();
-                let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
-
-                if name == "rpc-reply" {
-                    in_rpc_reply = true;
-                } else if in_rpc_reply && (depth > 0 || (name != "ok" && name != "rpc-error")) {
-                    if depth == 0 {
-                        has_content = true;
-                    }
-                    depth += 1;
-                    let tag_name = tag.name();
-                    let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
-                    content.push('<');
-                    content.push_str(qname);
-                    for attr in tag.attributes().flatten() {
-                        content.push(' ');
-                        content.push_str(std::str::from_utf8(attr.key.as_ref()).unwrap_or(""));
-                        content.push_str("=\"");
-                        content
-                            .push_str(&reescape_attr_value(&String::from_utf8_lossy(&attr.value)));
-                        content.push('"');
-                    }
-                    content.push('>');
-                }
-            }
-            Ok(Event::Empty(ref tag)) if in_rpc_reply => {
-                let local = tag.local_name();
-                let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
-                // A top-level empty element (other than <ok/> / <rpc-error/>)
-                // is still reply content.
-                if depth > 0 || (name != "ok" && name != "rpc-error") {
-                    if depth == 0 {
-                        has_content = true;
-                    }
-                    let tag_name = tag.name();
-                    let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
-                    content.push('<');
-                    content.push_str(qname);
-                    for attr in tag.attributes().flatten() {
-                        content.push(' ');
-                        content.push_str(std::str::from_utf8(attr.key.as_ref()).unwrap_or(""));
-                        content.push_str("=\"");
-                        content
-                            .push_str(&reescape_attr_value(&String::from_utf8_lossy(&attr.value)));
-                        content.push('"');
-                    }
-                    content.push_str("/>");
-                }
-            }
-            Ok(Event::Text(ref text)) if in_rpc_reply && depth > 0 => {
-                let value = text.decode().unwrap_or_default();
-                // Re-escape any raw special chars so the reconstructed XML
-                // stays well-formed.
-                content.push_str(&escape_xml_text(&value));
-            }
-            Ok(Event::GeneralRef(ref entity)) if in_rpc_reply && depth > 0 => {
-                // Keep entity references escaped verbatim.
-                content.push_str(&raw_entity_ref(entity));
-            }
-            Ok(Event::CData(ref cdata)) if in_rpc_reply && depth > 0 => {
-                // CDATA is character data; re-escape it as ordinary text.
-                let value = cdata.decode().unwrap_or_default();
-                content.push_str(&escape_xml_text(&value));
-            }
-            Ok(Event::End(ref tag)) => {
-                let local = tag.local_name();
-                let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
-                if name == "rpc-reply" {
-                    break;
-                }
-                if in_rpc_reply && depth > 0 {
-                    depth -= 1;
-                    let tag_name = tag.name();
-                    let qname = std::str::from_utf8(tag_name.as_ref()).unwrap_or(name);
-                    content.push_str("</");
-                    content.push_str(qname);
-                    content.push('>');
-                }
-            }
-            Ok(Event::Eof) => break,
-            Err(_) => return None,
-            _ => {}
-        }
-        buf.clear();
-    }
-
-    if has_content {
-        Some(content)
-    } else {
-        None
     }
 }
 
@@ -1256,5 +727,70 @@ mod tests {
             result.is_err(),
             "truncated reply must not be repaired into success, got {result:?}"
         );
+    }
+
+    #[test]
+    fn rejects_ambiguous_envelopes_and_payloads() {
+        let cases = [
+            ("missing message-id", r#"<rpc-reply><ok/></rpc-reply>"#),
+            (
+                "duplicate message-id",
+                r#"<rpc-reply message-id="1" message-id="1"><ok/></rpc-reply>"#,
+            ),
+            (
+                "malformed message-id",
+                r#"<rpc-reply message-id=1><ok/></rpc-reply>"#,
+            ),
+            (
+                "duplicate data",
+                r#"<rpc-reply message-id="1"><data/><data/></rpc-reply>"#,
+            ),
+            (
+                "ok and data",
+                r#"<rpc-reply message-id="1"><ok/><data/></rpc-reply>"#,
+            ),
+            (
+                "direct payload and data",
+                r#"<rpc-reply message-id="1"><output/><data/></rpc-reply>"#,
+            ),
+            (
+                "nested reply",
+                r#"<rpc-reply message-id="1"><rpc-reply message-id="1"/></rpc-reply>"#,
+            ),
+            (
+                "reply nested in direct vendor payload",
+                r#"<rpc-reply message-id="1"><wrapper><rpc-reply message-id="1"/></wrapper></rpc-reply>"#,
+            ),
+            (
+                "second reply",
+                r#"<rpc-reply message-id="1"/><rpc-reply message-id="1"/>"#,
+            ),
+            (
+                "significant trailing text",
+                r#"<rpc-reply message-id="1"/>trailing"#,
+            ),
+            ("wrong root", r#"<notification message-id="1"/>"#),
+        ];
+
+        for (name, xml) in cases {
+            let result = parse_rpc_reply(xml, "1");
+            assert!(
+                matches!(result, Err(RpcError::ParseError(_))),
+                "{name} must be ParseError, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrong_message_id_keeps_typed_error() {
+        let xml = r#"<rpc-reply message-id="actual"><ok/></rpc-reply>"#;
+        let result = parse_rpc_reply(xml, "expected");
+        assert!(matches!(
+            result,
+            Err(RpcError::MessageIdMismatch {
+                expected,
+                actual
+            }) if expected == "expected" && actual == "actual"
+        ));
     }
 }
