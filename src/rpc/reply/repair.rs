@@ -8,17 +8,23 @@ struct OpenElement {
     local: Vec<u8>,
     protocol_local: Option<Vec<u8>>,
     namespaces: NamespaceBindings,
+    supported_multi_re_container: bool,
     routing_engine_supported: bool,
     routing_engine_has_marker: bool,
 }
 
 impl OpenElement {
-    fn ordinary(qname: &[u8], namespaces: NamespaceBindings) -> Self {
+    fn ordinary(
+        qname: &[u8],
+        namespaces: NamespaceBindings,
+        supported_multi_re_container: bool,
+    ) -> Self {
         Self {
             qname: qname.to_vec(),
             local: local_name(qname).to_vec(),
             protocol_local: netconf_local_name(qname, &namespaces).map(<[u8]>::to_vec),
             namespaces,
+            supported_multi_re_container,
             routing_engine_supported: false,
             routing_engine_has_marker: false,
         }
@@ -30,6 +36,7 @@ impl OpenElement {
             local: b"routing-engine".to_vec(),
             protocol_local: netconf_local_name(qname, &namespaces).map(<[u8]>::to_vec),
             namespaces,
+            supported_multi_re_container: false,
             routing_engine_supported: supported,
             routing_engine_has_marker: false,
         }
@@ -50,6 +57,30 @@ fn netconf_local_name<'a>(
     qualified_name: &'a [u8],
     namespaces: &NamespaceBindings,
 ) -> Option<&'a [u8]> {
+    let (namespace, local) = expanded_name(qualified_name, namespaces)?;
+    match namespace {
+        None => Some(local),
+        Some(super::parser::NETCONF_NAMESPACE) => Some(local),
+        _ => None,
+    }
+}
+
+fn juniper_local_name<'a>(
+    qualified_name: &'a [u8],
+    namespaces: &NamespaceBindings,
+) -> Option<&'a [u8]> {
+    let (namespace, local) = expanded_name(qualified_name, namespaces)?;
+    match namespace {
+        None => Some(local),
+        Some(namespace) if is_juniper_xml_namespace(namespace) => Some(local),
+        _ => None,
+    }
+}
+
+fn expanded_name<'name, 'namespace>(
+    qualified_name: &'name [u8],
+    namespaces: &'namespace NamespaceBindings,
+) -> Option<(Option<&'namespace str>, &'name [u8])> {
     let mut parts = qualified_name.split(|byte| *byte == b':');
     let first = parts.next()?;
     let second = parts.next();
@@ -58,15 +89,21 @@ fn netconf_local_name<'a>(
     }
     let (namespace, local) = if let Some(local) = second {
         let prefix = std::str::from_utf8(first).ok()?;
-        (namespaces.get(prefix).map(String::as_str), local)
+        (Some(namespaces.get(prefix)?.as_str()), local)
     } else {
         (namespaces.get("").map(String::as_str), first)
     };
-    match namespace {
-        None if second.is_none() => Some(local),
-        Some(super::parser::NETCONF_NAMESPACE) => Some(local),
-        _ => None,
-    }
+    Some((namespace, local))
+}
+
+/// Junos reply namespaces in this repository use the exact
+/// `http://xml.juniper.net/` authority followed by a non-empty family path.
+/// Keeping the authority and scheme exact rejects lookalike hosts and unrelated
+/// default namespaces while allowing versioned Junos, XNM, and NETCONF URIs.
+fn is_juniper_xml_namespace(namespace: &str) -> bool {
+    namespace
+        .strip_prefix("http://xml.juniper.net/")
+        .is_some_and(|family| !family.is_empty())
 }
 
 fn namespaces_for(
@@ -96,7 +133,7 @@ fn supported_routing_engine_parent(stack: &[OpenElement]) -> bool {
             .any(|element| element.protocol_local.as_deref() == Some(b"data"))
             && stack
                 .iter()
-                .any(|element| element.local == b"multi-routing-engine-results"))
+                .any(|element| element.supported_multi_re_container))
 }
 
 fn mark_commit_check_result(stack: &mut [OpenElement]) {
@@ -136,7 +173,7 @@ fn handle_start(
     let local = local_name(qname.as_ref());
     let namespaces = namespaces_for(&tag, stack)?;
 
-    if local == b"commit-check-success"
+    if juniper_local_name(qname.as_ref(), &namespaces) == Some(b"commit-check-success")
         || netconf_local_name(qname.as_ref(), &namespaces) == Some(b"rpc-error")
     {
         mark_commit_check_result(stack);
@@ -157,7 +194,17 @@ fn handle_start(
             namespaces,
         ));
     } else {
-        stack.push(OpenElement::ordinary(qname.as_ref(), namespaces));
+        let supported_multi_re_container = juniper_local_name(qname.as_ref(), &namespaces)
+            == Some(b"multi-routing-engine-results")
+            && stack.len() == 1
+            && stack
+                .last()
+                .is_some_and(|element| element.protocol_local.as_deref() == Some(b"rpc-reply"));
+        stack.push(OpenElement::ordinary(
+            qname.as_ref(),
+            namespaces,
+            supported_multi_re_container,
+        ));
     }
 
     writer.write_event(Event::Start(tag.into_owned())).ok()
@@ -179,7 +226,7 @@ pub(super) fn repair_cluster_commit_check(xml: &str) -> Option<String> {
             Ok(Event::Empty(tag)) => {
                 let namespaces = namespaces_for(&tag, &stack)?;
                 let qname = tag.name();
-                if local_name(qname.as_ref()) == b"commit-check-success"
+                if juniper_local_name(qname.as_ref(), &namespaces) == Some(b"commit-check-success")
                     || netconf_local_name(qname.as_ref(), &namespaces) == Some(b"rpc-error")
                 {
                     mark_commit_check_result(&mut stack);
@@ -259,10 +306,133 @@ mod tests {
 
     #[test]
     fn preserves_source_and_qualified_name_around_inserted_close() {
-        let xml = r#"<nc:rpc-reply xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="1"><j:routing-engine xmlns:j="urn:j" note="a&amp;b"><j:commit-check-success/><nc:ok/></nc:rpc-reply>"#;
-        let expected = r#"<nc:rpc-reply xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="1"><j:routing-engine xmlns:j="urn:j" note="a&amp;b"><j:commit-check-success/><nc:ok/></j:routing-engine></nc:rpc-reply>"#;
+        let xml = r#"<nc:rpc-reply xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="1"><j:routing-engine xmlns:j="http://xml.juniper.net/junos/25.4R1.12/junos" note="a&amp;b"><j:commit-check-success/><nc:ok/></nc:rpc-reply>"#;
+        let expected = r#"<nc:rpc-reply xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="1"><j:routing-engine xmlns:j="http://xml.juniper.net/junos/25.4R1.12/junos" note="a&amp;b"><j:commit-check-success/><nc:ok/></j:routing-engine></nc:rpc-reply>"#;
 
         assert_eq!(repair_cluster_commit_check(xml).as_deref(), Some(expected));
+    }
+
+    #[test]
+    fn rejects_commit_check_markers_in_unrelated_namespaces() {
+        let cases = [
+            (
+                "prefixed vendor marker",
+                r#"<rpc-reply xmlns:v="urn:vendor" message-id="1">
+                  <routing-engine><v:commit-check-success/><ok/>
+                </rpc-reply>"#,
+            ),
+            (
+                "unbound prefixed marker",
+                r#"<rpc-reply message-id="1">
+                  <routing-engine><v:commit-check-success/><ok/>
+                </rpc-reply>"#,
+            ),
+            (
+                "default vendor marker",
+                r#"<rpc-reply message-id="1">
+                  <routing-engine><commit-check-success xmlns="urn:vendor"/><ok/>
+                </rpc-reply>"#,
+            ),
+            (
+                "Juniper lookalike authority",
+                r#"<rpc-reply
+                  xmlns:j="http://xml.juniper.net.evil/junos/25.4R1/junos"
+                  message-id="1"><routing-engine>
+                    <j:commit-check-success/><ok/>
+                  </rpc-reply>"#,
+            ),
+            (
+                "unsupported Juniper HTTPS authority",
+                r#"<rpc-reply
+                  xmlns:j="https://xml.juniper.net/junos/25.4R1/junos"
+                  message-id="1"><routing-engine>
+                    <j:commit-check-success/><ok/>
+                  </rpc-reply>"#,
+            ),
+        ];
+
+        for (path, xml) in cases {
+            assert_eq!(
+                repair_cluster_commit_check(xml),
+                None,
+                "{path} must not authorize repair"
+            );
+        }
+    }
+
+    #[test]
+    fn recognizes_only_top_level_unbound_or_juniper_multi_re_containers() {
+        let cases = [
+            (
+                "prefixed vendor container",
+                r#"<rpc-reply xmlns:v="urn:vendor" message-id="1">
+                  <v:multi-routing-engine-results>
+                    <routing-engine><commit-check-success/><ok/>
+                  </v:multi-routing-engine-results>
+                </rpc-reply>"#,
+            ),
+            (
+                "unbound prefixed container",
+                r#"<rpc-reply message-id="1">
+                  <v:multi-routing-engine-results>
+                    <routing-engine><commit-check-success/><ok/>
+                  </v:multi-routing-engine-results>
+                </rpc-reply>"#,
+            ),
+            (
+                "default vendor container",
+                r#"<rpc-reply message-id="1">
+                  <multi-routing-engine-results xmlns="urn:vendor">
+                    <routing-engine><commit-check-success/><ok/>
+                  </multi-routing-engine-results>
+                </rpc-reply>"#,
+            ),
+            (
+                "arbitrarily nested container",
+                r#"<rpc-reply message-id="1"><outer>
+                  <multi-routing-engine-results>
+                    <multi-routing-engine-item>
+                      <routing-engine><commit-check-success/><ok/>
+                    </multi-routing-engine-item>
+                  </multi-routing-engine-results>
+                </outer></rpc-reply>"#,
+            ),
+        ];
+
+        for (path, xml) in cases {
+            assert_eq!(
+                repair_cluster_commit_check(xml),
+                None,
+                "{path} must not authorize repair"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_unbound_and_juniper_qualified_repair_evidence() {
+        let unbound = r#"<rpc-reply message-id="1">
+          <multi-routing-engine-results><multi-routing-engine-item>
+            <routing-engine><commit-check-success/><ok/>
+          </multi-routing-engine-item></multi-routing-engine-results>
+        </rpc-reply>"#;
+        assert!(
+            repair_cluster_commit_check(unbound).is_some(),
+            "unbound compatibility names remain supported"
+        );
+
+        let qualified = r#"<nc:rpc-reply
+          xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0"
+          xmlns:j="http://xml.juniper.net/junos/25.4R1.12/junos"
+          message-id="1"><j:multi-routing-engine-results>
+            <j:multi-routing-engine-item>
+              <j:routing-engine><j:commit-check-success/><nc:ok/>
+            </j:multi-routing-engine-item>
+          </j:multi-routing-engine-results>
+        </nc:rpc-reply>"#;
+        assert!(
+            repair_cluster_commit_check(qualified).is_some(),
+            "known Juniper XML namespaces remain supported"
+        );
     }
 
     #[test]

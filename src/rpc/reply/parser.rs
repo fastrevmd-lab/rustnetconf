@@ -161,9 +161,7 @@ pub(super) fn parse_strict(xml: &str, expected_message_id: &str) -> Result<RpcRe
                 return Err(parse_error("DOCTYPE is not allowed in an RPC reply"));
             }
             Ok(Event::Eof) => break,
-            Err(error) => {
-                return Err(parse_error(format!("XML parse error: {error}")));
-            }
+            Err(_) => return Err(parse_error("XML parse error: malformed document")),
         }
     }
 
@@ -1127,6 +1125,39 @@ mod tests {
 
         let empty = r#"<rpc-reply message-id="4"></rpc-reply>"#;
         assert!(matches!(parse_strict(empty, "4"), Ok(RpcReply::Ok)));
+    }
+
+    #[test]
+    fn reader_syntax_errors_do_not_expose_oversized_tag_names() {
+        let marker = format!("SENSITIVE_DEVICE_MARKER_{}", "x".repeat(8_192));
+        let cases = [
+            (
+                "oversized opening name",
+                format!("<rpc-reply message-id=\"1\"><{marker}></different></rpc-reply>"),
+            ),
+            (
+                "oversized closing name",
+                format!("<rpc-reply message-id=\"1\"><different></{marker}></rpc-reply>"),
+            ),
+            (
+                "unexpected oversized close",
+                format!("<rpc-reply message-id=\"1\"></{marker}>"),
+            ),
+        ];
+
+        for (path, xml) in cases {
+            let RpcError::ParseError(message) =
+                parse_strict(&xml, "1").expect_err("malformed XML must fail")
+            else {
+                panic!("{path}: expected ParseError");
+            };
+            assert_eq!(message, "XML parse error: malformed document", "{path}");
+            assert!(message.len() < 128, "{path}: diagnostic is unbounded");
+            assert!(
+                !message.contains("SENSITIVE_DEVICE_MARKER"),
+                "{path}: diagnostic exposes input"
+            );
+        }
     }
 
     #[test]
