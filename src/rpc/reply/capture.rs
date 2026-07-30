@@ -12,6 +12,7 @@ const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
 #[derive(Debug, Clone, Copy)]
 pub(super) struct ValidatedQName<'a> {
     pub(super) prefix: Option<&'a str>,
+    pub(super) local: &'a str,
 }
 
 #[derive(Debug, Default)]
@@ -59,6 +60,7 @@ impl FragmentCapture {
         let decoded = text
             .decode()
             .map_err(|error| parse_error(format!("invalid text encoding: {error}")))?;
+        validate_xml_chars(&decoded, "text content")?;
         self.xml.push_str(&escape_xml_text(&decoded));
         Ok(())
     }
@@ -67,6 +69,7 @@ impl FragmentCapture {
         let decoded = cdata
             .decode()
             .map_err(|error| parse_error(format!("invalid CDATA encoding: {error}")))?;
+        validate_xml_chars(&decoded, "CDATA content")?;
         self.xml.push_str(&escape_xml_text(&decoded));
         Ok(())
     }
@@ -185,7 +188,7 @@ pub(super) fn validate_qname(raw: &[u8]) -> Result<ValidatedQName<'_>, RpcError>
         validate_ncname(prefix, "QName prefix")?;
     }
     validate_ncname(local, "QName local name")?;
-    Ok(ValidatedQName { prefix })
+    Ok(ValidatedQName { prefix, local })
 }
 
 pub(super) fn is_namespace_declaration(attribute_name: &[u8]) -> bool {
@@ -276,11 +279,21 @@ fn is_valid_xml_char(value: char) -> bool {
     )
 }
 
+pub(super) fn validate_xml_chars(value: &str, field: &'static str) -> Result<(), RpcError> {
+    if value.chars().all(is_valid_xml_char) {
+        Ok(())
+    } else {
+        Err(parse_error(format!("invalid XML character in {field}")))
+    }
+}
+
 pub(super) fn decode_attribute(raw: &[u8], field: &'static str) -> Result<String, RpcError> {
     let raw = str::from_utf8(raw).map_err(|_| parse_error(format!("invalid {field} encoding")))?;
-    quick_xml::escape::unescape(raw)
+    let decoded = quick_xml::escape::unescape(raw)
         .map(|value| value.into_owned())
-        .map_err(|_| parse_error(format!("invalid {field}")))
+        .map_err(|_| parse_error(format!("invalid {field}")))?;
+    validate_xml_chars(&decoded, field)?;
+    Ok(decoded)
 }
 
 fn parse_error(message: String) -> RpcError {

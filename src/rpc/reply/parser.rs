@@ -1,12 +1,13 @@
 use super::capture::{
     decode_attribute, is_namespace_declaration, namespace_declarations, validate_qname,
-    FragmentCapture, NamespaceBindings,
+    validate_xml_chars, FragmentCapture, NamespaceBindings, ValidatedQName, XML_NAMESPACE,
 };
 use super::{RpcErrorInfo, RpcReply};
 use crate::error::RpcError;
 use crate::types::{ErrorSeverity, ErrorTag, RpcErrorType};
 use quick_xml::events::{BytesCData, BytesEnd, BytesRef, BytesStart, BytesText, Event};
 use quick_xml::Reader;
+use std::collections::HashSet;
 
 pub(super) const NETCONF_NAMESPACE: &str = "urn:ietf:params:xml:ns:netconf:base:1.0";
 
@@ -36,6 +37,12 @@ enum PayloadState {
 enum IgnoredPayload {
     Data { depth: usize },
     Direct { depth: usize },
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExpandedName<'name, 'namespace> {
+    namespace: Option<&'namespace str>,
+    local: &'name str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,7 +145,18 @@ pub(super) fn parse_strict(xml: &str, expected_message_id: &str) -> Result<RpcRe
             Ok(Event::CData(cdata)) => parser.cdata(&cdata)?,
             Ok(Event::GeneralRef(entity)) => parser.entity(&entity)?,
             Ok(Event::End(tag)) => parser.end(&tag)?,
-            Ok(Event::Decl(_) | Event::Comment(_) | Event::PI(_)) => {}
+            Ok(Event::Comment(comment)) => {
+                let decoded = comment
+                    .decode()
+                    .map_err(|_| parse_error("invalid comment encoding"))?;
+                validate_xml_chars(&decoded, "comment")?;
+            }
+            Ok(Event::PI(instruction)) => {
+                let decoded = std::str::from_utf8(instruction.as_ref())
+                    .map_err(|_| parse_error("invalid processing instruction encoding"))?;
+                validate_xml_chars(decoded, "processing instruction")?;
+            }
+            Ok(Event::Decl(_)) => {}
             Ok(Event::DocType(_)) => {
                 return Err(parse_error("DOCTYPE is not allowed in an RPC reply"));
             }
@@ -283,8 +301,10 @@ impl ReplyParser<'_> {
 
     fn text(&mut self, text: &BytesText<'_>) -> Result<(), RpcError> {
         if self.ignored_payload.is_some() && self.current_error.is_none() {
-            text.decode()
+            let decoded = text
+                .decode()
                 .map_err(|error| parse_error(format!("invalid text encoding: {error}")))?;
+            validate_xml_chars(&decoded, "ignored text content")?;
             return Ok(());
         }
         if self.capture_text(text)? {
@@ -293,6 +313,7 @@ impl ReplyParser<'_> {
         let decoded = text
             .decode()
             .map_err(|error| parse_error(format!("invalid text encoding: {error}")))?;
+        validate_xml_chars(&decoded, "text content")?;
         if decoded.trim().is_empty() {
             Ok(())
         } else {
@@ -302,9 +323,10 @@ impl ReplyParser<'_> {
 
     fn cdata(&mut self, cdata: &BytesCData<'_>) -> Result<(), RpcError> {
         if self.ignored_payload.is_some() && self.current_error.is_none() {
-            cdata
+            let decoded = cdata
                 .decode()
                 .map_err(|error| parse_error(format!("invalid CDATA encoding: {error}")))?;
+            validate_xml_chars(&decoded, "ignored CDATA content")?;
             return Ok(());
         }
         if self.capture_cdata(cdata)? {
@@ -415,6 +437,7 @@ impl ReplyParser<'_> {
                 let decoded = text
                     .decode()
                     .map_err(|cause| parse_error(format!("invalid text encoding: {cause}")))?;
+                validate_xml_chars(&decoded, "rpc-error text field")?;
                 error.field_text.push_str(&decoded);
                 return Ok(true);
             }
@@ -448,6 +471,7 @@ impl ReplyParser<'_> {
                 let decoded = cdata
                     .decode()
                     .map_err(|cause| parse_error(format!("invalid CDATA encoding: {cause}")))?;
+                validate_xml_chars(&decoded, "rpc-error text field")?;
                 error.field_text.push_str(&decoded);
                 return Ok(true);
             }
@@ -480,6 +504,7 @@ impl ReplyParser<'_> {
             if error.field.is_some() {
                 let resolved = crate::xml_entity::resolve_entity_ref(entity)
                     .ok_or_else(|| parse_error("invalid entity in rpc-error text field"))?;
+                validate_xml_chars(&resolved, "rpc-error text field")?;
                 error.field_text.push_str(&resolved);
                 return Ok(true);
             }
@@ -526,9 +551,10 @@ impl ReplyParser<'_> {
     }
 
     fn capture_direct_empty(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
+        let parent_namespaces = self.parent_namespaces();
         match &mut self.payload {
             PayloadState::None => {
-                let mut capture = FragmentCapture::with_namespaces(self.namespaces.clone());
+                let mut capture = FragmentCapture::with_namespaces(parent_namespaces);
                 capture.empty(tag)?;
                 self.payload = PayloadState::Direct { capture, depth: 0 };
                 Ok(())
@@ -781,14 +807,18 @@ impl ReplyParser<'_> {
             frame.push((prefix, previous));
         }
         self.validate_element_name(tag.name().as_ref())?;
+        let mut expanded_attributes = HashSet::new();
         for attribute in tag.attributes().with_checks(true) {
             let attribute = attribute
                 .map_err(|error| parse_error(format!("invalid XML attribute: {error}")))?;
             if is_namespace_declaration(attribute.key.as_ref()) {
                 continue;
             }
-            let name = validate_qname(attribute.key.as_ref())?;
-            self.validate_bound_prefix(name.prefix)?;
+            let name = self.expanded_attribute_name(attribute.key.as_ref())?;
+            let key = (name.namespace.map(str::to_string), name.local.to_string());
+            if !expanded_attributes.insert(key) {
+                return Err(parse_error("duplicate XML attribute expanded name"));
+            }
         }
         self.namespace_frames.push(frame);
         Ok(())
@@ -875,43 +905,52 @@ impl ReplyParser<'_> {
     }
 
     fn netconf_local_name<'a>(&self, qualified_name: &'a [u8]) -> Option<&'a [u8]> {
-        let mut parts = qualified_name.split(|byte| *byte == b':');
-        let first = parts.next()?;
-        let second = parts.next();
-        if parts.next().is_some() {
-            return None;
-        }
-
-        let (namespace, local) = if let Some(local) = second {
-            let prefix = std::str::from_utf8(first).ok()?;
-            (self.namespaces.get(prefix).map(String::as_str), local)
-        } else {
-            (self.namespaces.get("").map(String::as_str), first)
-        };
-
-        match namespace {
-            None if second.is_none() => Some(local),
-            Some(NETCONF_NAMESPACE) => Some(local),
+        let name = self.expanded_element_name(qualified_name).ok()?;
+        match name.namespace {
+            None => Some(name.local.as_bytes()),
+            Some(NETCONF_NAMESPACE) => Some(name.local.as_bytes()),
             _ => None,
         }
     }
 
     fn validate_element_name(&self, qualified_name: &[u8]) -> Result<(), RpcError> {
-        let name = validate_qname(qualified_name)?;
-        if name.prefix == Some("xmlns") {
-            return Err(parse_error(
-                "the xmlns prefix cannot qualify an element name",
-            ));
-        }
-        self.validate_bound_prefix(name.prefix)
+        self.expanded_element_name(qualified_name).map(|_| ())
     }
 
-    fn validate_bound_prefix(&self, prefix: Option<&str>) -> Result<(), RpcError> {
-        match prefix {
-            None | Some("xml") => Ok(()),
-            Some(prefix) if self.namespaces.contains_key(prefix) => Ok(()),
-            Some(_) => Err(parse_error("QName uses an unbound namespace prefix")),
-        }
+    fn expanded_element_name<'name, 'namespace>(
+        &'namespace self,
+        qualified_name: &'name [u8],
+    ) -> Result<ExpandedName<'name, 'namespace>, RpcError> {
+        self.expanded_name(validate_qname(qualified_name)?, true)
+    }
+
+    fn expanded_attribute_name<'name, 'namespace>(
+        &'namespace self,
+        qualified_name: &'name [u8],
+    ) -> Result<ExpandedName<'name, 'namespace>, RpcError> {
+        self.expanded_name(validate_qname(qualified_name)?, false)
+    }
+
+    fn expanded_name<'name, 'namespace>(
+        &'namespace self,
+        name: ValidatedQName<'name>,
+        use_default: bool,
+    ) -> Result<ExpandedName<'name, 'namespace>, RpcError> {
+        let namespace = match name.prefix {
+            Some("xml") => Some(XML_NAMESPACE),
+            Some(prefix) => Some(
+                self.namespaces
+                    .get(prefix)
+                    .map(String::as_str)
+                    .ok_or_else(|| parse_error("QName uses an unbound namespace prefix"))?,
+            ),
+            None if use_default => self.namespaces.get("").map(String::as_str),
+            None => None,
+        };
+        Ok(ExpandedName {
+            namespace,
+            local: name.local,
+        })
     }
 
     fn finish(self) -> Result<RpcReply, RpcError> {
@@ -1478,6 +1517,219 @@ mod tests {
     }
 
     #[test]
+    fn rejects_duplicate_attributes_by_expanded_name() {
+        let duplicate = r#"xmlns:a="urn:same" xmlns:b="urn:same" a:n="1" b:n="2""#;
+        let cases = [
+            format!(r#"<rpc-reply message-id="1"><data><item {duplicate}/></data></rpc-reply>"#),
+            format!(r#"<rpc-reply message-id="1"><item {duplicate}/></rpc-reply>"#),
+            format!(
+                r#"<rpc-reply message-id="1"><rpc-error>
+                  <error-type>application</error-type>
+                  <error-tag>operation-failed</error-tag>
+                  <error-severity>error</error-severity>
+                  <error-info><item {duplicate}/></error-info>
+                </rpc-error></rpc-reply>"#
+            ),
+            format!(r#"<rpc-reply message-id="1" {duplicate}><ok/></rpc-reply>"#),
+        ];
+
+        for xml in cases {
+            let RpcError::ParseError(message) =
+                parse_strict(&xml, "1").expect_err("expanded duplicate must fail")
+            else {
+                panic!("expected ParseError");
+            };
+            assert!(message.contains("duplicate XML attribute"));
+            assert!(message.len() < 128);
+        }
+    }
+
+    #[test]
+    fn same_local_attribute_names_are_valid_across_distinct_expanded_names() {
+        let xml = r#"<rpc-reply message-id="1"><data><item
+          xmlns:a="urn:a" xmlns:b="urn:b"
+          n="plain" a:n="one" b:n="two"/>
+        </data></rpc-reply>"#;
+        let RpcReply::Data(data) = parse_strict(xml, "1").expect("distinct expanded names") else {
+            panic!("expected Data");
+        };
+        assert!(data.contains("n=\"plain\""));
+        assert!(data.contains("a:n=\"one\""));
+        assert!(data.contains("b:n=\"two\""));
+    }
+
+    #[test]
+    fn rejects_xml_invalid_characters_in_decoded_attributes() {
+        let cases = [
+            (
+                "data attribute",
+                format!(
+                    "<rpc-reply message-id=\"1\"><data><item value=\"{}\"></item></data></rpc-reply>",
+                    '\0'
+                ),
+            ),
+            (
+                "direct attribute",
+                format!(
+                    "<rpc-reply message-id=\"1\"><item value=\"{}\"/></rpc-reply>",
+                    '\u{1}'
+                ),
+            ),
+            (
+                "error-info attribute",
+                format!(
+                    "<rpc-reply message-id=\"1\"><rpc-error>\
+                       <error-type>application</error-type>\
+                       <error-tag>operation-failed</error-tag>\
+                       <error-severity>error</error-severity>\
+                       <error-info><item value=\"{}\"/></error-info>\
+                     </rpc-error></rpc-reply>",
+                    '\u{FFFE}'
+                ),
+            ),
+            (
+                "namespace URI",
+                format!(
+                    "<rpc-reply message-id=\"1\"><data><item xmlns:p=\"urn:{}\"/></data></rpc-reply>",
+                    '\0'
+                ),
+            ),
+            (
+                "message-id",
+                format!(
+                    "<rpc-reply message-id=\"expected{}\"><ok/></rpc-reply>",
+                    '\u{B}'
+                ),
+            ),
+        ];
+
+        for (path, xml) in cases {
+            let RpcError::ParseError(message) =
+                parse_strict(&xml, "expected").expect_err("invalid XML character must fail")
+            else {
+                panic!("{path}: expected ParseError");
+            };
+            assert!(message.contains("XML character"), "{path}: {message}");
+            assert!(message.len() < 128, "{path}: diagnostic is unbounded");
+            assert!(!message.contains('\0'), "{path}: diagnostic exposes input");
+        }
+    }
+
+    #[test]
+    fn valid_xml_attribute_characters_remain_accepted() {
+        let xml = "<rpc-reply message-id=\"\t\n\r😀\"><data><item value=\"\t\n\r😀\"/></data></rpc-reply>";
+        let RpcReply::Data(data) =
+            parse_strict(xml, "\t\n\r😀").expect("valid XML attribute characters")
+        else {
+            panic!("expected Data");
+        };
+        assert!(data.contains('😀'));
+    }
+
+    #[test]
+    fn rejects_xml_invalid_characters_in_decoded_content() {
+        let cases = [
+            (
+                "captured text",
+                format!(
+                    "<rpc-reply message-id=\"1\"><data><item>{}</item></data></rpc-reply>",
+                    '\0'
+                ),
+            ),
+            (
+                "captured CDATA",
+                format!(
+                    "<rpc-reply message-id=\"1\"><item><![CDATA[{}]]></item></rpc-reply>",
+                    '\u{1}'
+                ),
+            ),
+            (
+                "rpc-error field text",
+                format!(
+                    "<rpc-reply message-id=\"1\"><rpc-error>\
+                       <error-type>application</error-type>\
+                       <error-tag>operation-failed</error-tag>\
+                       <error-severity>error</error-severity>\
+                       <error-message>{}</error-message>\
+                     </rpc-error></rpc-reply>",
+                    '\u{FFFE}'
+                ),
+            ),
+            (
+                "ignored payload text",
+                format!(
+                    "<rpc-reply message-id=\"1\"><ok/><data><item>{}</item></data></rpc-reply>",
+                    '\u{2}'
+                ),
+            ),
+            (
+                "ignored payload CDATA",
+                format!(
+                    "<rpc-reply message-id=\"1\"><ok/><data><![CDATA[{}]]></data></rpc-reply>",
+                    '\u{3}'
+                ),
+            ),
+            (
+                "comment",
+                format!(
+                    "<rpc-reply message-id=\"1\"><!--{}--><ok/></rpc-reply>",
+                    '\u{4}'
+                ),
+            ),
+            (
+                "processing instruction",
+                format!(
+                    "<rpc-reply message-id=\"1\"><?device {}?><ok/></rpc-reply>",
+                    '\u{5}'
+                ),
+            ),
+        ];
+        let mut failures = Vec::new();
+
+        for (path, xml) in cases {
+            match parse_strict(&xml, "1") {
+                Err(RpcError::ParseError(message))
+                    if message.contains("XML character") && message.len() < 128 => {}
+                result => failures.push(format!("{path}: {result:?}")),
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "invalid decoded content was not rejected safely: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_numeric_entity_in_rpc_error_text_is_rejected_by_entity_resolution() {
+        let xml = "<rpc-reply message-id=\"1\"><rpc-error>\
+          <error-type>application</error-type>\
+          <error-tag>operation-failed</error-tag>\
+          <error-severity>error</error-severity>\
+          <error-message>&#0;</error-message>\
+        </rpc-error></rpc-reply>";
+        let RpcError::ParseError(message) =
+            parse_strict(xml, "1").expect_err("invalid numeric entity must fail")
+        else {
+            panic!("expected ParseError");
+        };
+        assert!(message.contains("invalid entity"));
+        assert!(message.len() < 128);
+    }
+
+    #[test]
+    fn valid_xml_content_characters_remain_accepted() {
+        let xml = "<rpc-reply message-id=\"1\"><data>\
+          <text>\t\n\r😀</text><cdata><![CDATA[\t\n\r😀]]></cdata>\
+        </data><!--\t\n\r😀--><?device \t\n\r😀?></rpc-reply>";
+        let RpcReply::Data(data) = parse_strict(xml, "1").expect("valid XML content characters")
+        else {
+            panic!("expected Data");
+        };
+        assert_eq!(data.matches('😀').count(), 2);
+    }
+
+    #[test]
     fn rejects_missing_mandatory_rpc_error_fields() {
         let cases = [
             (
@@ -1702,6 +1954,37 @@ mod tests {
         };
         assert!(info.contains("xmlns:e=\"urn:error-detail\""));
         validate_xml_fragment(&info).expect("error-info keeps inherited namespace");
+    }
+
+    #[test]
+    fn empty_direct_root_namespace_changes_do_not_leak_to_siblings() {
+        let prefix_rebind = r#"<rpc-reply xmlns:p="urn:parent" message-id="1">
+          <first xmlns:p="urn:child"/><p:second/>
+        </rpc-reply>"#;
+        let RpcReply::Data(prefix_rebind) = parse_strict(prefix_rebind, "1").expect("direct data")
+        else {
+            panic!("expected Data");
+        };
+        assert!(prefix_rebind.contains("<p:second xmlns:p=\"urn:parent\"/>"));
+
+        let default_undeclaration = r#"<nc:rpc-reply
+          xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0"
+          xmlns="urn:parent"
+          message-id="2"><first xmlns=""/><second/></nc:rpc-reply>"#;
+        let RpcReply::Data(default_undeclaration) =
+            parse_strict(default_undeclaration, "2").expect("direct data")
+        else {
+            panic!("expected Data");
+        };
+        assert!(default_undeclaration.contains("<second xmlns=\"urn:parent\""));
+
+        let child_only = r#"<rpc-reply message-id="3">
+          <first xmlns:c="urn:child"/><second/>
+        </rpc-reply>"#;
+        let RpcReply::Data(child_only) = parse_strict(child_only, "3").expect("direct data") else {
+            panic!("expected Data");
+        };
+        assert_eq!(child_only.matches("xmlns:c=\"urn:child\"").count(), 1);
     }
 
     #[test]
