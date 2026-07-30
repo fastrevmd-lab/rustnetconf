@@ -80,6 +80,7 @@ struct ErrorState {
     field_text: String,
     info_capture: Option<FragmentCapture>,
     info_depth: usize,
+    info_seen: bool,
 }
 
 impl Default for ErrorState {
@@ -90,6 +91,7 @@ impl Default for ErrorState {
             field_text: String::new(),
             info_capture: None,
             info_depth: 0,
+            info_seen: false,
         }
     }
 }
@@ -476,9 +478,10 @@ impl ReplyParser<'_> {
         let name = local_name(qualified_name.as_ref());
 
         if name == b"error-info" {
-            if error.info_capture.is_some() {
+            if error.info_seen {
                 return Err(parse_error("duplicate error-info"));
             }
+            error.info_seen = true;
             error.info_capture = Some(FragmentCapture::default());
             error.info_depth = 0;
             return Ok(());
@@ -503,9 +506,11 @@ impl ReplyParser<'_> {
         let name = local_name(qualified_name.as_ref());
 
         if name == b"error-info" {
-            if error.info_capture.is_some() || error.builder.info.is_some() {
+            if error.info_seen {
                 return Err(parse_error("duplicate error-info"));
             }
+            error.info_seen = true;
+            error.builder.info = Some(String::new());
             return Ok(());
         }
 
@@ -599,9 +604,7 @@ impl ReplyParser<'_> {
                         .take()
                         .expect("error-info capture exists")
                         .finish()?;
-                    if !info.trim().is_empty() {
-                        error.builder.info = Some(info.trim().to_string());
-                    }
+                    error.builder.info = Some(info);
                     return Ok(());
                 }
 
@@ -738,6 +741,19 @@ impl ReplyParser<'_> {
 
 impl RpcErrorBuilder {
     fn set_field(&mut self, field: ErrorField, value: &str) -> Result<(), RpcError> {
+        let duplicate = match field {
+            ErrorField::Type => self.error_type.is_some(),
+            ErrorField::Tag => self.tag.is_some(),
+            ErrorField::Severity => self.severity.is_some(),
+            ErrorField::AppTag => self.app_tag.is_some(),
+            ErrorField::Path => self.path.is_some(),
+            ErrorField::Message => self.message.is_some(),
+        };
+        if duplicate {
+            let name = String::from_utf8_lossy(field.xml_name());
+            return Err(parse_error(format!("duplicate rpc-error {name}")));
+        }
+
         match field {
             ErrorField::Type => {
                 self.error_type = Some(match value.trim() {
@@ -745,7 +761,11 @@ impl RpcErrorBuilder {
                     "rpc" => RpcErrorType::Rpc,
                     "protocol" => RpcErrorType::Protocol,
                     "application" => RpcErrorType::Application,
-                    _ => RpcErrorType::Application,
+                    other => {
+                        return Err(parse_error(format!(
+                            "invalid rpc-error error-type: {other}"
+                        )));
+                    }
                 });
             }
             ErrorField::Tag => {
@@ -757,10 +777,14 @@ impl RpcErrorBuilder {
                 );
             }
             ErrorField::Severity => {
-                self.severity = Some(if value.trim() == "warning" {
-                    ErrorSeverity::Warning
-                } else {
-                    ErrorSeverity::Error
+                self.severity = Some(match value.trim() {
+                    "error" => ErrorSeverity::Error,
+                    "warning" => ErrorSeverity::Warning,
+                    other => {
+                        return Err(parse_error(format!(
+                            "invalid rpc-error error-severity: {other}"
+                        )));
+                    }
                 });
             }
             ErrorField::AppTag => self.app_tag = Some(value.to_string()),
@@ -772,12 +796,20 @@ impl RpcErrorBuilder {
 
     fn finish(self) -> Result<RpcErrorInfo, RpcError> {
         Ok(RpcErrorInfo {
-            error_type: self.error_type,
-            tag: self.tag.unwrap_or(ErrorTag::OperationFailed),
-            severity: self.severity,
+            error_type: Some(
+                self.error_type
+                    .ok_or_else(|| parse_error("rpc-error is missing error-type"))?,
+            ),
+            tag: self
+                .tag
+                .ok_or_else(|| parse_error("rpc-error is missing error-tag"))?,
+            severity: Some(
+                self.severity
+                    .ok_or_else(|| parse_error("rpc-error is missing error-severity"))?,
+            ),
             app_tag: self.app_tag,
             path: self.path,
-            message: self.message.unwrap_or_else(|| "unknown error".to_string()),
+            message: self.message.unwrap_or_default(),
             info: self.info,
         })
     }
@@ -863,5 +895,166 @@ mod tests {
           <ok/>
         </data></rpc-reply>"#;
         assert!(matches!(parse_strict(data, "9"), Ok(RpcReply::Data(_))));
+    }
+
+    #[test]
+    fn rejects_missing_mandatory_rpc_error_fields() {
+        let cases = [
+            (
+                "error-type",
+                r#"<error-tag>operation-failed</error-tag>
+                   <error-severity>error</error-severity>"#,
+            ),
+            (
+                "error-tag",
+                r#"<error-type>application</error-type>
+                   <error-severity>error</error-severity>"#,
+            ),
+            (
+                "error-severity",
+                r#"<error-type>application</error-type>
+                   <error-tag>operation-failed</error-tag>"#,
+            ),
+        ];
+
+        for (missing, fields) in cases {
+            let xml =
+                format!(r#"<rpc-reply message-id="1"><rpc-error>{fields}</rpc-error></rpc-reply>"#);
+            let error = parse_strict(&xml, "1").expect_err("missing field must fail");
+            assert!(matches!(error, RpcError::ParseError(_)));
+            assert!(
+                error.to_string().contains(missing),
+                "error must name {missing}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_rpc_error_type_and_severity() {
+        let invalid_type = r#"<rpc-reply message-id="1"><rpc-error>
+          <error-type>vendor-layer</error-type>
+          <error-tag>operation-failed</error-tag>
+          <error-severity>error</error-severity>
+        </rpc-error></rpc-reply>"#;
+        assert!(matches!(
+            parse_strict(invalid_type, "1"),
+            Err(RpcError::ParseError(_))
+        ));
+
+        let invalid_severity = r#"<rpc-reply message-id="1"><rpc-error>
+          <error-type>application</error-type>
+          <error-tag>operation-failed</error-tag>
+          <error-severity>notice</error-severity>
+        </rpc-error></rpc-reply>"#;
+        assert!(matches!(
+            parse_strict(invalid_severity, "1"),
+            Err(RpcError::ParseError(_))
+        ));
+    }
+
+    #[test]
+    fn warning_only_reply_preserves_warning() {
+        let xml = r#"<rpc-reply message-id="1"><rpc-error>
+          <error-type>application</error-type>
+          <error-tag>operation-failed</error-tag>
+          <error-severity>warning</error-severity>
+          <error-message>device warning</error-message>
+        </rpc-error></rpc-reply>"#;
+
+        let reply = parse_strict(xml, "1").expect("warning-only reply succeeds");
+        let RpcReply::OkWithWarnings(warnings) = reply else {
+            panic!("expected OkWithWarnings");
+        };
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].message, "device warning");
+    }
+
+    #[test]
+    fn error_info_preserves_nested_attributes() {
+        let xml = r#"<rpc-reply message-id="1"><rpc-error>
+          <error-type>application</error-type>
+          <error-tag>operation-failed</error-tag>
+          <error-severity>error</error-severity>
+          <error-info>
+            <bad-element xmlns:v="urn:vendor" v:source="candidate">x &amp; y</bad-element>
+          </error-info>
+        </rpc-error></rpc-reply>"#;
+
+        let error = parse_strict(xml, "1").expect_err("hard error");
+        let RpcError::ServerError {
+            info: Some(info), ..
+        } = error
+        else {
+            panic!("expected ServerError with error-info");
+        };
+        assert!(info.contains("xmlns:v=\"urn:vendor\""));
+        assert!(info.contains("v:source=\"candidate\""));
+        assert!(info.contains("x &amp; y"));
+    }
+
+    #[test]
+    fn missing_optional_error_message_is_empty() {
+        let xml = r#"<rpc-reply message-id="1"><rpc-error>
+          <error-type>application</error-type>
+          <error-tag>operation-failed</error-tag>
+          <error-severity>error</error-severity>
+        </rpc-error></rpc-reply>"#;
+
+        let error = parse_strict(xml, "1").expect_err("hard error");
+        let RpcError::ServerError { message, .. } = error else {
+            panic!("expected ServerError");
+        };
+        assert!(message.is_empty());
+    }
+
+    #[test]
+    fn rejects_duplicate_rpc_error_fields_and_info() {
+        let cases = [
+            r#"<error-type>application</error-type>
+               <error-type>protocol</error-type>
+               <error-tag>operation-failed</error-tag>
+               <error-severity>error</error-severity>"#,
+            r#"<error-type>application</error-type>
+               <error-tag>operation-failed</error-tag>
+               <error-severity>error</error-severity>
+               <error-info/><error-info/>"#,
+        ];
+
+        for fields in cases {
+            let xml =
+                format!(r#"<rpc-reply message-id="1"><rpc-error>{fields}</rpc-error></rpc-reply>"#);
+            assert!(matches!(
+                parse_strict(&xml, "1"),
+                Err(RpcError::ParseError(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn warning_only_reply_preserves_all_optional_details() {
+        let xml = r#"<rpc-reply message-id="1"><rpc-error>
+          <error-type>application</error-type>
+          <error-tag>operation-failed</error-tag>
+          <error-severity>warning</error-severity>
+          <error-app-tag>vendor-warning</error-app-tag>
+          <error-path>/configuration/system</error-path>
+          <error-message>device warning</error-message>
+          <error-info><detail code="42"><![CDATA[x < y]]></detail></error-info>
+        </rpc-error></rpc-reply>"#;
+
+        let reply = parse_strict(xml, "1").expect("warning-only reply succeeds");
+        let RpcReply::OkWithWarnings(warnings) = reply else {
+            panic!("expected OkWithWarnings");
+        };
+        let warning = &warnings[0];
+        assert_eq!(warning.error_type, Some(RpcErrorType::Application));
+        assert_eq!(warning.tag, ErrorTag::OperationFailed);
+        assert_eq!(warning.severity, Some(ErrorSeverity::Warning));
+        assert_eq!(warning.app_tag.as_deref(), Some("vendor-warning"));
+        assert_eq!(warning.path.as_deref(), Some("/configuration/system"));
+        assert_eq!(warning.message, "device warning");
+        let info = warning.info.as_deref().expect("error-info");
+        assert!(info.contains("code=\"42\""));
+        assert!(info.contains("x &lt; y"));
     }
 }
