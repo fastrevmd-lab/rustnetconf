@@ -1,4 +1,5 @@
 mod capture;
+mod parser;
 
 use crate::error::RpcError;
 use crate::rpc::operations::escape_xml_text;
