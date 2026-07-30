@@ -1,11 +1,14 @@
 use super::capture::{
-    decode_attribute, namespace_declarations, FragmentCapture, NamespaceBindings,
+    decode_attribute, is_namespace_declaration, namespace_declarations, validate_qname,
+    FragmentCapture, NamespaceBindings,
 };
 use super::{RpcErrorInfo, RpcReply};
 use crate::error::RpcError;
 use crate::types::{ErrorSeverity, ErrorTag, RpcErrorType};
 use quick_xml::events::{BytesCData, BytesEnd, BytesRef, BytesStart, BytesText, Event};
 use quick_xml::Reader;
+
+pub(super) const NETCONF_NAMESPACE: &str = "urn:ietf:params:xml:ns:netconf:base:1.0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnvelopeState {
@@ -153,10 +156,6 @@ fn parse_error(message: impl Into<String>) -> RpcError {
     RpcError::ParseError(message.into())
 }
 
-fn local_name(tag: &[u8]) -> &[u8] {
-    tag.rsplit(|byte| *byte == b':').next().unwrap_or(tag)
-}
-
 impl ReplyParser<'_> {
     fn start(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
         self.push_namespaces(tag)?;
@@ -164,6 +163,8 @@ impl ReplyParser<'_> {
     }
 
     fn handle_start(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
+        let qualified_name = tag.name();
+        let protocol_name = self.netconf_local_name(qualified_name.as_ref());
         if self.current_error.is_some() {
             if self.capture_start(tag)? {
                 return Ok(());
@@ -175,20 +176,20 @@ impl ReplyParser<'_> {
         }
         if self.current_error.is_none()
             && self.in_open_direct_payload()
-            && local_name(tag.name().as_ref()) == b"rpc-reply"
+            && protocol_name == Some(b"rpc-reply")
         {
             return Err(parse_error("nested <rpc-reply> is not allowed"));
         }
         if self.current_error.is_none()
             && self.in_open_direct_payload()
-            && local_name(tag.name().as_ref()) == b"rpc-error"
+            && protocol_name == Some(b"rpc-error")
         {
             self.current_error = Some(ErrorState::default());
             return Ok(());
         }
         if self.current_error.is_none()
             && self.in_open_direct_payload()
-            && local_name(tag.name().as_ref()) == b"ok"
+            && protocol_name == Some(b"ok")
         {
             return Err(parse_error("<ok> must be an empty element"));
         }
@@ -199,17 +200,19 @@ impl ReplyParser<'_> {
             return self.error_start(tag);
         }
 
-        match (self.envelope, local_name(tag.name().as_ref())) {
-            (EnvelopeState::Before, b"rpc-reply") => self.open_reply(tag),
-            (EnvelopeState::Inside, b"rpc-reply") => {
+        match (self.envelope, protocol_name) {
+            (EnvelopeState::Before, Some(b"rpc-reply")) => self.open_reply(tag),
+            (EnvelopeState::Inside, Some(b"rpc-reply")) => {
                 Err(parse_error("nested <rpc-reply> is not allowed"))
             }
-            (EnvelopeState::Inside, b"data") => self.open_data(),
-            (EnvelopeState::Inside, b"rpc-error") => {
+            (EnvelopeState::Inside, Some(b"data")) => self.open_data(),
+            (EnvelopeState::Inside, Some(b"rpc-error")) => {
                 self.current_error = Some(ErrorState::default());
                 Ok(())
             }
-            (EnvelopeState::Inside, b"ok") => Err(parse_error("<ok> must be an empty element")),
+            (EnvelopeState::Inside, Some(b"ok")) => {
+                Err(parse_error("<ok> must be an empty element"))
+            }
             (EnvelopeState::Inside, _) => self.open_direct(tag),
             (EnvelopeState::After, _) => Err(parse_error("element found after </rpc-reply>")),
             (EnvelopeState::Before, _) => Err(parse_error("root element is not <rpc-reply>")),
@@ -217,6 +220,15 @@ impl ReplyParser<'_> {
     }
 
     fn empty(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
+        self.push_namespaces(tag)?;
+        let result = self.handle_empty(tag);
+        self.pop_namespaces();
+        result
+    }
+
+    fn handle_empty(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
+        let qualified_name = tag.name();
+        let protocol_name = self.netconf_local_name(qualified_name.as_ref());
         if self.current_error.is_some() {
             if self.capture_empty(tag)? {
                 return Ok(());
@@ -228,20 +240,20 @@ impl ReplyParser<'_> {
         }
         if self.current_error.is_none()
             && self.in_open_direct_payload()
-            && local_name(tag.name().as_ref()) == b"rpc-reply"
+            && protocol_name == Some(b"rpc-reply")
         {
             return Err(parse_error("nested <rpc-reply> is not allowed"));
         }
         if self.current_error.is_none()
             && self.in_open_direct_payload()
-            && local_name(tag.name().as_ref()) == b"ok"
+            && protocol_name == Some(b"ok")
         {
             self.protocol_ok = true;
             return Ok(());
         }
         if self.current_error.is_none()
             && self.in_open_direct_payload()
-            && local_name(tag.name().as_ref()) == b"rpc-error"
+            && protocol_name == Some(b"rpc-error")
         {
             return RpcErrorBuilder::default().finish().map(|_| ());
         }
@@ -252,15 +264,15 @@ impl ReplyParser<'_> {
             return self.error_empty(tag);
         }
 
-        match (self.envelope, local_name(tag.name().as_ref())) {
-            (EnvelopeState::Before, b"rpc-reply") => {
+        match (self.envelope, protocol_name) {
+            (EnvelopeState::Before, Some(b"rpc-reply")) => {
                 self.open_reply(tag)?;
                 self.envelope = EnvelopeState::After;
                 Ok(())
             }
-            (EnvelopeState::Inside, b"ok") => self.set_ok(),
-            (EnvelopeState::Inside, b"data") => self.set_empty_data(),
-            (EnvelopeState::Inside, b"rpc-error" | b"rpc-reply") => {
+            (EnvelopeState::Inside, Some(b"ok")) => self.set_ok(),
+            (EnvelopeState::Inside, Some(b"data")) => self.set_empty_data(),
+            (EnvelopeState::Inside, Some(b"rpc-error" | b"rpc-reply")) => {
                 Err(parse_error("invalid empty NETCONF reply element"))
             }
             (EnvelopeState::Inside, _) => self.capture_direct_empty(tag),
@@ -355,13 +367,17 @@ impl ReplyParser<'_> {
     }
 
     fn capture_empty(&mut self, tag: &BytesStart<'_>) -> Result<bool, RpcError> {
+        let qualified_name = tag.name();
+        let protocol_name = self
+            .netconf_local_name(qualified_name.as_ref())
+            .map(<[u8]>::to_vec);
         if let Some(error) = self.current_error.as_mut() {
             if let Some(capture) = error.info_capture.as_mut() {
                 capture.empty(tag)?;
                 return Ok(true);
             }
             if let Some(field) = error.field {
-                if local_name(tag.name().as_ref()) == field.xml_name() {
+                if protocol_name.as_deref() == Some(field.xml_name()) {
                     error.builder.set_field(field, "")?;
                     error.field = None;
                     error.field_text.clear();
@@ -527,14 +543,13 @@ impl ReplyParser<'_> {
 
     fn error_start(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
         let namespaces = self.namespaces.clone();
+        let qualified_name = tag.name();
+        let name = self.netconf_local_name(qualified_name.as_ref());
         let error = self
             .current_error
             .as_mut()
             .expect("error_start requires current_error");
-        let qualified_name = tag.name();
-        let name = local_name(qualified_name.as_ref());
-
-        if name == b"error-info" {
+        if name == Some(b"error-info") {
             if error.info_seen {
                 return Err(parse_error("duplicate error-info"));
             }
@@ -544,7 +559,8 @@ impl ReplyParser<'_> {
             return Ok(());
         }
 
-        let field = ErrorField::from_name(name)
+        let field = name
+            .and_then(ErrorField::from_name)
             .ok_or_else(|| parse_error("unknown element directly inside rpc-error"))?;
         if error.field.is_some() {
             return Err(parse_error("nested rpc-error text fields"));
@@ -555,14 +571,13 @@ impl ReplyParser<'_> {
     }
 
     fn error_empty(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
+        let qualified_name = tag.name();
+        let name = self.netconf_local_name(qualified_name.as_ref());
         let error = self
             .current_error
             .as_mut()
             .expect("error_empty requires current_error");
-        let qualified_name = tag.name();
-        let name = local_name(qualified_name.as_ref());
-
-        if name == b"error-info" {
+        if name == Some(b"error-info") {
             if error.info_seen {
                 return Err(parse_error("duplicate error-info"));
             }
@@ -571,7 +586,8 @@ impl ReplyParser<'_> {
             return Ok(());
         }
 
-        let field = ErrorField::from_name(name)
+        let field = name
+            .and_then(ErrorField::from_name)
             .ok_or_else(|| parse_error("unknown element directly inside rpc-error"))?;
         error.builder.set_field(field, "")
     }
@@ -589,7 +605,10 @@ impl ReplyParser<'_> {
                 if message_id.is_some() {
                     return Err(parse_error("duplicate message-id attribute"));
                 }
-                message_id = Some(decode_attribute(attribute.value.as_ref())?);
+                message_id = Some(decode_attribute(
+                    attribute.value.as_ref(),
+                    "message-id attribute",
+                )?);
             }
         }
 
@@ -647,6 +666,7 @@ impl ReplyParser<'_> {
     }
 
     fn end(&mut self, tag: &BytesEnd<'_>) -> Result<(), RpcError> {
+        self.validate_element_name(tag.name().as_ref())?;
         self.handle_end(tag)?;
         self.pop_namespaces();
         Ok(())
@@ -654,7 +674,7 @@ impl ReplyParser<'_> {
 
     fn handle_end(&mut self, tag: &BytesEnd<'_>) -> Result<(), RpcError> {
         let qualified_name = tag.name();
-        let name = local_name(qualified_name.as_ref());
+        let name = self.netconf_local_name(qualified_name.as_ref());
 
         if self.current_error.is_some() {
             {
@@ -669,7 +689,7 @@ impl ReplyParser<'_> {
                         error.info_depth -= 1;
                         return Ok(());
                     }
-                    if name != b"error-info" {
+                    if name != Some(b"error-info") {
                         return Err(parse_error("unexpected end inside error-info"));
                     }
                     let info = error
@@ -682,7 +702,7 @@ impl ReplyParser<'_> {
                 }
 
                 if let Some(field) = error.field {
-                    if name != field.xml_name() {
+                    if name != Some(field.xml_name()) {
                         return Err(parse_error("rpc-error field closed by wrong element"));
                     }
                     error.builder.set_field(field, &error.field_text)?;
@@ -692,7 +712,7 @@ impl ReplyParser<'_> {
                 }
             }
 
-            if name == b"rpc-error" {
+            if name == Some(b"rpc-error") {
                 let error = self
                     .current_error
                     .take()
@@ -725,7 +745,7 @@ impl ReplyParser<'_> {
                     *depth -= 1;
                     return Ok(());
                 }
-                if name == b"data" {
+                if name == Some(b"data") {
                     *closed = true;
                     return Ok(());
                 }
@@ -739,7 +759,7 @@ impl ReplyParser<'_> {
             _ => {}
         }
 
-        if name != b"rpc-reply" {
+        if name != Some(b"rpc-reply") {
             return Err(parse_error("unexpected end directly inside rpc-reply"));
         }
         if self.envelope != EnvelopeState::Inside {
@@ -753,8 +773,22 @@ impl ReplyParser<'_> {
         let declarations = namespace_declarations(tag)?;
         let mut frame = Vec::with_capacity(declarations.len());
         for (prefix, value) in declarations {
-            let previous = self.namespaces.insert(prefix.clone(), value);
+            let previous = if value.is_empty() {
+                self.namespaces.remove(&prefix)
+            } else {
+                self.namespaces.insert(prefix.clone(), value)
+            };
             frame.push((prefix, previous));
+        }
+        self.validate_element_name(tag.name().as_ref())?;
+        for attribute in tag.attributes().with_checks(true) {
+            let attribute = attribute
+                .map_err(|error| parse_error(format!("invalid XML attribute: {error}")))?;
+            if is_namespace_declaration(attribute.key.as_ref()) {
+                continue;
+            }
+            let name = validate_qname(attribute.key.as_ref())?;
+            self.validate_bound_prefix(name.prefix)?;
         }
         self.namespace_frames.push(frame);
         Ok(())
@@ -790,20 +824,20 @@ impl ReplyParser<'_> {
 
     fn ignored_start(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
         let qualified_name = tag.name();
-        let name = local_name(qualified_name.as_ref());
+        let name = self.netconf_local_name(qualified_name.as_ref());
         match self.ignored_payload {
             Some(IgnoredPayload::Data { ref mut depth }) => {
                 *depth += 1;
                 Ok(())
             }
-            Some(IgnoredPayload::Direct { .. }) if name == b"rpc-reply" => {
+            Some(IgnoredPayload::Direct { .. }) if name == Some(b"rpc-reply") => {
                 Err(parse_error("nested <rpc-reply> is not allowed"))
             }
-            Some(IgnoredPayload::Direct { .. }) if name == b"rpc-error" => {
+            Some(IgnoredPayload::Direct { .. }) if name == Some(b"rpc-error") => {
                 self.current_error = Some(ErrorState::default());
                 Ok(())
             }
-            Some(IgnoredPayload::Direct { .. }) if name == b"ok" => {
+            Some(IgnoredPayload::Direct { .. }) if name == Some(b"ok") => {
                 Err(parse_error("<ok> must be an empty element"))
             }
             Some(IgnoredPayload::Direct { ref mut depth }) => {
@@ -816,16 +850,16 @@ impl ReplyParser<'_> {
 
     fn ignored_empty(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
         let qualified_name = tag.name();
-        let name = local_name(qualified_name.as_ref());
+        let name = self.netconf_local_name(qualified_name.as_ref());
         match self.ignored_payload {
             Some(IgnoredPayload::Data { .. }) => Ok(()),
-            Some(IgnoredPayload::Direct { .. }) if name == b"rpc-reply" => {
+            Some(IgnoredPayload::Direct { .. }) if name == Some(b"rpc-reply") => {
                 Err(parse_error("nested <rpc-reply> is not allowed"))
             }
-            Some(IgnoredPayload::Direct { .. }) if name == b"rpc-error" => {
+            Some(IgnoredPayload::Direct { .. }) if name == Some(b"rpc-error") => {
                 RpcErrorBuilder::default().finish().map(|_| ())
             }
-            Some(IgnoredPayload::Direct { .. }) if name == b"ok" => {
+            Some(IgnoredPayload::Direct { .. }) if name == Some(b"ok") => {
                 self.protocol_ok = true;
                 Ok(())
             }
@@ -837,6 +871,46 @@ impl ReplyParser<'_> {
     fn defer_payload_conflict(&mut self, message: &'static str) {
         if self.deferred_payload_error.is_none() {
             self.deferred_payload_error = Some(message);
+        }
+    }
+
+    fn netconf_local_name<'a>(&self, qualified_name: &'a [u8]) -> Option<&'a [u8]> {
+        let mut parts = qualified_name.split(|byte| *byte == b':');
+        let first = parts.next()?;
+        let second = parts.next();
+        if parts.next().is_some() {
+            return None;
+        }
+
+        let (namespace, local) = if let Some(local) = second {
+            let prefix = std::str::from_utf8(first).ok()?;
+            (self.namespaces.get(prefix).map(String::as_str), local)
+        } else {
+            (self.namespaces.get("").map(String::as_str), first)
+        };
+
+        match namespace {
+            None if second.is_none() => Some(local),
+            Some(NETCONF_NAMESPACE) => Some(local),
+            _ => None,
+        }
+    }
+
+    fn validate_element_name(&self, qualified_name: &[u8]) -> Result<(), RpcError> {
+        let name = validate_qname(qualified_name)?;
+        if name.prefix == Some("xmlns") {
+            return Err(parse_error(
+                "the xmlns prefix cannot qualify an element name",
+            ));
+        }
+        self.validate_bound_prefix(name.prefix)
+    }
+
+    fn validate_bound_prefix(&self, prefix: Option<&str>) -> Result<(), RpcError> {
+        match prefix {
+            None | Some("xml") => Ok(()),
+            Some(prefix) if self.namespaces.contains_key(prefix) => Ok(()),
+            Some(_) => Err(parse_error("QName uses an unbound namespace prefix")),
         }
     }
 
@@ -1160,6 +1234,247 @@ mod tests {
         };
         assert!(data.contains("<rpc-error/>"));
         assert!(data.contains("<ok>modeled</ok>"));
+    }
+
+    #[test]
+    fn vendor_namespace_protocol_lookalikes_remain_opaque_data() {
+        let cases = [
+            (
+                "prefixed ok",
+                r#"<rpc-reply xmlns:v="urn:vendor" message-id="1"><v:ok/></rpc-reply>"#,
+                "<v:ok",
+            ),
+            (
+                "prefixed rpc-error",
+                r#"<rpc-reply xmlns:v="urn:vendor" message-id="1"><v:rpc-error/></rpc-reply>"#,
+                "<v:rpc-error",
+            ),
+            (
+                "prefixed rpc-reply",
+                r#"<rpc-reply xmlns:v="urn:vendor" message-id="1"><v:rpc-reply/></rpc-reply>"#,
+                "<v:rpc-reply",
+            ),
+            (
+                "prefixed data",
+                r#"<rpc-reply xmlns:v="urn:vendor" message-id="1"><v:data/></rpc-reply>"#,
+                "<v:data",
+            ),
+            (
+                "default vendor lookalikes",
+                r#"<rpc-reply message-id="1"><wrapper xmlns="urn:vendor">
+                  <ok/><rpc-error/><rpc-reply/><data/>
+                </wrapper></rpc-reply>"#,
+                "<ok",
+            ),
+            (
+                "prefixed lookalikes in standard data",
+                r#"<rpc-reply xmlns:v="urn:vendor" message-id="1"><data>
+                  <v:ok/><v:rpc-error/><v:rpc-reply/><v:data/>
+                </data></rpc-reply>"#,
+                "<v:rpc-error",
+            ),
+        ];
+
+        for (name, xml, marker) in cases {
+            let RpcReply::Data(data) = parse_strict(xml, "1").expect(name) else {
+                panic!("{name}: expected Data");
+            };
+            assert!(
+                data.contains(marker),
+                "{name}: lookalike was not captured: {data}"
+            );
+            validate_xml_fragment(&data).expect("vendor lookalike data remains valid XML");
+        }
+    }
+
+    #[test]
+    fn netconf_expanded_names_and_unqualified_compatibility_keep_protocol_meaning() {
+        let cases = [
+            r#"<nc:rpc-reply
+              xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0"
+              message-id="1"><nc:ok/></nc:rpc-reply>"#,
+            r#"<rpc-reply
+              xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"
+              message-id="1"><ok/></rpc-reply>"#,
+            r#"<rpc-reply message-id="1"><ok/></rpc-reply>"#,
+            r#"<rpc-reply
+              xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"
+              message-id="1"><wrapper xmlns=""><ok/></wrapper></rpc-reply>"#,
+        ];
+        for xml in cases {
+            assert!(matches!(parse_strict(xml, "1"), Ok(RpcReply::Ok)));
+        }
+
+        let error = r#"<nc:rpc-reply
+          xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0"
+          message-id="1"><nc:rpc-error>
+            <nc:error-type>application</nc:error-type>
+            <nc:error-tag>operation-failed</nc:error-tag>
+            <nc:error-severity>error</nc:error-severity>
+            <nc:error-info><detail/></nc:error-info>
+          </nc:rpc-error></nc:rpc-reply>"#;
+        assert!(matches!(
+            parse_strict(error, "1"),
+            Err(RpcError::ServerError { info: Some(_), .. })
+        ));
+    }
+
+    #[test]
+    fn vendor_namespace_rpc_reply_root_is_rejected() {
+        let cases = [
+            r#"<v:rpc-reply xmlns:v="urn:vendor" message-id="1"><v:ok/></v:rpc-reply>"#,
+            r#"<rpc-reply xmlns="urn:vendor" message-id="1"><ok/></rpc-reply>"#,
+        ];
+        for xml in cases {
+            assert!(matches!(
+                parse_strict(xml, "1"),
+                Err(RpcError::ParseError(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn vendor_namespace_rpc_error_fields_are_not_netconf_fields() {
+        let cases = [
+            r#"<rpc-reply xmlns:v="urn:vendor" message-id="1"><rpc-error>
+              <v:error-type>application</v:error-type>
+              <error-tag>operation-failed</error-tag>
+              <error-severity>error</error-severity>
+            </rpc-error></rpc-reply>"#,
+            r#"<rpc-reply xmlns:v="urn:vendor" message-id="1"><rpc-error>
+              <error-type>application</error-type>
+              <error-tag>operation-failed</error-tag>
+              <error-severity>error</error-severity>
+              <v:error-info><v:detail/></v:error-info>
+            </rpc-error></rpc-reply>"#,
+        ];
+        for xml in cases {
+            assert!(matches!(
+                parse_strict(xml, "1"),
+                Err(RpcError::ParseError(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_namespace_declarations_and_qnames() {
+        let malformed_children = [
+            ("empty xmlns prefix", r#"<item xmlns:="urn:bad"/>"#),
+            ("reserved xmlns prefix", r#"<item xmlns:xmlns="urn:bad"/>"#),
+            ("invalid xml binding", r#"<item xmlns:xml="urn:wrong"/>"#),
+            (
+                "other prefix bound to XML URI",
+                r#"<item xmlns:v="http://www.w3.org/XML/1998/namespace"/>"#,
+            ),
+            (
+                "default bound to XML URI",
+                r#"<item xmlns="http://www.w3.org/XML/1998/namespace"/>"#,
+            ),
+            (
+                "prefix bound to xmlns URI",
+                r#"<item xmlns:v="http://www.w3.org/2000/xmlns/"/>"#,
+            ),
+            (
+                "default bound to xmlns URI",
+                r#"<item xmlns="http://www.w3.org/2000/xmlns/"/>"#,
+            ),
+            ("empty prefixed binding", r#"<item xmlns:v=""/>"#),
+            ("unbound element prefix", r#"<v:item/>"#),
+            ("unbound attribute prefix", r#"<item v:note="x"/>"#),
+            ("empty QName prefix", r#"<:item/>"#),
+            ("empty QName local name", r#"<v: xmlns:v="urn:vendor"/>"#),
+            (
+                "multiple element colons",
+                r#"<v:item:extra xmlns:v="urn:vendor"/>"#,
+            ),
+            (
+                "multiple attribute colons",
+                r#"<item xmlns:v="urn:vendor" v:note:extra="x"/>"#,
+            ),
+        ];
+
+        for (name, child) in malformed_children {
+            let xml = format!(r#"<rpc-reply message-id="1"><data>{child}</data></rpc-reply>"#);
+            let error = parse_strict(&xml, "1").expect_err(name);
+            assert!(
+                matches!(error, RpcError::ParseError(_)),
+                "{name}: {error:?}"
+            );
+            assert!(error.to_string().len() < 256, "{name}: unbounded error");
+        }
+
+        let sibling_leak = r#"<rpc-reply message-id="1"><data>
+          <v:first xmlns:v="urn:vendor"/><v:second/>
+        </data></rpc-reply>"#;
+        assert!(matches!(
+            parse_strict(sibling_leak, "1"),
+            Err(RpcError::ParseError(_))
+        ));
+    }
+
+    #[test]
+    fn accepts_valid_unicode_qnames_and_namespace_controls() {
+        let xml = r#"<rpc-reply message-id="1"><data>
+          <前:设备 xmlns:前="urn:设备" xml:lang="zh" 属性="值"/>
+          <item xmlns="urn:vendor" note="default-does-not-qualify-attributes"/>
+        </data></rpc-reply>"#;
+        let RpcReply::Data(data) = parse_strict(xml, "1").expect("valid Unicode names") else {
+            panic!("expected Data");
+        };
+        assert!(data.contains("<前:设备"));
+        assert!(data.contains("属性=\"值\""));
+        validate_xml_fragment(&data).expect("valid namespace controls remain valid");
+    }
+
+    #[test]
+    fn attribute_decode_errors_are_bounded_and_do_not_echo_values() {
+        let marker = format!("SENSITIVE_ATTRIBUTE_ENTITY_{}", "x".repeat(4096));
+        let cases = [
+            (
+                "data attribute",
+                format!(
+                    r#"<rpc-reply message-id="1"><data><item note="&{marker};"/></data></rpc-reply>"#
+                ),
+            ),
+            (
+                "direct attribute",
+                format!(r#"<rpc-reply message-id="1"><item note="&{marker};"/></rpc-reply>"#),
+            ),
+            (
+                "error-info attribute",
+                format!(
+                    r#"<rpc-reply message-id="1"><rpc-error>
+                      <error-type>application</error-type>
+                      <error-tag>operation-failed</error-tag>
+                      <error-severity>error</error-severity>
+                      <error-info><item note="&{marker};"/></error-info>
+                    </rpc-error></rpc-reply>"#
+                ),
+            ),
+            (
+                "namespace declaration",
+                format!(
+                    r#"<rpc-reply message-id="1"><data><v:item xmlns:v="&{marker};"/></data></rpc-reply>"#
+                ),
+            ),
+            (
+                "message-id",
+                format!(r#"<rpc-reply message-id="&{marker};"><ok/></rpc-reply>"#),
+            ),
+        ];
+
+        for (name, xml) in cases {
+            let RpcError::ParseError(message) =
+                parse_strict(&xml, "1").expect_err("invalid attribute entity must fail")
+            else {
+                panic!("{name}: expected ParseError");
+            };
+            assert!(message.len() < 256, "{name}: diagnostic is unbounded");
+            assert!(
+                !message.contains("SENSITIVE_ATTRIBUTE_ENTITY"),
+                "{name}: diagnostic exposes device value"
+            );
+        }
     }
 
     #[test]

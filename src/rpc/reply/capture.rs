@@ -6,6 +6,14 @@ use std::str;
 
 pub(super) type NamespaceBindings = BTreeMap<String, String>;
 
+pub(super) const XML_NAMESPACE: &str = "http://www.w3.org/XML/1998/namespace";
+const XMLNS_NAMESPACE: &str = "http://www.w3.org/2000/xmlns/";
+
+#[derive(Debug, Clone, Copy)]
+pub(super) struct ValidatedQName<'a> {
+    pub(super) prefix: Option<&'a str>,
+}
+
 #[derive(Debug, Default)]
 pub(super) struct FragmentCapture {
     xml: String,
@@ -91,8 +99,8 @@ impl FragmentCapture {
                 .map_err(|error| parse_error(format!("invalid XML attribute: {error}")))?;
             let key = str::from_utf8(attribute.key.as_ref())
                 .map_err(|error| parse_error(format!("invalid attribute name: {error}")))?;
-            let value = decode_attribute(attribute.value.as_ref())?;
-            if let Some(prefix) = namespace_prefix(key) {
+            let value = decode_attribute(attribute.value.as_ref(), "captured XML attribute value")?;
+            if let Some(prefix) = namespace_prefix(key)? {
                 explicit_namespaces.insert(prefix.to_string());
             }
             attributes.push((key.to_string(), value));
@@ -142,23 +150,123 @@ pub(super) fn namespace_declarations(tag: &BytesStart<'_>) -> Result<NamespaceBi
             attribute.map_err(|error| parse_error(format!("invalid XML attribute: {error}")))?;
         let key = str::from_utf8(attribute.key.as_ref())
             .map_err(|error| parse_error(format!("invalid attribute name: {error}")))?;
-        let Some(prefix) = namespace_prefix(key) else {
+        let Some(prefix) = namespace_prefix(key)? else {
             continue;
         };
-        declarations.insert(
-            prefix.to_string(),
-            decode_attribute(attribute.value.as_ref())?,
-        );
+        let value = decode_attribute(attribute.value.as_ref(), "namespace declaration value")?;
+        validate_namespace_binding(prefix, &value)?;
+        if prefix != "xml" {
+            declarations.insert(prefix.to_string(), value);
+        }
     }
     Ok(declarations)
 }
 
-fn namespace_prefix(attribute_name: &str) -> Option<&str> {
-    if attribute_name == "xmlns" {
-        Some("")
-    } else {
-        attribute_name.strip_prefix("xmlns:")
+pub(super) fn validate_qname(raw: &[u8]) -> Result<ValidatedQName<'_>, RpcError> {
+    let name =
+        str::from_utf8(raw).map_err(|_| parse_error("invalid QName encoding".to_string()))?;
+    let mut parts = name.split(':');
+    let first = parts
+        .next()
+        .expect("split always yields at least one component");
+    let second = parts.next();
+    if parts.next().is_some() {
+        return Err(parse_error(
+            "QName contains more than one namespace separator".to_string(),
+        ));
     }
+
+    let (prefix, local) = if let Some(local) = second {
+        (Some(first), local)
+    } else {
+        (None, first)
+    };
+    if let Some(prefix) = prefix {
+        validate_ncname(prefix, "QName prefix")?;
+    }
+    validate_ncname(local, "QName local name")?;
+    Ok(ValidatedQName { prefix })
+}
+
+pub(super) fn is_namespace_declaration(attribute_name: &[u8]) -> bool {
+    attribute_name == b"xmlns" || attribute_name.starts_with(b"xmlns:")
+}
+
+fn namespace_prefix(attribute_name: &str) -> Result<Option<&str>, RpcError> {
+    if attribute_name == "xmlns" {
+        return Ok(Some(""));
+    }
+    let Some(prefix) = attribute_name.strip_prefix("xmlns:") else {
+        return Ok(None);
+    };
+    validate_ncname(prefix, "namespace declaration prefix")?;
+    Ok(Some(prefix))
+}
+
+fn validate_namespace_binding(prefix: &str, namespace: &str) -> Result<(), RpcError> {
+    if prefix == "xmlns" {
+        return Err(parse_error(
+            "the xmlns namespace prefix cannot be declared".to_string(),
+        ));
+    }
+    if prefix == "xml" && namespace != XML_NAMESPACE {
+        return Err(parse_error(
+            "the xml prefix has an invalid namespace binding".to_string(),
+        ));
+    }
+    if prefix != "xml" && namespace == XML_NAMESPACE {
+        return Err(parse_error(
+            "only the xml prefix may use the reserved XML namespace".to_string(),
+        ));
+    }
+    if namespace == XMLNS_NAMESPACE {
+        return Err(parse_error(
+            "the reserved xmlns namespace cannot be bound".to_string(),
+        ));
+    }
+    if !prefix.is_empty() && namespace.is_empty() {
+        return Err(parse_error(
+            "a namespace prefix cannot have an empty binding".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_ncname(name: &str, field: &str) -> Result<(), RpcError> {
+    let mut chars = name.chars();
+    if !chars.next().is_some_and(is_ncname_start) || !chars.all(is_ncname_char) {
+        return Err(parse_error(format!("invalid {field}")));
+    }
+    Ok(())
+}
+
+fn is_ncname_start(value: char) -> bool {
+    matches!(
+        value as u32,
+        0x41..=0x5A
+            | 0x5F
+            | 0x61..=0x7A
+            | 0xC0..=0xD6
+            | 0xD8..=0xF6
+            | 0xF8..=0x2FF
+            | 0x370..=0x37D
+            | 0x37F..=0x1FFF
+            | 0x200C..=0x200D
+            | 0x2070..=0x218F
+            | 0x2C00..=0x2FEF
+            | 0x3001..=0xD7FF
+            | 0xF900..=0xFDCF
+            | 0xFDF0..=0xFFFD
+            | 0x10000..=0xEFFFF
+    )
+}
+
+fn is_ncname_char(value: char) -> bool {
+    is_ncname_start(value)
+        || matches!(
+            value as u32,
+            0x2D | 0x2E | 0x30..=0x39 | 0xB7 | 0x300..=0x36F | 0x203F..=0x2040
+        )
 }
 
 fn is_valid_xml_char(value: char) -> bool {
@@ -168,12 +276,11 @@ fn is_valid_xml_char(value: char) -> bool {
     )
 }
 
-pub(super) fn decode_attribute(raw: &[u8]) -> Result<String, RpcError> {
-    let raw = str::from_utf8(raw)
-        .map_err(|error| parse_error(format!("invalid attribute encoding: {error}")))?;
+pub(super) fn decode_attribute(raw: &[u8], field: &'static str) -> Result<String, RpcError> {
+    let raw = str::from_utf8(raw).map_err(|_| parse_error(format!("invalid {field} encoding")))?;
     quick_xml::escape::unescape(raw)
         .map(|value| value.into_owned())
-        .map_err(|error| parse_error(format!("invalid attribute value: {error}")))
+        .map_err(|_| parse_error(format!("invalid {field}")))
 }
 
 fn parse_error(message: String) -> RpcError {

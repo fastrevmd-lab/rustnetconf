@@ -586,6 +586,17 @@ mod tests {
     }
 
     #[test]
+    fn does_not_repair_vendor_namespace_rpc_error_lookalike() {
+        let xml = r#"<rpc-reply xmlns:v="urn:vendor" message-id="1">
+          <routing-engine><v:rpc-error/>
+        </rpc-reply>"#;
+        assert!(matches!(
+            parse_rpc_reply(xml, "1"),
+            Err(RpcError::ParseError(_))
+        ));
+    }
+
+    #[test]
     fn repairs_routing_engine_within_multi_routing_engine_results() {
         let xml = r#"<rpc-reply message-id="1">
   <multi-routing-engine-results>
