@@ -1,5 +1,6 @@
 mod capture;
 mod parser;
+mod repair;
 
 use crate::error::RpcError;
 use crate::types::{ErrorSeverity, ErrorTag, RpcErrorType};
@@ -29,165 +30,6 @@ pub struct RpcErrorInfo {
     pub info: Option<String>,
 }
 
-// Strip any namespace prefix from a qualified element name, returning the
-// bare local name (e.g. `nc:rpc-reply` -> `rpc-reply`).
-fn local_name_of(qname: &[u8]) -> &[u8] {
-    match qname.iter().position(|&byte| byte == b':') {
-        Some(colon_idx) => &qname[colon_idx + 1..],
-        None => qname,
-    }
-}
-
-// Repair malformed chassis-cluster replies with unclosed <routing-engine> tags.
-//
-// Junos chassis clusters return validate/commit-check responses where each
-// routing-engine block is opened but never closed. Use quick-xml in tolerant
-// mode to auto-close them before the parent closes.
-fn repair_unclosed_routing_engine(xml: &str) -> Option<String> {
-    use quick_xml::events::{BytesEnd, Event};
-    use quick_xml::Reader;
-    use quick_xml::Writer;
-
-    let mut reader = Reader::from_str(xml);
-    reader.config_mut().check_end_names = false; // tolerant mode
-
-    let mut writer = Writer::new(Vec::new());
-    // Stack of open element qualified names (as bytes).
-    let mut stack: Vec<Vec<u8>> = Vec::new();
-
-    loop {
-        match reader.read_event() {
-            Ok(Event::Start(ref tag)) => {
-                let tag_name = tag.name();
-                let local_name = tag_name.local_name();
-
-                // If we're opening a routing-engine and the top of the stack is
-                // also routing-engine, auto-close the previous sibling.
-                if local_name.as_ref() == b"routing-engine" {
-                    if let Some(top_qname) = stack.last() {
-                        if local_name_of(top_qname) == b"routing-engine" {
-                            // Close the previous routing-engine
-                            if writer
-                                .write_event(Event::End(BytesEnd::new(
-                                    std::str::from_utf8(top_qname).unwrap_or("routing-engine"),
-                                )))
-                                .is_err()
-                            {
-                                return None;
-                            }
-                            stack.pop();
-                        }
-                    }
-                }
-
-                // Push this tag's qualified name onto the stack.
-                stack.push(tag_name.as_ref().to_vec());
-
-                // Emit the Start event verbatim.
-                if writer.write_event(Event::Start(tag.clone())).is_err() {
-                    return None;
-                }
-            }
-            Ok(Event::End(ref tag)) => {
-                let tag_name = tag.name();
-                let local_name = tag_name.local_name();
-
-                // Close any dangling routing-engine elements before closing parent.
-                while let Some(top_qname) = stack.last() {
-                    let top_local = local_name_of(top_qname);
-
-                    // If stack top doesn't match this End tag's local name, and
-                    // the stack top is routing-engine, auto-close it.
-                    if top_local != local_name.as_ref() && top_local == b"routing-engine" {
-                        if writer
-                            .write_event(Event::End(BytesEnd::new(
-                                std::str::from_utf8(top_qname).unwrap_or("routing-engine"),
-                            )))
-                            .is_err()
-                        {
-                            return None;
-                        }
-                        stack.pop();
-                    } else {
-                        break;
-                    }
-                }
-
-                // Now the stack top should match this End tag.
-                let top_qname = stack.last()?;
-                if local_name_of(top_qname) == local_name.as_ref() {
-                    stack.pop();
-                    if writer.write_event(Event::End(tag.clone())).is_err() {
-                        return None;
-                    }
-                } else {
-                    // Unexpected end tag — refuse to repair.
-                    return None;
-                }
-            }
-            Ok(Event::Empty(ref tag)) => {
-                if writer.write_event(Event::Empty(tag.clone())).is_err() {
-                    return None;
-                }
-            }
-            Ok(Event::Text(ref text)) => {
-                if writer.write_event(Event::Text(text.clone())).is_err() {
-                    return None;
-                }
-            }
-            Ok(Event::CData(ref cdata)) => {
-                if writer.write_event(Event::CData(cdata.clone())).is_err() {
-                    return None;
-                }
-            }
-            Ok(Event::GeneralRef(ref entity)) => {
-                if writer
-                    .write_event(Event::GeneralRef(entity.clone()))
-                    .is_err()
-                {
-                    return None;
-                }
-            }
-            Ok(Event::Comment(ref comment)) => {
-                if writer.write_event(Event::Comment(comment.clone())).is_err() {
-                    return None;
-                }
-            }
-            Ok(Event::Decl(ref decl)) => {
-                if writer.write_event(Event::Decl(decl.clone())).is_err() {
-                    return None;
-                }
-            }
-            Ok(Event::PI(ref pi)) => {
-                if writer.write_event(Event::PI(pi.clone())).is_err() {
-                    return None;
-                }
-            }
-            Ok(Event::DocType(ref doctype)) => {
-                if writer.write_event(Event::DocType(doctype.clone())).is_err() {
-                    return None;
-                }
-            }
-            Ok(Event::Eof) => {
-                // A legitimate cluster repair balances fully: the real device
-                // reply still contains `</rpc-reply>`, so only the dangling
-                // `<routing-engine>` elements are ever synthesized (in the End
-                // handling above). If any element is still open at EOF, the
-                // reply was genuinely truncated — refuse to repair so the caller
-                // sees the original parse error rather than a fabricated
-                // success from force-closing whatever was left open.
-                if !stack.is_empty() {
-                    return None;
-                }
-                break;
-            }
-            Err(_) => return None,
-        }
-    }
-
-    String::from_utf8(writer.into_inner()).ok()
-}
-
 /// Parse an `<rpc-reply>` XML response.
 ///
 /// Returns `Ok(RpcReply)` for successful responses, or `Err(RpcError)` if
@@ -196,23 +38,17 @@ fn repair_unclosed_routing_engine(xml: &str) -> Option<String> {
 /// This parser normally requires well-formed XML. On Junos chassis clusters,
 /// validate/commit-check replies contain unclosed `<routing-engine>` elements
 /// (a device bug). If the strict parse fails with a parse error and the reply
-/// contains `routing-engine`, the parser attempts to repair the malformed XML
-/// by auto-closing the dangling elements, then re-parses. Well-formed replies
-/// are unaffected (no repair attempt unless strict parsing fails).
+/// contains a recognizable cluster commit-check result, the parser attempts
+/// only the missing `routing-engine` closures, then re-parses. Well-formed
+/// replies are unaffected (no repair attempt unless strict parsing fails).
 pub fn parse_rpc_reply(xml: &str, expected_message_id: &str) -> Result<RpcReply, RpcError> {
-    // Try strict parse first (the common well-formed path).
     match parser::parse_strict(xml, expected_message_id) {
         Ok(reply) => Ok(reply),
-        Err(RpcError::ParseError(ref e)) if xml.contains("routing-engine") => {
-            // Looks like a chassis-cluster reply with unclosed routing-engine.
-            // Attempt repair.
-            if let Some(repaired) = repair_unclosed_routing_engine(xml) {
-                // Re-parse the repaired XML.
-                parser::parse_strict(&repaired, expected_message_id)
-            } else {
-                // Repair failed; return the original parse error.
-                Err(RpcError::ParseError(e.clone()))
-            }
+        Err(original @ RpcError::ParseError(_)) => {
+            let Some(repaired) = repair::repair_cluster_commit_check(xml) else {
+                return Err(original);
+            };
+            parser::parse_strict(&repaired, expected_message_id)
         }
         Err(other) => Err(other),
     }
@@ -690,6 +526,70 @@ mod tests {
             }
             other => panic!("expected ServerError, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn does_not_repair_unrelated_direct_routing_engine() {
+        let xml = r#"<rpc-reply message-id="1">
+  <routing-engine><name>node0</name><ok/>
+</rpc-reply>"#;
+        assert!(matches!(
+            parse_rpc_reply(xml, "1"),
+            Err(RpcError::ParseError(_))
+        ));
+    }
+
+    #[test]
+    fn does_not_repair_marker_in_unsupported_placement() {
+        let xml = r#"<rpc-reply message-id="1">
+  <outer><routing-engine><commit-check-success/>
+  </outer></rpc-reply>"#;
+        assert!(matches!(
+            parse_rpc_reply(xml, "1"),
+            Err(RpcError::ParseError(_))
+        ));
+    }
+
+    #[test]
+    fn does_not_repair_non_routing_engine_mismatch() {
+        let xml = r#"<rpc-reply message-id="1">
+  <routing-engine><commit-check-success/></wrong>
+</rpc-reply>"#;
+        assert!(matches!(
+            parse_rpc_reply(xml, "1"),
+            Err(RpcError::ParseError(_))
+        ));
+    }
+
+    #[test]
+    fn does_not_repair_truncated_commit_check() {
+        let xml = r#"<rpc-reply message-id="1">
+  <routing-engine><commit-check-success/>"#;
+        assert!(matches!(
+            parse_rpc_reply(xml, "1"),
+            Err(RpcError::ParseError(_))
+        ));
+    }
+
+    #[test]
+    fn does_not_repair_commit_check_marker_nested_in_data() {
+        let xml = r#"<rpc-reply message-id="1">
+  <routing-engine><data><commit-check-success/></data>
+</rpc-reply>"#;
+        assert!(matches!(
+            parse_rpc_reply(xml, "1"),
+            Err(RpcError::ParseError(_))
+        ));
+    }
+
+    #[test]
+    fn repairs_routing_engine_within_multi_routing_engine_results() {
+        let xml = r#"<rpc-reply message-id="1">
+  <multi-routing-engine-results>
+    <routing-engine><commit-check-success/><ok/>
+  </multi-routing-engine-results>
+</rpc-reply>"#;
+        assert!(matches!(parse_rpc_reply(xml, "1"), Ok(RpcReply::Ok)));
     }
 
     #[test]
