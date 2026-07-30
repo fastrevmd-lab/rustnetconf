@@ -15,6 +15,7 @@
 - Add no public error variants and no new dependencies.
 - Keep `quick-xml` at version `0.41`.
 - Preserve qualified names, namespace declarations, attributes, entities, CDATA semantics, nested `<error-info>`, warnings, and direct Junos payloads.
+- Treat nested `<ok/>` and `<rpc-error>` inside direct vendor wrappers as protocol outcomes; treat those names inside standard `<data>` as ordinary captured data.
 - Require exactly one matching `message-id`.
 - Continue accepting a valid empty `<rpc-reply message-id="..."/>` as `RpcReply::Ok`.
 - Repair only an unclosed `<routing-engine>` in a supported chassis-cluster commit-check context with a real closing `<rpc-reply>`.
@@ -602,6 +603,33 @@ mod tests {
             Err(RpcError::ServerError { .. })
         ));
     }
+
+    #[test]
+    fn direct_vendor_wrappers_preserve_nested_protocol_outcomes() {
+        let ok = r#"<rpc-reply message-id="7">
+          <routing-engine><commit-check-success/><ok/></routing-engine>
+        </rpc-reply>"#;
+        assert!(matches!(parse_strict(ok, "7"), Ok(RpcReply::Ok)));
+
+        let error = r#"<rpc-reply message-id="8"><routing-engine>
+          <rpc-error>
+            <error-type>application</error-type>
+            <error-tag>operation-failed</error-tag>
+            <error-severity>error</error-severity>
+            <error-message>commit check failed</error-message>
+          </rpc-error>
+        </routing-engine></rpc-reply>"#;
+        assert!(matches!(
+            parse_strict(error, "8"),
+            Err(RpcError::ServerError { .. })
+        ));
+
+        let data = r#"<rpc-reply message-id="9"><data>
+          <rpc-error><error-message>modeled data</error-message></rpc-error>
+          <ok/>
+        </data></rpc-reply>"#;
+        assert!(matches!(parse_strict(data, "9"), Ok(RpcReply::Data(_))));
+    }
 }
 ```
 
@@ -721,6 +749,7 @@ struct ReplyParser<'a> {
     envelope: EnvelopeState,
     message_id: Option<String>,
     payload: PayloadState,
+    protocol_ok: bool,
     current_error: Option<ErrorState>,
     errors: Vec<RpcErrorInfo>,
 }
@@ -732,6 +761,7 @@ impl<'a> ReplyParser<'a> {
             envelope: EnvelopeState::BeforeReply,
             message_id: None,
             payload: PayloadState::None,
+            protocol_ok: false,
             current_error: None,
             errors: Vec::new(),
         }
@@ -788,6 +818,12 @@ dispatch order:
 ```rust
 impl ReplyParser<'_> {
     fn start(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
+        if self.in_open_direct_payload()
+            && local_name(tag.name().as_ref()) == b"rpc-error"
+        {
+            self.current_error = Some(ErrorState::default());
+            return Ok(());
+        }
         if self.capture_start(tag)? {
             return Ok(());
         }
@@ -819,6 +855,10 @@ impl ReplyParser<'_> {
     }
 
     fn empty(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
+        if self.in_open_direct_payload() && local_name(tag.name().as_ref()) == b"ok" {
+            self.protocol_ok = true;
+            return Ok(());
+        }
         if self.capture_empty(tag)? {
             return Ok(());
         }
@@ -914,6 +954,13 @@ Implement those transitions with these helpers:
 
 ```rust
 impl ReplyParser<'_> {
+    fn in_open_direct_payload(&self) -> bool {
+        matches!(
+            self.payload,
+            PayloadState::Direct { depth, .. } if depth > 0
+        )
+    }
+
     fn capture_start(&mut self, tag: &BytesStart<'_>) -> Result<bool, RpcError> {
         if let Some(error) = self.current_error.as_mut() {
             if let Some(capture) = error.info_capture.as_mut() {
@@ -1180,6 +1227,14 @@ impl ReplyParser<'_> {
     }
 
     fn set_ok(&mut self) -> Result<(), RpcError> {
+        if self.protocol_ok {
+            return if warnings.is_empty() {
+                Ok(RpcReply::Ok)
+            } else {
+                Ok(RpcReply::OkWithWarnings(warnings))
+            };
+        }
+
         match self.payload {
             PayloadState::None => {
                 self.payload = PayloadState::Ok;

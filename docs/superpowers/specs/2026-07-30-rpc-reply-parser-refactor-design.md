@@ -146,6 +146,12 @@ instead of being dropped through `.flatten()` or replaced with empty text.
 captures, complete errors, and a single unambiguous outcome before constructing
 the existing public result types.
 
+Junos commit-check replies may place `<ok/>` or `<rpc-error>` inside a direct
+`<routing-engine>` vendor wrapper. Those nested protocol elements retain their
+success or error meaning and take precedence over the wrapper payload. Elements
+with the same local names inside standard `<data>` remain ordinary captured
+configuration data.
+
 ## XML Fragment Capture
 
 `FragmentCapture` is the only code responsible for reconstructing returned XML.
@@ -185,8 +191,9 @@ After structural validation, the parser resolves the result in this order:
 
 1. Any hard `<rpc-error>` returns the first hard error as the existing
    `RpcError::ServerError`.
-2. A `<data>` or direct payload returns `Data` or `DataWithWarnings`.
-3. `<ok/>` returns `Ok` or `OkWithWarnings`.
+2. A top-level `<ok/>`, or a nested `<ok/>` in a direct vendor wrapper, returns
+   `Ok` or `OkWithWarnings`.
+3. A `<data>` or direct payload returns `Data` or `DataWithWarnings`.
 4. A warning-only reply returns `OkWithWarnings`.
 5. A structurally valid empty `<rpc-reply message-id="..."/>` returns `Ok`, as
    permitted by RFC 6241.
