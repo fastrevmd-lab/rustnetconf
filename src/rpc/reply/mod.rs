@@ -1,3 +1,5 @@
+mod capture;
+
 use crate::error::RpcError;
 use crate::rpc::operations::escape_xml_text;
 use crate::types::{ErrorSeverity, ErrorTag, RpcErrorType};
