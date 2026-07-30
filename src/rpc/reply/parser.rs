@@ -761,10 +761,8 @@ impl RpcErrorBuilder {
                     "rpc" => RpcErrorType::Rpc,
                     "protocol" => RpcErrorType::Protocol,
                     "application" => RpcErrorType::Application,
-                    other => {
-                        return Err(parse_error(format!(
-                            "invalid rpc-error error-type: {other}"
-                        )));
+                    _ => {
+                        return Err(parse_error("invalid rpc-error error-type"));
                     }
                 });
             }
@@ -780,10 +778,8 @@ impl RpcErrorBuilder {
                 self.severity = Some(match value.trim() {
                     "error" => ErrorSeverity::Error,
                     "warning" => ErrorSeverity::Warning,
-                    other => {
-                        return Err(parse_error(format!(
-                            "invalid rpc-error error-severity: {other}"
-                        )));
+                    _ => {
+                        return Err(parse_error("invalid rpc-error error-severity"));
                     }
                 });
             }
@@ -950,6 +946,48 @@ mod tests {
             parse_strict(invalid_severity, "1"),
             Err(RpcError::ParseError(_))
         ));
+    }
+
+    #[test]
+    fn invalid_rpc_error_value_diagnostics_are_bounded() {
+        let marker = "SENSITIVE_DEVICE_VALUE";
+        let invalid = format!("{marker}{}", "x".repeat(4096));
+        let cases = [
+            (
+                "error-type",
+                format!(
+                    r#"<error-type>{invalid}</error-type>
+                       <error-tag>operation-failed</error-tag>
+                       <error-severity>error</error-severity>"#
+                ),
+            ),
+            (
+                "error-severity",
+                format!(
+                    r#"<error-type>application</error-type>
+                       <error-tag>operation-failed</error-tag>
+                       <error-severity>{invalid}</error-severity>"#
+                ),
+            ),
+        ];
+
+        for (field, fields) in cases {
+            let xml =
+                format!(r#"<rpc-reply message-id="1"><rpc-error>{fields}</rpc-error></rpc-reply>"#);
+            let error = parse_strict(&xml, "1").expect_err("invalid value must fail");
+            let RpcError::ParseError(message) = error else {
+                panic!("expected ParseError");
+            };
+            assert!(
+                message.contains(field),
+                "error must name {field}: {message}"
+            );
+            assert!(message.len() < 128, "error must stay bounded: {message}");
+            assert!(
+                !message.contains(marker),
+                "error must not echo device content: {message}"
+            );
+        }
     }
 
     #[test]
