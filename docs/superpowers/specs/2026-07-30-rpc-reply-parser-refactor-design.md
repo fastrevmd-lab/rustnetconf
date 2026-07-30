@@ -64,7 +64,8 @@ src/rpc/
   semantic finalization.
 - `reply/capture.rs` owns XML-fragment reconstruction shared by standard
   `<data>`, direct vendor payloads, and `<error-info>`.
-- `reply/repair.rs` owns the narrow Junos multi-routing-engine normalization.
+- `reply/repair.rs` owns the narrow Junos chassis-cluster commit-check
+  normalization.
 - `rpc/mod.rs` privately declares `reply` and publicly re-exports
   `parse_rpc_reply`, `RpcErrorInfo`, and `RpcReply`, preserving their current
   source paths.
@@ -205,9 +206,13 @@ hold:
 
 - The document has one recognizable `<rpc-reply>` envelope with a real closing
   tag.
-- The malformed content is inside `<multi-routing-engine-results>`.
 - The unmatched open element is exactly `<routing-engine>` (with any namespace
   prefix).
+- The `<routing-engine>` is either directly beneath `<rpc-reply>`, as in the
+  captured Junos cluster commit-check reply, or within a recognized
+  `<multi-routing-engine-results>` container.
+- The routing-engine subtree contains a commit-check result marker
+  (`<commit-check-success/>`) or an `<rpc-error>`.
 - The next sibling `<routing-engine>` or a legitimate ancestor close proves
   where that element should have ended.
 - No non-`routing-engine` mismatch, truncation, or unclosed element remains.
@@ -277,7 +282,8 @@ Table-driven fixtures will distinguish:
 - Well-formed cluster replies that bypass repair.
 - Truncated cluster replies.
 - Mismatched non-`routing-engine` elements.
-- `routing-engine` elements outside the recognized cluster envelope.
+- `routing-engine` elements without a commit-check marker or supported cluster
+  placement.
 - Inputs that would require more than the permitted narrow repair.
 
 ### Verification
