@@ -814,6 +814,7 @@ impl ReplyParser<'_> {
             if is_namespace_declaration(attribute.key.as_ref()) {
                 continue;
             }
+            decode_attribute(attribute.value.as_ref(), "ordinary XML attribute value")?;
             let name = self.expanded_attribute_name(attribute.key.as_ref())?;
             let key = (name.namespace.map(str::to_string), name.local.to_string());
             if !expanded_attributes.insert(key) {
@@ -1624,6 +1625,184 @@ mod tests {
             panic!("expected Data");
         };
         assert!(data.contains('😀'));
+    }
+
+    #[test]
+    fn validates_every_ordinary_attribute_before_start_or_empty_semantics() {
+        fn cases(value: &str) -> Vec<(&'static str, String)> {
+            let required_error_fields = "\
+              <error-type>application</error-type>\
+              <error-tag>operation-failed</error-tag>\
+              <error-severity>error</error-severity>";
+            vec![
+                (
+                    "rpc-reply extra attribute",
+                    format!(
+                        "<rpc-reply message-id=\"1\" probe=\"{value}\"><ok/></rpc-reply>"
+                    ),
+                ),
+                (
+                    "ok Start",
+                    format!(
+                        "<rpc-reply message-id=\"1\"><ok probe=\"{value}\"></ok></rpc-reply>"
+                    ),
+                ),
+                (
+                    "ok Empty",
+                    format!("<rpc-reply message-id=\"1\"><ok probe=\"{value}\"/></rpc-reply>"),
+                ),
+                (
+                    "data Start",
+                    format!(
+                        "<rpc-reply message-id=\"1\"><data probe=\"{value}\"><x/></data></rpc-reply>"
+                    ),
+                ),
+                (
+                    "data Empty",
+                    format!("<rpc-reply message-id=\"1\"><data probe=\"{value}\"/></rpc-reply>"),
+                ),
+                (
+                    "rpc-error Start",
+                    format!(
+                        "<rpc-reply message-id=\"1\"><rpc-error probe=\"{value}\">\
+                         {required_error_fields}</rpc-error></rpc-reply>"
+                    ),
+                ),
+                (
+                    "rpc-error Empty",
+                    format!(
+                        "<rpc-reply message-id=\"1\"><rpc-error probe=\"{value}\"/></rpc-reply>"
+                    ),
+                ),
+                (
+                    "rpc-error field Start",
+                    format!(
+                        "<rpc-reply message-id=\"1\"><rpc-error>{required_error_fields}\
+                         <error-message probe=\"{value}\">device failure</error-message>\
+                         </rpc-error></rpc-reply>"
+                    ),
+                ),
+                (
+                    "rpc-error field Empty",
+                    format!(
+                        "<rpc-reply message-id=\"1\"><rpc-error>{required_error_fields}\
+                         <error-message probe=\"{value}\"/>\
+                         </rpc-error></rpc-reply>"
+                    ),
+                ),
+                (
+                    "error-info Start",
+                    format!(
+                        "<rpc-reply message-id=\"1\"><rpc-error>{required_error_fields}\
+                         <error-info probe=\"{value}\"><detail/></error-info>\
+                         </rpc-error></rpc-reply>"
+                    ),
+                ),
+                (
+                    "error-info Empty",
+                    format!(
+                        "<rpc-reply message-id=\"1\"><rpc-error>{required_error_fields}\
+                         <error-info probe=\"{value}\"/>\
+                         </rpc-error></rpc-reply>"
+                    ),
+                ),
+                (
+                    "nested direct protocol marker Start",
+                    format!(
+                        "<rpc-reply message-id=\"1\"><wrapper>\
+                         <ok probe=\"{value}\"></ok></wrapper></rpc-reply>"
+                    ),
+                ),
+                (
+                    "nested direct protocol marker Empty",
+                    format!(
+                        "<rpc-reply message-id=\"1\"><wrapper>\
+                         <ok probe=\"{value}\"/></wrapper></rpc-reply>"
+                    ),
+                ),
+                (
+                    "ignored payload Start",
+                    format!(
+                        "<rpc-reply message-id=\"1\"><ok/><data>\
+                         <item probe=\"{value}\"></item></data></rpc-reply>"
+                    ),
+                ),
+                (
+                    "ignored payload Empty",
+                    format!(
+                        "<rpc-reply message-id=\"1\"><ok/><data>\
+                         <item probe=\"{value}\"/></data></rpc-reply>"
+                    ),
+                ),
+            ]
+        }
+
+        let invalid_values = [
+            ("raw XML-invalid character", "\0"),
+            ("unknown entity", "&SENSITIVE_DEVICE_MARKER;"),
+        ];
+        let mut failures = Vec::new();
+
+        for (invalid_kind, value) in invalid_values {
+            for (path, xml) in cases(value) {
+                match parse_strict(&xml, "1") {
+                    Err(RpcError::ParseError(message))
+                        if message.contains("attribute")
+                            && message.len() < 128
+                            && !message.contains("SENSITIVE_DEVICE_MARKER")
+                            && !message.contains('\0') => {}
+                    result => failures.push(format!("{invalid_kind}, {path}: {result:?}")),
+                }
+            }
+        }
+
+        assert!(
+            failures.is_empty(),
+            "ordinary attribute validation was bypassed: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn ordinary_attributes_accept_valid_entities_and_xml_characters() {
+        let value = "safe &amp; &#38; &#x1F600; \t\n\r😀";
+        let ok = format!(
+            "<rpc-reply message-id=\"1\" probe=\"{value}\">\
+             <ok probe=\"{value}\"/></rpc-reply>"
+        );
+        assert!(matches!(parse_strict(&ok, "1"), Ok(RpcReply::Ok)));
+
+        let data = format!(
+            "<rpc-reply message-id=\"1\" probe=\"{value}\">\
+             <data probe=\"{value}\"><item probe=\"{value}\"/></data></rpc-reply>"
+        );
+        assert!(matches!(parse_strict(&data, "1"), Ok(RpcReply::Data(_))));
+
+        let error = format!(
+            "<rpc-reply message-id=\"1\" probe=\"{value}\"><rpc-error probe=\"{value}\">\
+             <error-type probe=\"{value}\">application</error-type>\
+             <error-tag probe=\"{value}\">operation-failed</error-tag>\
+             <error-severity probe=\"{value}\">error</error-severity>\
+             <error-message probe=\"{value}\"/>\
+             <error-info probe=\"{value}\"/>\
+             </rpc-error></rpc-reply>"
+        );
+        assert!(matches!(
+            parse_strict(&error, "1"),
+            Err(RpcError::ServerError { .. })
+        ));
+
+        let ignored = format!(
+            "<rpc-reply message-id=\"1\"><ok/><data probe=\"{value}\">\
+             <item probe=\"{value}\"/></data><rpc-error>\
+             <error-type>application</error-type>\
+             <error-tag>operation-failed</error-tag>\
+             <error-severity>error</error-severity>\
+             </rpc-error></rpc-reply>"
+        );
+        assert!(matches!(
+            parse_strict(&ignored, "1"),
+            Err(RpcError::ServerError { .. })
+        ));
     }
 
     #[test]

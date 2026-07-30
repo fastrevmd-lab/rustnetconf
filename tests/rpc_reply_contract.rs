@@ -100,3 +100,52 @@ fn public_reply_type_paths_remain_available() {
     let _ = accepts_info as fn(rustnetconf::rpc::RpcErrorInfo);
     let _ = accepts_root_info as fn(rustnetconf::RpcErrorInfo);
 }
+
+#[test]
+fn public_parser_validates_ordinary_attributes_before_reply_outcomes() {
+    fn cases(value: &str) -> Vec<(&'static str, String)> {
+        vec![
+            (
+                "rpc-reply",
+                format!("<rpc-reply message-id=\"1\" probe=\"{value}\"><ok/></rpc-reply>"),
+            ),
+            (
+                "empty ok",
+                format!("<rpc-reply message-id=\"1\"><ok probe=\"{value}\"/></rpc-reply>"),
+            ),
+            (
+                "data",
+                format!(
+                    "<rpc-reply message-id=\"1\"><data probe=\"{value}\"><x/></data></rpc-reply>"
+                ),
+            ),
+            (
+                "rpc-error field",
+                format!(
+                    "<rpc-reply message-id=\"1\"><rpc-error>\
+                     <error-type>application</error-type>\
+                     <error-tag>operation-failed</error-tag>\
+                     <error-severity>error</error-severity>\
+                     <error-message probe=\"{value}\"/>\
+                     </rpc-error></rpc-reply>"
+                ),
+            ),
+        ]
+    }
+
+    for value in ["\0", "&PUBLIC_DEVICE_MARKER;"] {
+        for (path, xml) in cases(value) {
+            let RpcError::ParseError(message) =
+                parse_rpc_reply(&xml, "1").expect_err("invalid attribute must fail")
+            else {
+                panic!("{path}: expected ParseError");
+            };
+            assert!(message.contains("attribute"), "{path}: {message}");
+            assert!(message.len() < 128, "{path}: diagnostic is unbounded");
+            assert!(
+                !message.contains("PUBLIC_DEVICE_MARKER") && !message.contains('\0'),
+                "{path}: diagnostic exposes device content"
+            );
+        }
+    }
+}
