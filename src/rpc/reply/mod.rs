@@ -793,4 +793,25 @@ mod tests {
             }) if expected == "expected" && actual == "actual"
         ));
     }
+
+    #[test]
+    fn rejects_prefixed_only_message_id() {
+        let xml =
+            r#"<rpc-reply xmlns:evil="urn:example:evil" evil:message-id="1"><ok/></rpc-reply>"#;
+        let result = parse_rpc_reply(xml, "1");
+        assert!(
+            matches!(result, Err(RpcError::ParseError(_))),
+            "a qualified attribute is not the NETCONF message-id: {result:?}"
+        );
+    }
+
+    #[test]
+    fn accepts_unqualified_message_id_with_qualified_attributes() {
+        let xml = r#"<rpc-reply xmlns:evil="urn:example:evil" message-id="1" evil:message-id="ignored" evil:note="metadata"><ok/></rpc-reply>"#;
+        let result = parse_rpc_reply(xml, "1");
+        assert!(
+            matches!(result, Ok(RpcReply::Ok)),
+            "qualified attributes must not conflict with message-id: {result:?}"
+        );
+    }
 }

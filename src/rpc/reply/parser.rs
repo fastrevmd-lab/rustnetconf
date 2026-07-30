@@ -523,7 +523,7 @@ impl ReplyParser<'_> {
         for attribute in tag.attributes().with_checks(true) {
             let attribute = attribute
                 .map_err(|error| parse_error(format!("invalid XML attribute: {error}")))?;
-            if local_name(attribute.key.as_ref()) == b"message-id" {
+            if attribute.key.as_ref() == b"message-id" {
                 if message_id.is_some() {
                     return Err(parse_error("duplicate message-id attribute"));
                 }
