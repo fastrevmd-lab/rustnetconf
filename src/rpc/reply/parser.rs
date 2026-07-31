@@ -1,7 +1,8 @@
 use super::capture::{
-    decode_attribute, is_namespace_declaration, namespace_declarations, validate_qname,
-    validate_xml_chars, FragmentCapture, NamespaceBindings, ValidatedQName, XML_NAMESPACE,
+    is_namespace_declaration, namespace_declarations, validate_qname, FragmentCapture,
+    NamespaceBindings, ValidatedQName, XML_NAMESPACE,
 };
+use super::lexical::{decode_attribute, validate_xml_chars, DocumentLexicalState};
 use super::{RpcErrorInfo, RpcReply};
 use crate::error::RpcError;
 use crate::types::{ErrorSeverity, ErrorTag, RpcErrorType};
@@ -136,32 +137,25 @@ impl<'a> ReplyParser<'a> {
 pub(super) fn parse_strict(xml: &str, expected_message_id: &str) -> Result<RpcReply, RpcError> {
     let mut parser = ReplyParser::new(expected_message_id);
     let mut reader = Reader::from_str(xml);
+    let mut lexical = DocumentLexicalState::default();
 
     loop {
-        match reader.read_event() {
-            Ok(Event::Start(tag)) => parser.start(&tag)?,
-            Ok(Event::Empty(tag)) => parser.empty(&tag)?,
-            Ok(Event::Text(text)) => parser.text(&text)?,
-            Ok(Event::CData(cdata)) => parser.cdata(&cdata)?,
-            Ok(Event::GeneralRef(entity)) => parser.entity(&entity)?,
-            Ok(Event::End(tag)) => parser.end(&tag)?,
-            Ok(Event::Comment(comment)) => {
-                let decoded = comment
-                    .decode()
-                    .map_err(|_| parse_error("invalid comment encoding"))?;
-                validate_xml_chars(&decoded, "comment")?;
-            }
-            Ok(Event::PI(instruction)) => {
-                let decoded = std::str::from_utf8(instruction.as_ref())
-                    .map_err(|_| parse_error("invalid processing instruction encoding"))?;
-                validate_xml_chars(decoded, "processing instruction")?;
-            }
-            Ok(Event::Decl(_)) => {}
-            Ok(Event::DocType(_)) => {
+        let event = reader
+            .read_event()
+            .map_err(|_| parse_error("XML parse error: malformed document"))?;
+        lexical.validate_event(&event)?;
+        match event {
+            Event::Start(tag) => parser.start(&tag)?,
+            Event::Empty(tag) => parser.empty(&tag)?,
+            Event::Text(text) => parser.text(&text)?,
+            Event::CData(cdata) => parser.cdata(&cdata)?,
+            Event::GeneralRef(entity) => parser.entity(&entity)?,
+            Event::End(tag) => parser.end(&tag)?,
+            Event::Comment(_) | Event::PI(_) | Event::Decl(_) => {}
+            Event::DocType(_) => {
                 return Err(parse_error("DOCTYPE is not allowed in an RPC reply"));
             }
-            Ok(Event::Eof) => break,
-            Err(_) => return Err(parse_error("XML parse error: malformed document")),
+            Event::Eof => break,
         }
     }
 
@@ -2352,5 +2346,264 @@ mod tests {
         let info = warning.info.as_deref().expect("error-info");
         assert!(info.contains("code=\"42\""));
         assert!(info.contains("x &lt; y"));
+    }
+
+    #[test]
+    fn rejects_raw_less_than_in_attribute_values_before_unescaping() {
+        let sensitive = "SENSITIVE_RAW_ATTRIBUTE";
+        let cases = [
+            (
+                "message-id",
+                format!(r#"<rpc-reply message-id="{sensitive}<value"><ok/></rpc-reply>"#),
+            ),
+            (
+                "ordinary protocol attribute",
+                format!(r#"<rpc-reply message-id="1" probe="{sensitive}<value"><ok/></rpc-reply>"#),
+            ),
+            (
+                "captured data attribute",
+                format!(
+                    r#"<rpc-reply message-id="1"><data><item value="{sensitive}<value"/></data></rpc-reply>"#
+                ),
+            ),
+            (
+                "namespace declaration",
+                format!(
+                    r#"<rpc-reply message-id="1"><data><item xmlns:v="urn:{sensitive}<value"/></data></rpc-reply>"#
+                ),
+            ),
+        ];
+
+        for (path, xml) in cases {
+            let RpcError::ParseError(message) =
+                parse_strict(&xml, "1").expect_err("raw '<' in an attribute must fail")
+            else {
+                panic!("{path}: expected ParseError");
+            };
+            assert_eq!(message, "attribute value contains raw '<'", "{path}");
+            assert!(message.len() < 128, "{path}: diagnostic is unbounded");
+            assert!(
+                !message.contains(sensitive),
+                "{path}: diagnostic exposes input"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_cdata_terminator_in_every_text_path() {
+        let required_error_fields = "\
+          <error-type>application</error-type>\
+          <error-tag>operation-failed</error-tag>\
+          <error-severity>error</error-severity>";
+        let cases = [
+            (
+                "before root",
+                "SENSITIVE]]><rpc-reply message-id=\"1\"><ok/></rpc-reply>".to_string(),
+            ),
+            (
+                "data payload",
+                "<rpc-reply message-id=\"1\"><data><x>SENSITIVE]]></x></data></rpc-reply>"
+                    .to_string(),
+            ),
+            (
+                "direct payload",
+                "<rpc-reply message-id=\"1\"><output>SENSITIVE]]></output></rpc-reply>".to_string(),
+            ),
+            (
+                "rpc-error field",
+                format!(
+                    "<rpc-reply message-id=\"1\"><rpc-error>{required_error_fields}\
+                     <error-message>SENSITIVE]]></error-message>\
+                     </rpc-error></rpc-reply>"
+                ),
+            ),
+            (
+                "ignored conflicting payload",
+                "<rpc-reply message-id=\"1\"><ok/><data><x>SENSITIVE]]></x></data></rpc-reply>"
+                    .to_string(),
+            ),
+            (
+                "after root",
+                "<rpc-reply message-id=\"1\"><ok/></rpc-reply>SENSITIVE]]>".to_string(),
+            ),
+        ];
+
+        for (path, xml) in cases {
+            let RpcError::ParseError(message) =
+                parse_strict(&xml, "1").expect_err("raw ']]>' in text must fail")
+            else {
+                panic!("{path}: expected ParseError");
+            };
+            assert_eq!(
+                message, "character data contains forbidden CDATA terminator",
+                "{path}"
+            );
+            assert!(message.len() < 128, "{path}: diagnostic is unbounded");
+            assert!(
+                !message.contains("SENSITIVE"),
+                "{path}: diagnostic exposes input"
+            );
+        }
+    }
+
+    #[test]
+    fn validates_comment_lexical_grammar_around_and_inside_the_root() {
+        let invalid = [
+            (
+                "before root double hyphen",
+                "<!--SENSITIVE--comment--><rpc-reply message-id=\"1\"><ok/></rpc-reply>",
+            ),
+            (
+                "inside root trailing hyphen",
+                "<rpc-reply message-id=\"1\"><!--SENSITIVE---><ok/></rpc-reply>",
+            ),
+            (
+                "after root double hyphen",
+                "<rpc-reply message-id=\"1\"><ok/></rpc-reply><!--SENSITIVE--comment-->",
+            ),
+        ];
+        for (path, xml) in invalid {
+            let RpcError::ParseError(message) =
+                parse_strict(xml, "1").expect_err("invalid comment must fail")
+            else {
+                panic!("{path}: expected ParseError");
+            };
+            assert_eq!(message, "invalid XML comment syntax", "{path}");
+            assert!(message.len() < 128, "{path}: diagnostic is unbounded");
+            assert!(
+                !message.contains("SENSITIVE"),
+                "{path}: diagnostic exposes input"
+            );
+        }
+
+        let valid = "<!--before-a-b--><?before ok?>\
+          <rpc-reply message-id=\"1\"><!--inside-a-b--><ok/></rpc-reply>\
+          <!--after-a-b-->";
+        assert!(
+            matches!(parse_strict(valid, "1"), Ok(RpcReply::Ok)),
+            "valid comments remain accepted"
+        );
+    }
+
+    #[test]
+    fn validates_processing_instruction_targets() {
+        let invalid = [
+            (
+                "empty target before root",
+                "<??><rpc-reply message-id=\"1\"><ok/></rpc-reply>",
+            ),
+            (
+                "numeric target inside root",
+                "<rpc-reply message-id=\"1\"><?1SENSITIVE?><ok/></rpc-reply>",
+            ),
+            (
+                "invalid name after root",
+                "<rpc-reply message-id=\"1\"><ok/></rpc-reply><?bad?target?>",
+            ),
+            (
+                "reserved target",
+                "<?XmL SENSITIVE?><rpc-reply message-id=\"1\"><ok/></rpc-reply>",
+            ),
+        ];
+        for (path, xml) in invalid {
+            let RpcError::ParseError(message) =
+                parse_strict(xml, "1").expect_err("invalid PI target must fail")
+            else {
+                panic!("{path}: expected ParseError");
+            };
+            assert_eq!(message, "invalid processing instruction target", "{path}");
+            assert!(message.len() < 128, "{path}: diagnostic is unbounded");
+            assert!(
+                !message.contains("SENSITIVE"),
+                "{path}: diagnostic exposes input"
+            );
+        }
+
+        let valid = "<?a:b before?><?xml-stylesheet href=\"style.css\"?>\
+          <rpc-reply message-id=\"1\"><?inside:target data?><ok/></rpc-reply>\
+          <?after data?>";
+        assert!(
+            matches!(parse_strict(valid, "1"), Ok(RpcReply::Ok)),
+            "valid XML Name PI targets remain accepted"
+        );
+    }
+
+    #[test]
+    fn validates_xml_declaration_grammar_and_placement() {
+        let root = r#"<rpc-reply message-id="1"><ok/></rpc-reply>"#;
+        let invalid = [
+            ("nonsense declaration", format!("<?xml nonsense?>{root}")),
+            (
+                "whitespace before declaration",
+                format!(" \n<?xml version=\"1.0\"?>{root}"),
+            ),
+            (
+                "comment before declaration",
+                format!("<!--before--><?xml version=\"1.0\"?>{root}"),
+            ),
+            (
+                "duplicate declaration",
+                format!("<?xml version=\"1.0\"?><?xml version=\"1.0\"?>{root}"),
+            ),
+            (
+                "declaration inside root",
+                r#"<rpc-reply message-id="1"><?xml version="1.0"?><ok/></rpc-reply>"#.to_string(),
+            ),
+            (
+                "declaration after root",
+                format!("{root}<?xml version=\"1.0\"?>"),
+            ),
+            (
+                "missing version",
+                format!("<?xml encoding=\"UTF-8\"?>{root}"),
+            ),
+            (
+                "unsupported version",
+                format!("<?xml version=\"1.1\"?>{root}"),
+            ),
+            (
+                "invalid encoding",
+                format!("<?xml version=\"1.0\" encoding=\"9UTF\"?>{root}"),
+            ),
+            (
+                "invalid standalone",
+                format!("<?xml version=\"1.0\" standalone=\"maybe\"?>{root}"),
+            ),
+            (
+                "unknown declaration attribute",
+                format!("<?xml version=\"1.0\" SENSITIVE=\"value\"?>{root}"),
+            ),
+            (
+                "duplicate declaration attribute",
+                format!("<?xml version=\"1.0\" version=\"1.0\"?>{root}"),
+            ),
+            (
+                "declaration attributes out of order",
+                format!("<?xml version=\"1.0\" standalone=\"yes\" encoding=\"UTF-8\"?>{root}"),
+            ),
+        ];
+
+        for (path, xml) in invalid {
+            let RpcError::ParseError(message) =
+                parse_strict(&xml, "1").expect_err("invalid declaration must fail")
+            else {
+                panic!("{path}: expected ParseError");
+            };
+            assert!(
+                message.contains("XML declaration"),
+                "{path}: unexpected diagnostic: {message}"
+            );
+            assert!(message.len() < 128, "{path}: diagnostic is unbounded");
+            assert!(
+                !message.contains("SENSITIVE"),
+                "{path}: diagnostic exposes input"
+            );
+        }
+
+        let valid = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><rpc-reply message-id="1"><ok/></rpc-reply>"#;
+        assert!(
+            matches!(parse_strict(valid, "1"), Ok(RpcReply::Ok)),
+            "valid XML 1.0 declaration remains accepted"
+        );
     }
 }

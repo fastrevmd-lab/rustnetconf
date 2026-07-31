@@ -1,3 +1,6 @@
+use super::lexical::{
+    decode_attribute, is_valid_xml_char, validate_ncname, validate_text_lexical, validate_xml_chars,
+};
 use crate::error::RpcError;
 use crate::rpc::operations::{escape_xml_attr, escape_xml_text};
 use quick_xml::events::{BytesCData, BytesEnd, BytesRef, BytesStart, BytesText};
@@ -57,6 +60,7 @@ impl FragmentCapture {
     }
 
     pub(super) fn text(&mut self, text: &BytesText<'_>) -> Result<(), RpcError> {
+        validate_text_lexical(text.as_ref())?;
         let decoded = text
             .decode()
             .map_err(|error| parse_error(format!("invalid text encoding: {error}")))?;
@@ -233,67 +237,6 @@ fn validate_namespace_binding(prefix: &str, namespace: &str) -> Result<(), RpcEr
         ));
     }
     Ok(())
-}
-
-fn validate_ncname(name: &str, field: &str) -> Result<(), RpcError> {
-    let mut chars = name.chars();
-    if !chars.next().is_some_and(is_ncname_start) || !chars.all(is_ncname_char) {
-        return Err(parse_error(format!("invalid {field}")));
-    }
-    Ok(())
-}
-
-fn is_ncname_start(value: char) -> bool {
-    matches!(
-        value as u32,
-        0x41..=0x5A
-            | 0x5F
-            | 0x61..=0x7A
-            | 0xC0..=0xD6
-            | 0xD8..=0xF6
-            | 0xF8..=0x2FF
-            | 0x370..=0x37D
-            | 0x37F..=0x1FFF
-            | 0x200C..=0x200D
-            | 0x2070..=0x218F
-            | 0x2C00..=0x2FEF
-            | 0x3001..=0xD7FF
-            | 0xF900..=0xFDCF
-            | 0xFDF0..=0xFFFD
-            | 0x10000..=0xEFFFF
-    )
-}
-
-fn is_ncname_char(value: char) -> bool {
-    is_ncname_start(value)
-        || matches!(
-            value as u32,
-            0x2D | 0x2E | 0x30..=0x39 | 0xB7 | 0x300..=0x36F | 0x203F..=0x2040
-        )
-}
-
-fn is_valid_xml_char(value: char) -> bool {
-    matches!(
-        value as u32,
-        0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF
-    )
-}
-
-pub(super) fn validate_xml_chars(value: &str, field: &'static str) -> Result<(), RpcError> {
-    if value.chars().all(is_valid_xml_char) {
-        Ok(())
-    } else {
-        Err(parse_error(format!("invalid XML character in {field}")))
-    }
-}
-
-pub(super) fn decode_attribute(raw: &[u8], field: &'static str) -> Result<String, RpcError> {
-    let raw = str::from_utf8(raw).map_err(|_| parse_error(format!("invalid {field} encoding")))?;
-    let decoded = quick_xml::escape::unescape(raw)
-        .map(|value| value.into_owned())
-        .map_err(|_| parse_error(format!("invalid {field}")))?;
-    validate_xml_chars(&decoded, field)?;
-    Ok(decoded)
 }
 
 fn parse_error(message: String) -> RpcError {

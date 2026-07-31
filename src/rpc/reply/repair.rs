@@ -1,4 +1,5 @@
 use super::capture::{namespace_declarations, NamespaceBindings};
+use super::lexical::DocumentLexicalState;
 use quick_xml::events::{BytesEnd, BytesStart, Event};
 use quick_xml::{Reader, Writer};
 
@@ -110,16 +111,70 @@ fn expanded_name<'name, 'namespace>(
     Some((namespace, local))
 }
 
-/// Junos reply namespaces in this repository use the exact
-/// `http://xml.juniper.net/` authority followed by non-empty path segments.
-/// Keeping the authority and scheme exact, and excluding query or fragment
-/// syntax, rejects lookalike namespaces while allowing the repository's
-/// versioned Junos, XNM, and NETCONF families.
+/// Repair evidence is limited to the three versioned XML namespace families
+/// emitted by supported Junos repositories. URI path segments follow RFC 3986
+/// `pchar` syntax; family names and segment counts remain exact.
 fn is_juniper_xml_namespace(namespace: &str) -> bool {
     let Some(path) = namespace.strip_prefix("http://xml.juniper.net/") else {
         return false;
     };
-    !path.contains(['?', '#']) && path.split('/').all(|segment| !segment.is_empty())
+    let segments = path.split('/').collect::<Vec<_>>();
+    if !segments
+        .iter()
+        .all(|segment| valid_uri_path_segment(segment))
+    {
+        return false;
+    }
+    matches!(
+        segments.as_slice(),
+        ["junos", _, "junos"] | ["xnm", _, "xnm"] | ["netconf", "junos", _]
+    )
+}
+
+fn valid_uri_path_segment(segment: &str) -> bool {
+    if segment.is_empty() || matches!(segment, "." | "..") {
+        return false;
+    }
+
+    let bytes = segment.as_bytes();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            index += 3;
+        } else if byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b':'
+                    | b'@'
+            )
+        {
+            index += 1;
+        } else {
+            return false;
+        }
+    }
+    true
 }
 
 fn namespaces_for(
@@ -274,9 +329,11 @@ pub(super) fn repair_cluster_commit_check(xml: &str) -> Option<String> {
     let mut stack: Vec<OpenElement> = Vec::new();
     let mut repaired_any = false;
     let mut root_state = DocumentRootState::Before;
+    let mut lexical = DocumentLexicalState::default();
 
     loop {
         let event = reader.read_event().ok()?;
+        lexical.validate_event(&event).ok()?;
         if !event_allowed_outside_root(&event, root_state) {
             return None;
         }
@@ -433,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn juniper_repair_namespaces_require_nonempty_path_segments_without_query_or_fragment() {
+    fn juniper_repair_namespaces_require_supported_family_shapes_and_uri_segments() {
         fn marker_reply(namespace: &str) -> String {
             format!(
                 "<rpc-reply xmlns:j=\"{namespace}\" message-id=\"1\">\
@@ -452,16 +509,41 @@ mod tests {
             )
         }
 
+        fn default_marker_reply(namespace: &str) -> String {
+            format!(
+                "<rpc-reply message-id=\"1\">\
+                   <routing-engine>\
+                     <commit-check-success xmlns=\"{namespace}\"/><ok/>\
+                 </rpc-reply>"
+            )
+        }
+
         let invalid = [
             "http://xml.juniper.net/",
             "http://xml.juniper.net//",
             "http://xml.juniper.net//junos",
+            "http://xml.juniper.net/not-a-repository-family",
+            "http://xml.juniper.net/not-a-repository-family/1/value",
+            "http://xml.juniper.net/junos bad",
+            "http://xml.juniper.net/../vendor",
+            "http://xml.juniper.net/junos/current/vendor",
+            "http://xml.juniper.net/junos/current/junos/extra",
+            "http://xml.juniper.net/junos//junos",
+            "http://xml.juniper.net/junos/./junos",
+            "http://xml.juniper.net/junos/../junos",
+            "http://xml.juniper.net/junos/25 bad/junos",
+            "http://xml.juniper.net/junos/25\nbad/junos",
+            "http://xml.juniper.net/junos/%/junos",
+            "http://xml.juniper.net/junos/%A/junos",
+            "http://xml.juniper.net/junos/%2G/junos",
+            "http://xml.juniper.net/xnm/current/junos",
+            "http://xml.juniper.net/netconf/junos",
+            "http://xml.juniper.net/netconf/junos/1.0/extra",
             "http://xml.juniper.net/?query-only",
             "http://xml.juniper.net/#fragment-only",
-            "http://xml.juniper.net/junos?query",
-            "http://xml.juniper.net/junos#fragment",
-            "http://xml.juniper.net/junos//current",
-            "http://xml.juniper.net/junos/current/",
+            "http://xml.juniper.net/junos/25/junos?query",
+            "http://xml.juniper.net/junos/25/junos#fragment",
+            "http://xml.juniper.net/junos/25/junos/",
         ];
         for namespace in invalid {
             assert_eq!(
@@ -474,12 +556,18 @@ mod tests {
                 None,
                 "invalid container namespace authorized repair: {namespace}"
             );
+            assert_eq!(
+                repair_cluster_commit_check(&default_marker_reply(namespace)),
+                None,
+                "invalid default marker namespace authorized repair: {namespace}"
+            );
         }
 
         let valid = [
             "http://xml.juniper.net/junos/25.4R1.12/junos",
             "http://xml.juniper.net/xnm/1.1/xnm",
             "http://xml.juniper.net/netconf/junos/1.0",
+            "http://xml.juniper.net/junos/25.4R1%2D12/junos",
         ];
         for namespace in valid {
             assert!(
@@ -489,6 +577,10 @@ mod tests {
             assert!(
                 repair_cluster_commit_check(&container_reply(namespace)).is_some(),
                 "repository container namespace was rejected: {namespace}"
+            );
+            assert!(
+                repair_cluster_commit_check(&default_marker_reply(namespace)).is_some(),
+                "repository default marker namespace was rejected: {namespace}"
             );
         }
     }
@@ -778,6 +870,50 @@ mod tests {
                 repair_cluster_commit_check(&xml).as_deref(),
                 Some(expected.as_str()),
                 "{path} must be copied without changing the repair"
+            );
+        }
+    }
+
+    #[test]
+    fn lexical_errors_block_repair_scanning() {
+        let cases = [
+            (
+                "raw less-than in ordinary attribute",
+                r#"<rpc-reply message-id="1<raw">
+                  <routing-engine><commit-check-success/><ok/>
+                </rpc-reply>"#,
+            ),
+            (
+                "CDATA terminator in text",
+                r#"<rpc-reply message-id="1">
+                  <routing-engine><commit-check-success/>bad]]><ok/>
+                </rpc-reply>"#,
+            ),
+            (
+                "invalid comment",
+                r#"<!--bad--comment--><rpc-reply message-id="1">
+                  <routing-engine><commit-check-success/><ok/>
+                </rpc-reply>"#,
+            ),
+            (
+                "invalid processing instruction",
+                r#"<rpc-reply message-id="1"><?1bad?>
+                  <routing-engine><commit-check-success/><ok/>
+                </rpc-reply>"#,
+            ),
+            (
+                "misplaced declaration",
+                r#"<rpc-reply message-id="1">
+                  <routing-engine><commit-check-success/><ok/>
+                </rpc-reply><?xml version="1.0"?>"#,
+            ),
+        ];
+
+        for (path, xml) in cases {
+            assert_eq!(
+                repair_cluster_commit_check(xml),
+                None,
+                "{path} must stop repair scanning"
             );
         }
     }

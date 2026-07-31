@@ -1,4 +1,5 @@
 mod capture;
+mod lexical;
 mod parser;
 mod repair;
 
@@ -910,5 +911,129 @@ mod tests {
             matches!(result, Ok(RpcReply::Ok)),
             "qualified attributes must not conflict with message-id: {result:?}"
         );
+    }
+
+    #[test]
+    fn public_parser_rejects_quick_xml_lexical_gaps_with_bounded_errors() {
+        let cases = [
+            (
+                "raw less-than in attribute",
+                r#"<rpc-reply message-id="1"><data><x value="SENSITIVE<raw"/></data></rpc-reply>"#,
+            ),
+            (
+                "CDATA terminator in text",
+                r#"<rpc-reply message-id="1"><data><x>SENSITIVE]]></x></data></rpc-reply>"#,
+            ),
+            (
+                "invalid comment",
+                r#"<!--SENSITIVE--comment--><rpc-reply message-id="1"><ok/></rpc-reply>"#,
+            ),
+            (
+                "invalid PI target",
+                r#"<?1SENSITIVE?><rpc-reply message-id="1"><ok/></rpc-reply>"#,
+            ),
+            (
+                "invalid declaration",
+                r#"<?xml version="1.0" SENSITIVE="value"?><rpc-reply message-id="1"><ok/></rpc-reply>"#,
+            ),
+        ];
+
+        for (path, xml) in cases {
+            let RpcError::ParseError(message) =
+                parse_rpc_reply(xml, "1").expect_err("lexically malformed XML must fail")
+            else {
+                panic!("{path}: expected ParseError");
+            };
+            assert!(message.len() < 128, "{path}: diagnostic is unbounded");
+            assert!(
+                !message.contains("SENSITIVE"),
+                "{path}: diagnostic exposes input"
+            );
+        }
+
+        let valid = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+          <!--before--><?a:b before?>
+          <rpc-reply message-id="1"><!--inside--><?inside data?><ok/></rpc-reply>
+          <!--after--><?after data?>"#;
+        assert!(
+            matches!(parse_rpc_reply(valid, "1"), Ok(RpcReply::Ok)),
+            "valid lexical controls remain accepted"
+        );
+    }
+
+    #[test]
+    fn lexical_errors_in_repair_candidates_preserve_the_original_parse_error() {
+        let cases = [
+            (
+                "raw less-than in ordinary attribute",
+                r#"<rpc-reply message-id="1<raw">
+                  <routing-engine><commit-check-success/><ok/>
+                </rpc-reply>"#,
+            ),
+            (
+                "CDATA terminator in text",
+                r#"<rpc-reply message-id="1">
+                  <routing-engine><commit-check-success/>bad]]><ok/>
+                </rpc-reply>"#,
+            ),
+            (
+                "invalid comment",
+                r#"<!--bad--comment--><rpc-reply message-id="1">
+                  <routing-engine><commit-check-success/><ok/>
+                </rpc-reply>"#,
+            ),
+            (
+                "invalid processing instruction",
+                r#"<rpc-reply message-id="1"><?1bad?>
+                  <routing-engine><commit-check-success/><ok/>
+                </rpc-reply>"#,
+            ),
+            (
+                "misplaced declaration",
+                r#"<rpc-reply message-id="1">
+                  <routing-engine><commit-check-success/><ok/>
+                </rpc-reply><?xml version="1.0"?>"#,
+            ),
+        ];
+
+        for (path, xml) in cases {
+            let original = match parser::parse_strict(xml, "1") {
+                Err(RpcError::ParseError(message)) => message,
+                result => panic!("{path}: expected original ParseError, got {result:?}"),
+            };
+            let returned = match parse_rpc_reply(xml, "1") {
+                Err(RpcError::ParseError(message)) => message,
+                result => panic!("{path}: repair changed the outcome to {result:?}"),
+            };
+            assert_eq!(returned, original, "{path}");
+        }
+    }
+
+    #[test]
+    fn unsupported_juniper_namespace_families_do_not_authorize_repair() {
+        let namespaces = [
+            "http://xml.juniper.net/not-a-repository-family",
+            "http://xml.juniper.net/junos bad",
+            "http://xml.juniper.net/../vendor",
+            "http://xml.juniper.net/junos/../junos",
+            "http://xml.juniper.net/junos/%2G/junos",
+        ];
+
+        for namespace in namespaces {
+            let xml = format!(
+                "<rpc-reply xmlns:j=\"{namespace}\" message-id=\"1\">\
+                   <routing-engine><j:commit-check-success/><ok/>\
+                 </rpc-reply>"
+            );
+            let original = match parser::parse_strict(&xml, "1") {
+                Err(RpcError::ParseError(message)) => message,
+                result => panic!("{namespace}: expected original ParseError, got {result:?}"),
+            };
+            let returned = match parse_rpc_reply(&xml, "1") {
+                Err(RpcError::ParseError(message)) => message,
+                result => panic!("{namespace}: repair changed the outcome to {result:?}"),
+            };
+            assert_eq!(returned, original, "{namespace}");
+        }
     }
 }
