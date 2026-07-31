@@ -607,6 +607,57 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_multi_re_descendants_return_the_original_parse_error() {
+        let complete_error = "\
+          <rpc-error>\
+            <error-type>application</error-type>\
+            <error-tag>operation-failed</error-tag>\
+            <error-severity>error</error-severity>\
+            <error-message>device failure</error-message>\
+          </rpc-error>";
+        let cases = [
+            (
+                "arbitrary wrapper with success marker",
+                r#"<rpc-reply message-id="1"><multi-routing-engine-results>
+                  <outer><routing-engine><commit-check-success/><ok/>
+                  </outer>
+                </multi-routing-engine-results></rpc-reply>"#
+                    .to_string(),
+            ),
+            (
+                "deep wrapper below multi-RE item",
+                r#"<rpc-reply message-id="1"><multi-routing-engine-results>
+                  <multi-routing-engine-item><outer>
+                    <routing-engine><commit-check-success/><ok/>
+                  </outer></multi-routing-engine-item>
+                </multi-routing-engine-results></rpc-reply>"#
+                    .to_string(),
+            ),
+            (
+                "arbitrary wrapper with complete rpc-error",
+                format!(
+                    "<rpc-reply message-id=\"1\"><multi-routing-engine-results>\
+                       <outer><routing-engine>{complete_error}\
+                       </outer>\
+                     </multi-routing-engine-results></rpc-reply>"
+                ),
+            ),
+        ];
+
+        for (path, xml) in cases {
+            let original = match parser::parse_strict(&xml, "1") {
+                Err(RpcError::ParseError(message)) => message,
+                result => panic!("{path}: expected original ParseError, got {result:?}"),
+            };
+            let returned = match parse_rpc_reply(&xml, "1") {
+                Err(RpcError::ParseError(message)) => message,
+                result => panic!("{path}: repair changed the outcome to {result:?}"),
+            };
+            assert_eq!(returned, original, "{path}");
+        }
+    }
+
+    #[test]
     fn repaired_semantic_failure_returns_original_structural_error() {
         let xml = r#"<rpc-reply message-id="1">
   <multi-routing-engine-results>
