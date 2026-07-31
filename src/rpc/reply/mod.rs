@@ -645,6 +645,35 @@ mod tests {
     }
 
     #[test]
+    fn content_outside_repair_envelope_preserves_the_original_parse_error() {
+        let reply = r#"<rpc-reply message-id="1">
+          <routing-engine><commit-check-success/><ok/>
+        </rpc-reply>"#;
+        let cases = [
+            ("preceding significant text", format!("outside{reply}")),
+            ("trailing significant text", format!("{reply}outside")),
+            ("preceding CDATA", format!("<![CDATA[outside]]>{reply}")),
+            ("trailing CDATA", format!("{reply}<![CDATA[outside]]>")),
+            ("preceding entity reference", format!("&amp;{reply}")),
+            ("trailing entity reference", format!("{reply}&amp;")),
+            ("preceding DOCTYPE", format!("<!DOCTYPE rpc-reply>{reply}")),
+            ("trailing DOCTYPE", format!("{reply}<!DOCTYPE rpc-reply>")),
+        ];
+
+        for (path, xml) in cases {
+            let original = match parser::parse_strict(&xml, "1") {
+                Err(RpcError::ParseError(message)) => message,
+                result => panic!("{path}: expected original ParseError, got {result:?}"),
+            };
+            let returned = match parse_rpc_reply(&xml, "1") {
+                Err(RpcError::ParseError(message)) => message,
+                result => panic!("{path}: repair changed the outcome to {result:?}"),
+            };
+            assert_eq!(returned, original, "{path}");
+        }
+    }
+
+    #[test]
     fn does_not_repair_vendor_namespace_rpc_error_lookalike() {
         let xml = r#"<rpc-reply xmlns:v="urn:vendor" message-id="1">
           <routing-engine><v:rpc-error/>

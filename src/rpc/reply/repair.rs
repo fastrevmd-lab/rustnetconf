@@ -254,6 +254,18 @@ fn begin_document_root(
     Some(())
 }
 
+fn event_allowed_outside_root(event: &Event<'_>, root_state: DocumentRootState) -> bool {
+    root_state == DocumentRootState::Inside
+        || match event {
+            Event::Text(text) => text
+                .as_ref()
+                .iter()
+                .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n')),
+            Event::CData(_) | Event::GeneralRef(_) | Event::DocType(_) => false,
+            _ => true,
+        }
+}
+
 pub(super) fn repair_cluster_commit_check(xml: &str) -> Option<String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().check_end_names = false;
@@ -264,12 +276,16 @@ pub(super) fn repair_cluster_commit_check(xml: &str) -> Option<String> {
     let mut root_state = DocumentRootState::Before;
 
     loop {
-        match reader.read_event() {
-            Ok(Event::Start(tag)) => {
+        let event = reader.read_event().ok()?;
+        if !event_allowed_outside_root(&event, root_state) {
+            return None;
+        }
+        match event {
+            Event::Start(tag) => {
                 begin_document_root(&tag, &stack, &mut root_state)?;
                 handle_start(tag, &mut writer, &mut stack, &mut repaired_any)?;
             }
-            Ok(Event::Empty(tag)) => {
+            Event::Empty(tag) => {
                 if stack.is_empty() {
                     return None;
                 }
@@ -282,7 +298,7 @@ pub(super) fn repair_cluster_commit_check(xml: &str) -> Option<String> {
                 }
                 writer.write_event(Event::Empty(tag.into_owned())).ok()?;
             }
-            Ok(Event::End(tag)) => {
+            Event::End(tag) => {
                 let end_name = tag.name();
                 let end_local = local_name(end_name.as_ref());
 
@@ -313,44 +329,43 @@ pub(super) fn repair_cluster_commit_check(xml: &str) -> Option<String> {
                     root_state = DocumentRootState::After;
                 }
             }
-            Ok(Event::Text(text)) => {
+            Event::Text(text) => {
                 writer.write_event(Event::Text(text.into_owned())).ok()?;
             }
-            Ok(Event::CData(cdata)) => {
+            Event::CData(cdata) => {
                 writer.write_event(Event::CData(cdata.into_owned())).ok()?;
             }
-            Ok(Event::GeneralRef(entity)) => {
+            Event::GeneralRef(entity) => {
                 writer
                     .write_event(Event::GeneralRef(entity.into_owned()))
                     .ok()?;
             }
-            Ok(Event::Comment(comment)) => {
+            Event::Comment(comment) => {
                 writer
                     .write_event(Event::Comment(comment.into_owned()))
                     .ok()?;
             }
-            Ok(Event::Decl(declaration)) => {
+            Event::Decl(declaration) => {
                 writer
                     .write_event(Event::Decl(declaration.into_owned()))
                     .ok()?;
             }
-            Ok(Event::PI(instruction)) => {
+            Event::PI(instruction) => {
                 writer
                     .write_event(Event::PI(instruction.into_owned()))
                     .ok()?;
             }
-            Ok(Event::DocType(doctype)) => {
+            Event::DocType(doctype) => {
                 writer
                     .write_event(Event::DocType(doctype.into_owned()))
                     .ok()?;
             }
-            Ok(Event::Eof) => {
+            Event::Eof => {
                 if !stack.is_empty() || root_state != DocumentRootState::After || !repaired_any {
                     return None;
                 }
                 break;
             }
-            Err(_) => return None,
         }
     }
 
@@ -708,6 +723,61 @@ mod tests {
                 repair_cluster_commit_check(&xml),
                 None,
                 "{path} must not cross a document-root boundary"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_content_outside_the_repair_envelope() {
+        let reply = r#"<rpc-reply message-id="1">
+          <routing-engine><commit-check-success/><ok/>
+        </rpc-reply>"#;
+        let cases = [
+            ("preceding significant text", format!("outside{reply}")),
+            ("trailing significant text", format!("{reply}outside")),
+            ("preceding CDATA", format!("<![CDATA[outside]]>{reply}")),
+            ("trailing CDATA", format!("{reply}<![CDATA[outside]]>")),
+            ("preceding entity reference", format!("&amp;{reply}")),
+            ("trailing entity reference", format!("{reply}&amp;")),
+            ("preceding DOCTYPE", format!("<!DOCTYPE rpc-reply>{reply}")),
+            ("trailing DOCTYPE", format!("{reply}<!DOCTYPE rpc-reply>")),
+        ];
+
+        for (path, xml) in cases {
+            assert_eq!(
+                repair_cluster_commit_check(&xml),
+                None,
+                "{path} must not be copied across the repair envelope"
+            );
+        }
+    }
+
+    #[test]
+    fn copies_allowed_miscellany_outside_the_repair_envelope() {
+        let reply = r#"<rpc-reply message-id="1">
+          <routing-engine><commit-check-success/><ok/>
+        </rpc-reply>"#;
+        let repaired_reply = r#"<rpc-reply message-id="1">
+          <routing-engine><commit-check-success/><ok/>
+        </routing-engine></rpc-reply>"#;
+        let cases = [
+            ("whitespace", " \n\t", "\r\n "),
+            ("comments", "<!--before-->", "<!--after-->"),
+            (
+                "processing instructions",
+                "<?before repair?>",
+                "<?after repair?>",
+            ),
+            ("declaration", r#"<?xml version="1.0"?>"#, ""),
+        ];
+
+        for (path, prefix, suffix) in cases {
+            let xml = format!("{prefix}{reply}{suffix}");
+            let expected = format!("{prefix}{repaired_reply}{suffix}");
+            assert_eq!(
+                repair_cluster_commit_check(&xml).as_deref(),
+                Some(expected.as_str()),
+                "{path} must be copied without changing the repair"
             );
         }
     }
