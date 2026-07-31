@@ -9,6 +9,13 @@ enum MultiRePathElement {
     Item,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocumentRootState {
+    Before,
+    Inside,
+    After,
+}
+
 #[derive(Debug)]
 struct OpenElement {
     qname: Vec<u8>,
@@ -228,6 +235,25 @@ fn handle_start(
     writer.write_event(Event::Start(tag.into_owned())).ok()
 }
 
+fn begin_document_root(
+    tag: &BytesStart<'_>,
+    stack: &[OpenElement],
+    root_state: &mut DocumentRootState,
+) -> Option<()> {
+    if !stack.is_empty() {
+        return Some(());
+    }
+    if *root_state != DocumentRootState::Before {
+        return None;
+    }
+    let namespaces = namespaces_for(tag, stack)?;
+    if netconf_local_name(tag.name().as_ref(), &namespaces) != Some(b"rpc-reply") {
+        return None;
+    }
+    *root_state = DocumentRootState::Inside;
+    Some(())
+}
+
 pub(super) fn repair_cluster_commit_check(xml: &str) -> Option<String> {
     let mut reader = Reader::from_str(xml);
     reader.config_mut().check_end_names = false;
@@ -235,13 +261,18 @@ pub(super) fn repair_cluster_commit_check(xml: &str) -> Option<String> {
     let mut writer = Writer::new(Vec::new());
     let mut stack: Vec<OpenElement> = Vec::new();
     let mut repaired_any = false;
+    let mut root_state = DocumentRootState::Before;
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(tag)) => {
+                begin_document_root(&tag, &stack, &mut root_state)?;
                 handle_start(tag, &mut writer, &mut stack, &mut repaired_any)?;
             }
             Ok(Event::Empty(tag)) => {
+                if stack.is_empty() {
+                    return None;
+                }
                 let namespaces = namespaces_for(&tag, &stack)?;
                 let qname = tag.name();
                 if juniper_local_name(qname.as_ref(), &namespaces) == Some(b"commit-check-success")
@@ -273,6 +304,14 @@ pub(super) fn repair_cluster_commit_check(xml: &str) -> Option<String> {
                     return None;
                 }
                 writer.write_event(Event::End(tag.into_owned())).ok()?;
+                if stack.is_empty() {
+                    if root_state != DocumentRootState::Inside
+                        || open.protocol_local.as_deref() != Some(b"rpc-reply")
+                    {
+                        return None;
+                    }
+                    root_state = DocumentRootState::After;
+                }
             }
             Ok(Event::Text(text)) => {
                 writer.write_event(Event::Text(text.into_owned())).ok()?;
@@ -306,7 +345,7 @@ pub(super) fn repair_cluster_commit_check(xml: &str) -> Option<String> {
                     .ok()?;
             }
             Ok(Event::Eof) => {
-                if !stack.is_empty() || !repaired_any {
+                if !stack.is_empty() || root_state != DocumentRootState::After || !repaired_any {
                     return None;
                 }
                 break;
@@ -633,6 +672,42 @@ mod tests {
             assert!(
                 repair_cluster_commit_check(xml).is_some(),
                 "sole root rpc-reply must retain direct repair"
+            );
+        }
+    }
+
+    #[test]
+    fn requires_exactly_one_top_level_rpc_reply_envelope() {
+        let reply = r#"<rpc-reply message-id="1">
+          <routing-engine><commit-check-success/><ok/>
+        </rpc-reply>"#;
+        let cases = [
+            ("trailing empty element", format!("{reply}<outer/>")),
+            ("preceding empty element", format!("<outer/>{reply}")),
+            (
+                "trailing non-empty element",
+                format!("{reply}<outer></outer>"),
+            ),
+            (
+                "preceding non-empty element",
+                format!("<outer></outer>{reply}"),
+            ),
+            ("two rpc-reply roots", format!("{reply}{reply}")),
+            (
+                "empty rpc-reply before repair candidate",
+                format!("<rpc-reply/>{reply}"),
+            ),
+            (
+                "empty rpc-reply after repair candidate",
+                format!("{reply}<rpc-reply/>"),
+            ),
+        ];
+
+        for (path, xml) in cases {
+            assert_eq!(
+                repair_cluster_commit_check(&xml),
+                None,
+                "{path} must not cross a document-root boundary"
             );
         }
     }
