@@ -586,6 +586,41 @@ mod tests {
     }
 
     #[test]
+    fn nested_rpc_reply_inside_data_does_not_authorize_direct_repair() {
+        let cases = [
+            (
+                "unqualified nested rpc-reply",
+                r#"<rpc-reply message-id="1"><data>
+                  <rpc-reply><routing-engine><commit-check-success/><ok/>
+                  </rpc-reply>
+                </data></rpc-reply>"#,
+            ),
+            (
+                "NETCONF-qualified nested rpc-reply",
+                r#"<nc:rpc-reply
+                  xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0"
+                  message-id="1"><nc:data>
+                    <nc:rpc-reply><routing-engine>
+                      <commit-check-success/><nc:ok/>
+                    </nc:rpc-reply>
+                  </nc:data></nc:rpc-reply>"#,
+            ),
+        ];
+
+        for (path, xml) in cases {
+            let original = match parser::parse_strict(xml, "1") {
+                Err(RpcError::ParseError(message)) => message,
+                result => panic!("{path}: expected original ParseError, got {result:?}"),
+            };
+            let returned = match parse_rpc_reply(xml, "1") {
+                Err(RpcError::ParseError(message)) => message,
+                result => panic!("{path}: repair changed the outcome to {result:?}"),
+            };
+            assert_eq!(returned, original, "{path}");
+        }
+    }
+
+    #[test]
     fn does_not_repair_vendor_namespace_rpc_error_lookalike() {
         let xml = r#"<rpc-reply xmlns:v="urn:vendor" message-id="1">
           <routing-engine><v:rpc-error/>

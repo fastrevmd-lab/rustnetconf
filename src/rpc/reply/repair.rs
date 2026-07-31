@@ -135,7 +135,7 @@ fn namespaces_for(
 
 fn supported_routing_engine_parent(stack: &[OpenElement]) -> bool {
     stack.last().is_some_and(|element| {
-        element.protocol_local.as_deref() == Some(b"rpc-reply")
+        (stack.len() == 1 && element.protocol_local.as_deref() == Some(b"rpc-reply"))
             || matches!(
                 element.multi_re_path,
                 MultiRePathElement::Results | MultiRePathElement::Item
@@ -577,6 +577,64 @@ mod tests {
             repair_cluster_commit_check(qualified).is_some(),
             "known Juniper XML namespaces remain supported"
         );
+    }
+
+    #[test]
+    fn direct_routing_engine_requires_the_sole_root_rpc_reply() {
+        let unsupported = [
+            (
+                "nested unqualified rpc-reply in data",
+                r#"<rpc-reply message-id="1"><data>
+                  <rpc-reply><routing-engine><commit-check-success/><ok/>
+                  </rpc-reply>
+                </data></rpc-reply>"#,
+            ),
+            (
+                "nested qualified rpc-reply in data",
+                r#"<nc:rpc-reply
+                  xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0"
+                  message-id="1"><nc:data><nc:rpc-reply>
+                    <routing-engine><commit-check-success/><nc:ok/>
+                  </nc:rpc-reply></nc:data></nc:rpc-reply>"#,
+            ),
+            (
+                "rpc-reply below arbitrary document root",
+                r#"<outer><rpc-reply><routing-engine>
+                  <commit-check-success/><ok/>
+                </rpc-reply></outer>"#,
+            ),
+            (
+                "nested rpc-reply below arbitrary reply child",
+                r#"<rpc-reply message-id="1"><outer><rpc-reply>
+                  <routing-engine><commit-check-success/><ok/>
+                </rpc-reply></outer></rpc-reply>"#,
+            ),
+        ];
+        for (path, xml) in unsupported {
+            assert_eq!(
+                repair_cluster_commit_check(xml),
+                None,
+                "{path} must not authorize direct repair"
+            );
+        }
+
+        let supported = [
+            r#"<rpc-reply message-id="1">
+              <routing-engine><commit-check-success/><ok/>
+            </rpc-reply>"#,
+            r#"<nc:rpc-reply
+              xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0"
+              xmlns:j="http://xml.juniper.net/junos/25.4R1.12/junos"
+              message-id="1"><j:routing-engine>
+                <j:commit-check-success/><nc:ok/>
+            </nc:rpc-reply>"#,
+        ];
+        for xml in supported {
+            assert!(
+                repair_cluster_commit_check(xml).is_some(),
+                "sole root rpc-reply must retain direct repair"
+            );
+        }
     }
 
     #[test]
