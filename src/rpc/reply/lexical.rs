@@ -74,7 +74,7 @@ fn validate_declaration(declaration: &BytesDecl<'_>) -> Result<(), RpcError> {
     let raw = str::from_utf8(declaration.as_ref())
         .map_err(|_| parse_error("invalid XML declaration encoding"))?;
     validate_xml_chars(raw, "XML declaration")?;
-    if !raw.starts_with("xml") {
+    if !declaration_attributes_are_separated(raw.as_bytes()) {
         return Err(parse_error("invalid XML declaration syntax"));
     }
 
@@ -102,6 +102,65 @@ fn validate_declaration(declaration: &BytesDecl<'_>) -> Result<(), RpcError> {
         return Err(parse_error("invalid XML declaration syntax"));
     }
     Ok(())
+}
+
+fn declaration_attributes_are_separated(raw: &[u8]) -> bool {
+    if !raw.starts_with(b"xml") {
+        return false;
+    }
+
+    let mut cursor = 3usize;
+    let mut count = 0usize;
+    loop {
+        let separator_start = cursor;
+        while raw.get(cursor).is_some_and(|byte| is_xml_space(*byte)) {
+            cursor += 1;
+        }
+        if cursor == raw.len() {
+            return count > 0;
+        }
+        if cursor == separator_start {
+            return false;
+        }
+
+        let name_start = cursor;
+        while raw
+            .get(cursor)
+            .is_some_and(|byte| !is_xml_space(*byte) && *byte != b'=')
+        {
+            cursor += 1;
+        }
+        if cursor == name_start {
+            return false;
+        }
+        while raw.get(cursor).is_some_and(|byte| is_xml_space(*byte)) {
+            cursor += 1;
+        }
+        if raw.get(cursor) != Some(&b'=') {
+            return false;
+        }
+        cursor += 1;
+        while raw.get(cursor).is_some_and(|byte| is_xml_space(*byte)) {
+            cursor += 1;
+        }
+
+        let Some(quote @ (b'\'' | b'"')) = raw.get(cursor).copied() else {
+            return false;
+        };
+        cursor += 1;
+        while raw.get(cursor).is_some_and(|byte| *byte != quote) {
+            cursor += 1;
+        }
+        if raw.get(cursor) != Some(&quote) {
+            return false;
+        }
+        cursor += 1;
+        count += 1;
+    }
+}
+
+fn is_xml_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
 fn valid_encoding_name(value: &[u8]) -> bool {

@@ -1010,6 +1010,33 @@ mod tests {
     }
 
     #[test]
+    fn declaration_adjacency_does_not_authorize_repair() {
+        let declarations = [
+            r#"<?xml version="1.0"encoding='UTF-8'?>"#,
+            r#"<?xml version='1.0'standalone="yes"?>"#,
+            r#"<?xml version="1.0" encoding='UTF-8'standalone="no"?>"#,
+        ];
+
+        for declaration in declarations {
+            let xml = format!(
+                "{declaration}<rpc-reply message-id=\"1\">\
+                   <routing-engine><commit-check-success/><ok/>\
+                 </rpc-reply>"
+            );
+            let original = match parser::parse_strict(&xml, "1") {
+                Err(RpcError::ParseError(message)) => message,
+                result => panic!("expected original ParseError, got {result:?}"),
+            };
+            let returned = match parse_rpc_reply(&xml, "1") {
+                Err(RpcError::ParseError(message)) => message,
+                result => panic!("repair changed the outcome to {result:?}"),
+            };
+            assert_eq!(returned, original);
+            assert_eq!(returned, "invalid XML declaration syntax");
+        }
+    }
+
+    #[test]
     fn unsupported_juniper_namespace_families_do_not_authorize_repair() {
         let namespaces = [
             "http://xml.juniper.net/not-a-repository-family",

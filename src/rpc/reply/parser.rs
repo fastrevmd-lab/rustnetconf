@@ -2606,4 +2606,73 @@ mod tests {
             "valid XML 1.0 declaration remains accepted"
         );
     }
+
+    #[test]
+    fn requires_xml_space_before_each_declaration_pseudo_attribute() {
+        let root = r#"<rpc-reply message-id="1"><ok/></rpc-reply>"#;
+        let invalid = [
+            (
+                "single-quoted version adjacent to double-quoted encoding",
+                format!(r#"<?xml version='1.0'encoding="UTF-8"?>{root}"#),
+            ),
+            (
+                "double-quoted version adjacent to single-quoted encoding",
+                format!(r#"<?xml version="1.0"encoding='UTF-8'?>{root}"#),
+            ),
+            (
+                "single-quoted version adjacent to double-quoted standalone",
+                format!(r#"<?xml version='1.0'standalone="yes"?>{root}"#),
+            ),
+            (
+                "double-quoted version adjacent to single-quoted standalone",
+                format!(r#"<?xml version="1.0"standalone='no'?>{root}"#),
+            ),
+            (
+                "single-quoted encoding adjacent to double-quoted standalone",
+                format!(r#"<?xml version="1.0" encoding='UTF-8'standalone="yes"?>{root}"#),
+            ),
+            (
+                "double-quoted encoding adjacent to single-quoted standalone",
+                format!(r#"<?xml version='1.0' encoding="UTF-8"standalone='no'?>{root}"#),
+            ),
+        ];
+
+        for (path, xml) in invalid {
+            let RpcError::ParseError(message) =
+                parse_strict(&xml, "1").expect_err("adjacent pseudo-attributes must fail")
+            else {
+                panic!("{path}: expected ParseError");
+            };
+            assert_eq!(message, "invalid XML declaration syntax", "{path}");
+            assert!(message.len() < 128, "{path}: diagnostic is unbounded");
+            assert!(
+                !message.contains("UTF-8"),
+                "{path}: diagnostic exposes input"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_xml_space_separators_and_supported_declaration_forms() {
+        let root = r#"<rpc-reply message-id="1"><ok/></rpc-reply>"#;
+        for (path, separator) in [("space", ' '), ("tab", '\t'), ("CR", '\r'), ("LF", '\n')] {
+            let xml = format!(
+                "<?xml{separator}version=\"1.0\"{separator}encoding='UTF-8'{separator}standalone=\"yes\"?>{root}"
+            );
+            assert!(
+                matches!(parse_strict(&xml, "1"), Ok(RpcReply::Ok)),
+                "{path} must remain an XML S separator"
+            );
+        }
+
+        let valid = [
+            format!(r#"<?xml version="1.0"?>{root}"#),
+            format!(r#"<?xml version="1.0" encoding="UTF-8"?>{root}"#),
+            format!(r#"<?xml version='1.0' standalone='no'?>{root}"#),
+            format!(r#"<?xml version="1.0" encoding='UTF-8' standalone="yes"?>{root}"#),
+        ];
+        for xml in valid {
+            assert!(matches!(parse_strict(&xml, "1"), Ok(RpcReply::Ok)));
+        }
+    }
 }
