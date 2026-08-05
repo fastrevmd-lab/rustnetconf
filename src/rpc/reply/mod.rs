@@ -936,6 +936,10 @@ mod tests {
                 "invalid declaration",
                 r#"<?xml version="1.0" SENSITIVE="value"?><rpc-reply message-id="1"><ok/></rpc-reply>"#,
             ),
+            (
+                "missing ordinary attribute separator",
+                r#"<rpc-reply message-id="1"probe="SENSITIVE"><ok/></rpc-reply>"#,
+            ),
         ];
 
         for (path, xml) in cases {

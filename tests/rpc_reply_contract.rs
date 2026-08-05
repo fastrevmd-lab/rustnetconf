@@ -57,6 +57,25 @@ fn public_captured_data_preserves_attribute_whitespace_fidelity() {
 }
 
 #[test]
+fn public_captured_data_applies_xml10_eol_normalization() {
+    let literal = "a\r\nb\rc\nd";
+    let xml = format!(
+        "<rpc-reply message-id=\"eol\"><data>\
+         <text>{literal}&#xD;&#xA;&amp;😀</text>\
+         <cdata><![CDATA[{literal}&😀]]></cdata>\
+         </data></rpc-reply>"
+    );
+    let RpcReply::Data(data) = parse_rpc_reply(&xml, "eol").expect("valid data reply") else {
+        panic!("expected Data");
+    };
+
+    assert!(data.contains("<text>a\nb\nc\nd&#xD;&#xA;&amp;😀</text>"));
+    assert!(data.contains("<cdata>a\nb\nc\nd&amp;😀</cdata>"));
+    assert!(!data.contains('\r'));
+    rustnetconf::rpc::validate_xml_fragment(&data).expect("captured XML is well formed");
+}
+
+#[test]
 fn public_direct_payload_aggregates_siblings_contract() {
     let xml = r#"<rpc-reply
         xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"

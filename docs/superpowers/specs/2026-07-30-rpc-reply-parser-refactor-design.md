@@ -54,6 +54,7 @@ src/rpc/
 └── reply/
     ├── mod.rs
     ├── capture.rs
+    ├── lexical.rs
     ├── parser.rs
     └── repair.rs
 ```
@@ -64,6 +65,8 @@ src/rpc/
   semantic finalization.
 - `reply/capture.rs` owns XML-fragment reconstruction shared by standard
   `<data>`, direct vendor payloads, and `<error-info>`.
+- `reply/lexical.rs` owns shared XML 1.0 lexical validation and source
+  normalization used before reply semantics and fragment reconstruction.
 - `reply/repair.rs` owns the narrow Junos chassis-cluster commit-check
   normalization.
 - `rpc/mod.rs` privately declares `reply` and publicly re-exports

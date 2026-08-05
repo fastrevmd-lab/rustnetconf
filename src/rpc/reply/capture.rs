@@ -62,7 +62,7 @@ impl FragmentCapture {
     pub(super) fn text(&mut self, text: &BytesText<'_>) -> Result<(), RpcError> {
         validate_text_lexical(text.as_ref())?;
         let decoded = text
-            .decode()
+            .xml10_content()
             .map_err(|error| parse_error(format!("invalid text encoding: {error}")))?;
         validate_xml_chars(&decoded, "text content")?;
         self.xml.push_str(&escape_xml_text(&decoded));
@@ -71,7 +71,7 @@ impl FragmentCapture {
 
     pub(super) fn cdata(&mut self, cdata: &BytesCData<'_>) -> Result<(), RpcError> {
         let decoded = cdata
-            .decode()
+            .xml10_content()
             .map_err(|error| parse_error(format!("invalid CDATA encoding: {error}")))?;
         validate_xml_chars(&decoded, "CDATA content")?;
         self.xml.push_str(&escape_xml_text(&decoded));

@@ -294,7 +294,7 @@ impl ReplyParser<'_> {
     fn text(&mut self, text: &BytesText<'_>) -> Result<(), RpcError> {
         if self.ignored_payload.is_some() && self.current_error.is_none() {
             let decoded = text
-                .decode()
+                .xml10_content()
                 .map_err(|error| parse_error(format!("invalid text encoding: {error}")))?;
             validate_xml_chars(&decoded, "ignored text content")?;
             return Ok(());
@@ -303,7 +303,7 @@ impl ReplyParser<'_> {
             return Ok(());
         }
         let decoded = text
-            .decode()
+            .xml10_content()
             .map_err(|error| parse_error(format!("invalid text encoding: {error}")))?;
         validate_xml_chars(&decoded, "text content")?;
         if decoded.trim().is_empty() {
@@ -316,7 +316,7 @@ impl ReplyParser<'_> {
     fn cdata(&mut self, cdata: &BytesCData<'_>) -> Result<(), RpcError> {
         if self.ignored_payload.is_some() && self.current_error.is_none() {
             let decoded = cdata
-                .decode()
+                .xml10_content()
                 .map_err(|error| parse_error(format!("invalid CDATA encoding: {error}")))?;
             validate_xml_chars(&decoded, "ignored CDATA content")?;
             return Ok(());
@@ -427,7 +427,7 @@ impl ReplyParser<'_> {
             }
             if error.field.is_some() {
                 let decoded = text
-                    .decode()
+                    .xml10_content()
                     .map_err(|cause| parse_error(format!("invalid text encoding: {cause}")))?;
                 validate_xml_chars(&decoded, "rpc-error text field")?;
                 error.field_text.push_str(&decoded);
@@ -461,7 +461,7 @@ impl ReplyParser<'_> {
             }
             if error.field.is_some() {
                 let decoded = cdata
-                    .decode()
+                    .xml10_content()
                     .map_err(|cause| parse_error(format!("invalid CDATA encoding: {cause}")))?;
                 validate_xml_chars(&decoded, "rpc-error text field")?;
                 error.field_text.push_str(&decoded);
@@ -2307,6 +2307,90 @@ mod tests {
     }
 
     #[test]
+    fn captured_text_and_cdata_apply_xml10_eol_normalization() {
+        let literal = "a\r\nb\rc\nd";
+        let normalized = "a\nb\nc\nd";
+        let children = format!(
+            "<text>{literal}&#xD;&#xA;&amp;😀</text>\
+             <cdata><![CDATA[{literal}&😀]]></cdata>"
+        );
+        let expected_text = format!("<text>{normalized}&#xD;&#xA;&amp;😀</text>");
+        let expected_cdata = format!("<cdata>{normalized}&amp;😀</cdata>");
+
+        let data_xml =
+            format!("<rpc-reply message-id=\"data-eol\"><data>{children}</data></rpc-reply>");
+        let RpcReply::Data(data) = parse_strict(&data_xml, "data-eol").expect("data reply") else {
+            panic!("expected data fragment");
+        };
+
+        let direct_xml =
+            format!("<rpc-reply message-id=\"direct-eol\"><output>{children}</output></rpc-reply>");
+        let RpcReply::Data(direct) = parse_strict(&direct_xml, "direct-eol").expect("direct reply")
+        else {
+            panic!("expected direct fragment");
+        };
+
+        let error_xml = format!(
+            "<rpc-reply message-id=\"error-eol\"><rpc-error>\
+             <error-type>application</error-type>\
+             <error-tag>operation-failed</error-tag>\
+             <error-severity>error</error-severity>\
+             <error-info>{children}</error-info>\
+             </rpc-error></rpc-reply>"
+        );
+        let RpcError::ServerError {
+            info: Some(info), ..
+        } = parse_strict(&error_xml, "error-eol").expect_err("hard rpc-error")
+        else {
+            panic!("expected error-info fragment");
+        };
+
+        for (path, fragment) in [("data", data), ("direct", direct), ("error-info", info)] {
+            assert!(fragment.contains(&expected_text), "{path}: {fragment:?}");
+            assert!(fragment.contains(&expected_cdata), "{path}: {fragment:?}");
+            assert!(
+                !fragment.contains('\r'),
+                "{path}: literal CR survived normalization: {fragment:?}"
+            );
+            validate_xml_fragment(&fragment).expect("normalized fragment remains valid XML");
+        }
+    }
+
+    #[test]
+    fn rpc_error_text_and_cdata_apply_xml10_eol_normalization() {
+        let literal = "a\r\nb\rc\nd";
+        let text_xml = format!(
+            "<rpc-reply message-id=\"text-eol\"><rpc-error>\
+             <error-type>application</error-type>\
+             <error-tag>operation-failed</error-tag>\
+             <error-severity>error</error-severity>\
+             <error-message>{literal}&#xD;&#xA;&amp;😀</error-message>\
+             </rpc-error></rpc-reply>"
+        );
+        let RpcError::ServerError { message, .. } =
+            parse_strict(&text_xml, "text-eol").expect_err("hard rpc-error")
+        else {
+            panic!("expected server error");
+        };
+        assert_eq!(message, "a\nb\nc\nd\r\n&😀");
+
+        let cdata_xml = format!(
+            "<rpc-reply message-id=\"cdata-eol\"><rpc-error>\
+             <error-type>application</error-type>\
+             <error-tag>operation-failed</error-tag>\
+             <error-severity>error</error-severity>\
+             <error-message><![CDATA[{literal}&😀]]></error-message>\
+             </rpc-error></rpc-reply>"
+        );
+        let RpcError::ServerError { message, .. } =
+            parse_strict(&cdata_xml, "cdata-eol").expect_err("hard rpc-error")
+        else {
+            panic!("expected server error");
+        };
+        assert_eq!(message, "a\nb\nc\nd&😀");
+    }
+
+    #[test]
     fn missing_optional_error_message_is_empty() {
         let xml = r#"<rpc-reply message-id="1"><rpc-error>
           <error-type>application</error-type>
@@ -2673,6 +2757,84 @@ mod tests {
                 !message.contains("UTF-8"),
                 "{path}: diagnostic exposes input"
             );
+        }
+    }
+
+    #[test]
+    fn requires_xml_space_before_every_ordinary_attribute() {
+        let cases = [
+            (
+                "rpc-reply start",
+                r#"<rpc-reply message-id="1"probe="SENSITIVE"><ok/></rpc-reply>"#,
+            ),
+            (
+                "ok empty",
+                r#"<rpc-reply message-id="1"><ok a='1'b="SENSITIVE"/></rpc-reply>"#,
+            ),
+            (
+                "captured data empty",
+                r#"<rpc-reply message-id="1"><data><x a="1"b='SENSITIVE'/></data></rpc-reply>"#,
+            ),
+            (
+                "captured namespace and qualified attribute",
+                r#"<rpc-reply message-id="1"><data><p:x xmlns:p="urn:p"p:a="SENSITIVE"/></data></rpc-reply>"#,
+            ),
+            (
+                "rpc-error field",
+                r#"<rpc-reply message-id="1"><rpc-error>
+                  <error-type>application</error-type>
+                  <error-tag>operation-failed</error-tag>
+                  <error-severity>error</error-severity>
+                  <error-message a="1"b="SENSITIVE">failure</error-message>
+                </rpc-error></rpc-reply>"#,
+            ),
+            (
+                "error-info capture",
+                r#"<rpc-reply message-id="1"><rpc-error>
+                  <error-type>application</error-type>
+                  <error-tag>operation-failed</error-tag>
+                  <error-severity>error</error-severity>
+                  <error-info><detail a="1"b="SENSITIVE"/></error-info>
+                </rpc-error></rpc-reply>"#,
+            ),
+        ];
+
+        for (path, xml) in cases {
+            let RpcError::ParseError(message) =
+                parse_strict(xml, "1").expect_err("adjacent attributes must fail")
+            else {
+                panic!("{path}: expected ParseError");
+            };
+            assert_eq!(message, "invalid XML attribute separator", "{path}");
+            assert!(message.len() < 128, "{path}: diagnostic is unbounded");
+            assert!(
+                !message.contains("SENSITIVE"),
+                "{path}: diagnostic exposes input"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_xml_space_and_quote_forms_between_ordinary_attributes() {
+        let values = [
+            ("'1'", "'x'"),
+            ("'1'", "\"x\""),
+            ("\"1\"", "'x'"),
+            ("\"1\"", "\"x\""),
+        ];
+        for (separator_name, separator) in
+            [("space", ' '), ("tab", '\t'), ("CR", '\r'), ("LF", '\n')]
+        {
+            for (message_id, probe) in values {
+                let xml = format!(
+                    "<rpc-reply{separator}message-id={message_id}{separator}probe={probe}>\
+                     <ok{separator}a={message_id}{separator}b={probe}/></rpc-reply>"
+                );
+                assert!(
+                    matches!(parse_strict(&xml, "1"), Ok(RpcReply::Ok)),
+                    "{separator_name}: valid quote/separator combination failed: {xml:?}"
+                );
+            }
         }
     }
 

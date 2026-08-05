@@ -25,6 +25,7 @@ impl DocumentLexicalState {
 
         match event {
             Event::Start(tag) | Event::Empty(tag) => {
+                validate_attribute_separators(tag)?;
                 for attribute in tag.attributes().with_checks(true) {
                     let attribute =
                         attribute.map_err(|_| parse_error("invalid XML attribute syntax"))?;
@@ -38,6 +39,63 @@ impl DocumentLexicalState {
             Event::DocType(_) => Err(parse_error("DOCTYPE is not allowed in an RPC reply")),
             _ => Ok(()),
         }
+    }
+}
+
+fn validate_attribute_separators(tag: &BytesStart<'_>) -> Result<(), RpcError> {
+    if ordinary_attribute_separators_are_valid(tag.attributes_raw()) {
+        Ok(())
+    } else {
+        Err(parse_error("invalid XML attribute separator"))
+    }
+}
+
+fn ordinary_attribute_separators_are_valid(raw: &[u8]) -> bool {
+    let mut cursor = 0usize;
+    loop {
+        let separator_start = cursor;
+        while raw.get(cursor).is_some_and(|byte| is_xml_space(*byte)) {
+            cursor += 1;
+        }
+        if cursor == raw.len() {
+            return true;
+        }
+        if cursor == separator_start {
+            return false;
+        }
+
+        let name_start = cursor;
+        while raw
+            .get(cursor)
+            .is_some_and(|byte| !is_xml_space(*byte) && *byte != b'=')
+        {
+            cursor += 1;
+        }
+        if cursor == name_start {
+            return true;
+        }
+        while raw.get(cursor).is_some_and(|byte| is_xml_space(*byte)) {
+            cursor += 1;
+        }
+        if raw.get(cursor) != Some(&b'=') {
+            return true;
+        }
+        cursor += 1;
+        while raw.get(cursor).is_some_and(|byte| is_xml_space(*byte)) {
+            cursor += 1;
+        }
+
+        let Some(quote @ (b'\'' | b'"')) = raw.get(cursor).copied() else {
+            return true;
+        };
+        cursor += 1;
+        while raw.get(cursor).is_some_and(|byte| *byte != quote) {
+            cursor += 1;
+        }
+        if raw.get(cursor) != Some(&quote) {
+            return true;
+        }
+        cursor += 1;
     }
 }
 

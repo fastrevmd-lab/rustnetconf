@@ -28,6 +28,7 @@
 - Modify `src/rpc/mod.rs`: retain XML-fragment validation and re-export the private reply module.
 - Create `src/rpc/reply/mod.rs`: public reply types, parser orchestration, and private submodule declarations.
 - Create `src/rpc/reply/capture.rs`: one XML-fragment reconstruction implementation.
+- Create `src/rpc/reply/lexical.rs`: shared XML 1.0 lexical validation and source normalization.
 - Create `src/rpc/reply/parser.rs`: explicit reply state machine and RPC-error builder.
 - Create `src/rpc/reply/repair.rs`: narrow chassis-cluster commit-check repair.
 - Keep `src/error.rs`, `src/types.rs`, `src/session.rs`, and `src/client.rs` unchanged.
