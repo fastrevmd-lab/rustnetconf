@@ -2,7 +2,9 @@ use super::capture::{
     is_namespace_declaration, namespace_declarations, validate_qname, FragmentCapture,
     NamespaceBindings, ValidatedQName, XML_NAMESPACE,
 };
-use super::lexical::{decode_attribute, validate_xml_chars, DocumentLexicalState};
+use super::lexical::{
+    contains_only_xml_space, decode_attribute, validate_xml_chars, DocumentLexicalState,
+};
 use super::{RpcErrorInfo, RpcReply};
 use crate::error::RpcError;
 use crate::types::{ErrorSeverity, ErrorTag, RpcErrorType};
@@ -306,7 +308,7 @@ impl ReplyParser<'_> {
             .xml10_content()
             .map_err(|error| parse_error(format!("invalid text encoding: {error}")))?;
         validate_xml_chars(&decoded, "text content")?;
-        if decoded.trim().is_empty() {
+        if contains_only_xml_space(&decoded) {
             Ok(())
         } else {
             Err(parse_error("significant text outside a reply payload"))
@@ -2406,6 +2408,64 @@ mod tests {
     }
 
     #[test]
+    fn rejects_non_xml_unicode_whitespace_outside_reply_payloads() {
+        for (name, whitespace) in [
+            ("no-break space", '\u{00a0}'),
+            ("em space", '\u{2003}'),
+            ("narrow no-break space", '\u{202f}'),
+        ] {
+            let cases = [
+                (
+                    "before root",
+                    format!("{whitespace}<rpc-reply message-id=\"1\"><ok/></rpc-reply>"),
+                ),
+                (
+                    "between direct payload siblings",
+                    format!(
+                        "<rpc-reply message-id=\"1\"><first/>{whitespace}<second/></rpc-reply>"
+                    ),
+                ),
+                (
+                    "after root",
+                    format!("<rpc-reply message-id=\"1\"><ok/></rpc-reply>{whitespace}"),
+                ),
+            ];
+
+            for (path, xml) in cases {
+                let RpcError::ParseError(message) =
+                    parse_strict(&xml, "1").expect_err("non-XML document whitespace must fail")
+                else {
+                    panic!("{name} {path}: expected ParseError");
+                };
+                assert_eq!(
+                    message, "significant text outside a reply payload",
+                    "{name} {path}"
+                );
+                assert!(
+                    message.len() < 128,
+                    "{name} {path}: diagnostic is unbounded"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn accepts_xml_space_around_the_envelope_and_direct_payload_siblings() {
+        for whitespace in [' ', '\t', '\r', '\n'] {
+            let xml = format!(
+                "{whitespace}<rpc-reply message-id=\"1\">\
+                 <first/>{whitespace}<second/>\
+                 </rpc-reply>{whitespace}"
+            );
+            let RpcReply::Data(data) = parse_strict(&xml, "1").expect("XML S remains valid") else {
+                panic!("expected direct Data reply for {whitespace:?}");
+            };
+            assert!(data.contains("<first"), "{whitespace:?}: {data}");
+            assert!(data.contains("<second"), "{whitespace:?}: {data}");
+        }
+    }
+
+    #[test]
     fn rejects_duplicate_rpc_error_fields_and_info() {
         let cases = [
             r#"<error-type>application</error-type>
@@ -2612,6 +2672,18 @@ mod tests {
                 "reserved target",
                 "<?XmL SENSITIVE?><rpc-reply message-id=\"1\"><ok/></rpc-reply>",
             ),
+            (
+                "qualified target before root",
+                "<?a:b?><rpc-reply message-id=\"1\"><ok/></rpc-reply>",
+            ),
+            (
+                "qualified target inside root",
+                "<rpc-reply message-id=\"1\"><?a:b?><ok/></rpc-reply>",
+            ),
+            (
+                "qualified target after root",
+                "<rpc-reply message-id=\"1\"><ok/></rpc-reply><?a:b?>",
+            ),
         ];
         for (path, xml) in invalid {
             let RpcError::ParseError(message) =
@@ -2627,12 +2699,12 @@ mod tests {
             );
         }
 
-        let valid = "<?a:b before?><?xml-stylesheet href=\"style.css\"?>\
-          <rpc-reply message-id=\"1\"><?inside:target data?><ok/></rpc-reply>\
+        let valid = "<?a_b before?><?xml-stylesheet href=\"style.css\"?>\
+          <rpc-reply message-id=\"1\"><?π data?><ok/></rpc-reply>\
           <?after data?>";
         assert!(
             matches!(parse_strict(valid, "1"), Ok(RpcReply::Ok)),
-            "valid XML Name PI targets remain accepted"
+            "valid ASCII and Unicode NCName PI targets remain accepted"
         );
     }
 

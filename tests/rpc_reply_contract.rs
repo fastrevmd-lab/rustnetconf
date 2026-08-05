@@ -187,3 +187,29 @@ fn public_parser_validates_ordinary_attributes_before_reply_outcomes() {
         }
     }
 }
+
+#[test]
+fn public_parser_rejects_non_xml_document_whitespace_and_qualified_pi_targets() {
+    let cases = [
+        (
+            "Unicode whitespace",
+            "\u{00a0}<rpc-reply message-id=\"1\"><ok/></rpc-reply>",
+            "significant text outside a reply payload",
+        ),
+        (
+            "qualified processing instruction target",
+            "<?a:b?><rpc-reply message-id=\"1\"><ok/></rpc-reply>",
+            "invalid processing instruction target",
+        ),
+    ];
+
+    for (path, xml, expected) in cases {
+        let RpcError::ParseError(message) =
+            parse_rpc_reply(xml, "1").expect_err("invalid document syntax must fail")
+        else {
+            panic!("{path}: expected ParseError");
+        };
+        assert_eq!(message, expected, "{path}");
+        assert!(message.len() < 128, "{path}: diagnostic is unbounded");
+    }
+}

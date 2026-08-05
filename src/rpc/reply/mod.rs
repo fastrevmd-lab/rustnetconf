@@ -956,7 +956,7 @@ mod tests {
         }
 
         let valid = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-          <!--before--><?a:b before?>
+          <!--before--><?a_b before?>
           <rpc-reply message-id="1"><!--inside--><?inside data?><ok/></rpc-reply>
           <!--after--><?after data?>"#;
         assert!(

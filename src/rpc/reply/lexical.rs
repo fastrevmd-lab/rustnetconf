@@ -121,7 +121,7 @@ fn validate_processing_instruction(
     instruction: &quick_xml::events::BytesPI<'_>,
 ) -> Result<(), RpcError> {
     let target = instruction.target();
-    if !is_valid_xml_name(target) || target.eq_ignore_ascii_case(b"xml") {
+    if !is_valid_ncname_bytes(target) || target.eq_ignore_ascii_case(b"xml") {
         return Err(parse_error("invalid processing instruction target"));
     }
     let decoded = str::from_utf8(instruction.as_ref())
@@ -222,6 +222,10 @@ fn is_xml_space(byte: u8) -> bool {
     matches!(byte, b' ' | b'\t' | b'\r' | b'\n')
 }
 
+pub(super) fn contains_only_xml_space(value: &str) -> bool {
+    value.bytes().all(is_xml_space)
+}
+
 fn valid_encoding_name(value: &[u8]) -> bool {
     value.first().is_some_and(u8::is_ascii_alphabetic)
         && value[1..]
@@ -229,25 +233,20 @@ fn valid_encoding_name(value: &[u8]) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-fn is_valid_xml_name(raw: &[u8]) -> bool {
+fn is_valid_ncname_bytes(raw: &[u8]) -> bool {
     let Ok(name) = str::from_utf8(raw) else {
         return false;
     };
+    is_valid_ncname(name)
+}
+
+fn is_valid_ncname(name: &str) -> bool {
     let mut chars = name.chars();
-    chars.next().is_some_and(is_xml_name_start) && chars.all(is_xml_name_char)
-}
-
-fn is_xml_name_start(value: char) -> bool {
-    value == ':' || is_ncname_start(value)
-}
-
-fn is_xml_name_char(value: char) -> bool {
-    value == ':' || is_ncname_char(value)
+    chars.next().is_some_and(is_ncname_start) && chars.all(is_ncname_char)
 }
 
 pub(super) fn validate_ncname(name: &str, field: &str) -> Result<(), RpcError> {
-    let mut chars = name.chars();
-    if !chars.next().is_some_and(is_ncname_start) || !chars.all(is_ncname_char) {
+    if !is_valid_ncname(name) {
         return Err(parse_error(format!("invalid {field}")));
     }
     Ok(())
