@@ -1100,6 +1100,29 @@ mod tests {
     use super::*;
     use crate::rpc::validate_xml_fragment;
 
+    fn reparse_attribute(fragment: &str, element: &[u8], key: &[u8]) -> String {
+        let mut reader = Reader::from_str(fragment);
+        loop {
+            match reader.read_event().expect("captured fragment must reparse") {
+                Event::Start(tag) | Event::Empty(tag) if tag.name().as_ref() == element => {
+                    for attribute in tag.attributes().with_checks(true) {
+                        let attribute = attribute.expect("captured attribute must reparse");
+                        if attribute.key.as_ref() == key {
+                            return decode_attribute(
+                                attribute.value.as_ref(),
+                                "reparsed captured attribute",
+                            )
+                            .expect("captured attribute value must decode");
+                        }
+                    }
+                    panic!("captured element is missing the requested attribute");
+                }
+                Event::Eof => panic!("captured fragment is missing the requested element"),
+                _ => {}
+            }
+        }
+    }
+
     #[test]
     fn explicit_state_parses_standard_outcomes() {
         let ok = r#"<rpc-reply message-id="1"><ok/></rpc-reply>"#;
@@ -1643,13 +1666,14 @@ mod tests {
 
     #[test]
     fn valid_xml_attribute_characters_remain_accepted() {
-        let xml = "<rpc-reply message-id=\"\t\n\r😀\"><data><item value=\"\t\n\r😀\"/></data></rpc-reply>";
+        let xml = "<rpc-reply message-id=\"&#x9;&#xA;&#xD;😀\"><data>\
+                   <item value=\"&#x9;&#xA;&#xD;😀\"/></data></rpc-reply>";
         let RpcReply::Data(data) =
-            parse_strict(xml, "\t\n\r😀").expect("valid XML attribute characters")
+            parse_strict(xml, "\t\n\r😀").expect("valid referenced XML attribute characters")
         else {
             panic!("expected Data");
         };
-        assert!(data.contains('😀'));
+        assert!(data.contains("value=\"&#x9;&#xA;&#xD;😀\""));
     }
 
     #[test]
@@ -2674,5 +2698,143 @@ mod tests {
         for xml in valid {
             assert!(matches!(parse_strict(&xml, "1"), Ok(RpcReply::Ok)));
         }
+    }
+
+    #[test]
+    fn message_id_distinguishes_referenced_from_literal_attribute_whitespace() {
+        let referenced =
+            r#"<rpc-reply message-id="left&#x9;middle&#xA;right&#xD;end"><ok/></rpc-reply>"#;
+        assert!(matches!(
+            parse_strict(referenced, "left\tmiddle\nright\rend"),
+            Ok(RpcReply::Ok)
+        ));
+
+        let literal =
+            "<rpc-reply message-id=\"left\tmiddle\nright\rend\r\ntail\"><ok/></rpc-reply>";
+        assert!(matches!(
+            parse_strict(literal, "left middle right end tail"),
+            Ok(RpcReply::Ok)
+        ));
+        assert!(matches!(
+            parse_strict(literal, "left\tmiddle\nright\rend\r\ntail"),
+            Err(RpcError::MessageIdMismatch { actual, .. })
+                if actual == "left middle right end tail"
+                    && !actual.contains(['\t', '\n', '\r'])
+        ));
+    }
+
+    #[test]
+    fn captured_fragments_preserve_reference_produced_attribute_whitespace() {
+        let references = "left&#x9;middle&#xA;right&#xD;end";
+        let expected = "left\tmiddle\nright\rend";
+        let serialized = "probe=\"left&#x9;middle&#xA;right&#xD;end\"";
+
+        let data_xml = format!(
+            "<rpc-reply message-id=\"data\"><data><item probe=\"{references}\" \
+             ordinary='caf\u{e9} &amp; &quot;quoted&quot;'/></data></rpc-reply>"
+        );
+        let RpcReply::Data(data) = parse_strict(&data_xml, "data").expect("data reply") else {
+            panic!("expected captured data");
+        };
+
+        let direct_xml = format!(
+            "<rpc-reply message-id=\"direct\"><output probe=\"{references}\"/></rpc-reply>"
+        );
+        let RpcReply::Data(direct) = parse_strict(&direct_xml, "direct").expect("direct reply")
+        else {
+            panic!("expected captured direct payload");
+        };
+
+        let error_xml = format!(
+            "<rpc-reply message-id=\"error\"><rpc-error>\
+             <error-type>application</error-type>\
+             <error-tag>operation-failed</error-tag>\
+             <error-severity>error</error-severity>\
+             <error-info><detail probe=\"{references}\"/></error-info>\
+             </rpc-error></rpc-reply>"
+        );
+        let RpcError::ServerError {
+            info: Some(info), ..
+        } = parse_strict(&error_xml, "error").expect_err("hard rpc-error")
+        else {
+            panic!("expected captured error-info");
+        };
+
+        for (path, fragment, element) in [
+            ("data", data.as_str(), b"item".as_slice()),
+            ("direct", direct.as_str(), b"output".as_slice()),
+            ("error-info", info.as_str(), b"detail".as_slice()),
+        ] {
+            assert!(fragment.contains(serialized), "{path}: {fragment}");
+            assert!(
+                !fragment.contains(&format!("probe=\"{expected}\"")),
+                "{path}: serialized literal controls"
+            );
+            assert_eq!(
+                reparse_attribute(fragment, element, b"probe"),
+                expected,
+                "{path}: reparsing changed the semantic value"
+            );
+            validate_xml_fragment(fragment).expect("captured fragment stays well formed");
+        }
+
+        assert!(
+            data.contains("ordinary=\"caf\u{e9} &amp; &quot;quoted&quot;\""),
+            "ordinary attributes changed: {data}"
+        );
+        assert_eq!(
+            reparse_attribute(&data, b"item", b"ordinary"),
+            "caf\u{e9} & \"quoted\""
+        );
+    }
+
+    #[test]
+    fn captured_literal_attribute_whitespace_stays_normalized_as_spaces() {
+        let xml = "<rpc-reply message-id=\"literal\"><data>\
+                   <item probe=\"left\tmiddle\nright\rend\r\ntail\"/>\
+                   </data></rpc-reply>";
+        let RpcReply::Data(data) = parse_strict(xml, "literal").expect("data reply") else {
+            panic!("expected captured data");
+        };
+
+        assert!(data.contains("probe=\"left middle right end tail\""));
+        assert!(!data.contains("&#x9;"));
+        assert!(!data.contains("&#xA;"));
+        assert!(!data.contains("&#xD;"));
+        assert_eq!(
+            reparse_attribute(&data, b"item", b"probe"),
+            "left middle right end tail"
+        );
+    }
+
+    #[test]
+    fn captured_namespace_values_share_attribute_normalization_and_fidelity() {
+        let xml = "<rpc-reply xmlns:p=\"urn:parent&#x9;scope\" message-id=\"ns\">\
+                   <data><p:item xmlns:q=\"urn:explicit&#xA;scope\" \
+                   xmlns:r=\"urn:literal\tspace\r\nend\" q:probe=\"ok\"/></data>\
+                   </rpc-reply>";
+        let RpcReply::Data(data) = parse_strict(xml, "ns").expect("namespaced data reply") else {
+            panic!("expected captured data");
+        };
+
+        assert!(data.contains("xmlns:p=\"urn:parent&#x9;scope\""), "{data}");
+        assert!(
+            data.contains("xmlns:q=\"urn:explicit&#xA;scope\""),
+            "{data}"
+        );
+        assert!(data.contains("xmlns:r=\"urn:literal space end\""), "{data}");
+        assert_eq!(
+            reparse_attribute(&data, b"p:item", b"xmlns:p"),
+            "urn:parent\tscope"
+        );
+        assert_eq!(
+            reparse_attribute(&data, b"p:item", b"xmlns:q"),
+            "urn:explicit\nscope"
+        );
+        assert_eq!(
+            reparse_attribute(&data, b"p:item", b"xmlns:r"),
+            "urn:literal space end"
+        );
+        validate_xml_fragment(&data).expect("captured namespace scope stays well formed");
     }
 }

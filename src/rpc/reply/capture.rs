@@ -128,7 +128,7 @@ impl FragmentCapture {
                     self.xml.push_str(prefix);
                 }
                 self.xml.push_str("=\"");
-                self.xml.push_str(&escape_xml_attr(value));
+                self.xml.push_str(&escape_captured_xml_attr(value));
                 self.xml.push('"');
             }
         }
@@ -137,7 +137,7 @@ impl FragmentCapture {
             self.xml.push(' ');
             self.xml.push_str(&key);
             self.xml.push_str("=\"");
-            self.xml.push_str(&escape_xml_attr(&value));
+            self.xml.push_str(&escape_captured_xml_attr(&value));
             self.xml.push('"');
         }
 
@@ -148,6 +148,24 @@ impl FragmentCapture {
         }
         Ok(())
     }
+}
+
+fn escape_captured_xml_attr(value: &str) -> String {
+    let escaped = escape_xml_attr(value);
+    if !escaped.contains(['\t', '\n', '\r']) {
+        return escaped;
+    }
+
+    let mut preserved = String::with_capacity(escaped.len());
+    for value in escaped.chars() {
+        match value {
+            '\t' => preserved.push_str("&#x9;"),
+            '\n' => preserved.push_str("&#xA;"),
+            '\r' => preserved.push_str("&#xD;"),
+            _ => preserved.push(value),
+        }
+    }
+    preserved
 }
 
 pub(super) fn namespace_declarations(tag: &BytesStart<'_>) -> Result<NamespaceBindings, RpcError> {

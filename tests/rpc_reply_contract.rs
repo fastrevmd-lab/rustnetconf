@@ -38,6 +38,25 @@ fn public_data_reply_preserves_xml_contract() {
 }
 
 #[test]
+fn public_captured_data_preserves_attribute_whitespace_fidelity() {
+    let xml = r#"<rpc-reply message-id="whitespace"><data>
+        <item probe="left&#x9;middle&#xA;right&#xD;end"/>
+      </data></rpc-reply>"#;
+    let RpcReply::Data(data) =
+        parse_rpc_reply(xml, "whitespace").expect("valid data reply with references")
+    else {
+        panic!("expected Data");
+    };
+
+    assert!(
+        data.contains(r#"probe="left&#x9;middle&#xA;right&#xD;end""#),
+        "captured controls must remain character references: {data}"
+    );
+    assert!(!data.contains("probe=\"left\tmiddle\nright\rend\""));
+    rustnetconf::rpc::validate_xml_fragment(&data).expect("captured XML is well formed");
+}
+
+#[test]
 fn public_direct_payload_aggregates_siblings_contract() {
     let xml = r#"<rpc-reply
         xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"

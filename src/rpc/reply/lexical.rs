@@ -1,5 +1,6 @@
 use crate::error::RpcError;
 use quick_xml::events::{BytesDecl, BytesStart, Event};
+use std::borrow::Cow;
 use std::str;
 
 #[derive(Debug, Default)]
@@ -241,11 +242,37 @@ pub(super) fn validate_xml_chars(value: &str, field: &'static str) -> Result<(),
 pub(super) fn decode_attribute(raw: &[u8], field: &'static str) -> Result<String, RpcError> {
     validate_attribute_lexical(raw)?;
     let raw = str::from_utf8(raw).map_err(|_| parse_error(format!("invalid {field} encoding")))?;
-    let decoded = quick_xml::escape::unescape(raw)
+    let normalized = normalize_literal_attribute_whitespace(raw);
+    let decoded = quick_xml::escape::unescape(&normalized)
         .map(|value| value.into_owned())
         .map_err(|_| parse_error(format!("invalid {field}")))?;
     validate_xml_chars(&decoded, field)?;
     Ok(decoded)
+}
+
+fn normalize_literal_attribute_whitespace(raw: &str) -> Cow<'_, str> {
+    if !raw
+        .bytes()
+        .any(|byte| matches!(byte, b'\t' | b'\n' | b'\r'))
+    {
+        return Cow::Borrowed(raw);
+    }
+
+    let mut normalized = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(value) = chars.next() {
+        match value {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                normalized.push(' ');
+            }
+            '\t' | '\n' => normalized.push(' '),
+            _ => normalized.push(value),
+        }
+    }
+    Cow::Owned(normalized)
 }
 
 fn validate_attribute_lexical(raw: &[u8]) -> Result<(), RpcError> {
@@ -257,4 +284,31 @@ fn validate_attribute_lexical(raw: &[u8]) -> Result<(), RpcError> {
 
 fn parse_error(message: impl Into<String>) -> RpcError {
     RpcError::ParseError(message.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_attribute;
+
+    #[test]
+    fn normalizes_literal_attribute_whitespace_before_expanding_references() {
+        let literal = decode_attribute(b"left\tmiddle\nright\rend\r\ntail", "test attribute value")
+            .expect("literal XML whitespace is valid");
+        assert_eq!(literal, "left middle right end tail");
+
+        let referenced =
+            decode_attribute(b"left&#x9;middle&#xA;right&#xD;end", "test attribute value")
+                .expect("referenced XML whitespace is valid");
+        assert_eq!(referenced, "left\tmiddle\nright\rend");
+    }
+
+    #[test]
+    fn attribute_normalization_preserves_entities_quotes_and_unicode() {
+        let decoded = decode_attribute(
+            "caf\u{e9} &amp; &quot;quoted&quot; &apos;single&apos;".as_bytes(),
+            "test attribute value",
+        )
+        .expect("ordinary attribute content is valid");
+        assert_eq!(decoded, "caf\u{e9} & \"quoted\" 'single'");
+    }
 }
