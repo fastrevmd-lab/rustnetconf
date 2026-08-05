@@ -21,12 +21,3 @@ pub(crate) fn resolve_entity_ref(entity: &BytesRef<'_>) -> Option<String> {
     let name = entity.decode().ok()?;
     quick_xml::escape::resolve_predefined_entity(&name).map(|s| s.to_string())
 }
-
-/// Reconstruct the raw wire form (`&name;`) of an entity reference.
-///
-/// Used when rebuilding inner XML verbatim: the reference is kept escaped so
-/// the reconstructed fragment stays well-formed and round-trips exactly,
-/// including user-defined entities we cannot resolve.
-pub(crate) fn raw_entity_ref(entity: &BytesRef<'_>) -> String {
-    format!("&{};", entity.decode().unwrap_or_default())
-}
