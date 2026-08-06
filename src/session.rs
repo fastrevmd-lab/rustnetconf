@@ -152,7 +152,7 @@ impl Session {
     ///
     /// If the device sends more data than this without completing a framed
     /// message, the read is aborted to prevent memory exhaustion.
-    /// Defaults to [`MAX_READ_BUFFER`] (100 MB).
+    /// Defaults to 100 MB.
     pub fn set_max_read_buffer(&mut self, max_bytes: usize) {
         self.max_read_buffer = max_bytes;
     }
@@ -292,14 +292,14 @@ impl Session {
     /// Set the keepalive interval.
     ///
     /// Must be called before `establish()` or after reconnect. When set,
-    /// [`send_rpc()`] checks elapsed time and probes first if idle too long.
+    /// RPC calls check elapsed time and probe first if idle too long.
     pub fn set_keepalive_interval(&mut self, interval: Duration) {
         self.keepalive_interval = Some(interval);
     }
 
     /// Set the maximum time to wait for an RPC reply.
     ///
-    /// When set, [`send_rpc_raw()`] wraps the read loop with
+    /// When set, the RPC read loop wraps with
     /// [`tokio::time::timeout()`]. If the device does not reply within
     /// the deadline, `RpcError::Timeout` is returned.
     ///

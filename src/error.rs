@@ -98,6 +98,16 @@ pub enum TransportError {
     /// presented by the server. Fail closed.
     #[error("host key for {host} is marked @revoked in known_hosts")]
     HostKeyRevoked { host: String },
+
+    /// SCP client was poisoned by a cancelled transfer and cannot be reused.
+    ///
+    /// When cancellation drops an in-flight channel open, the underlying SSH
+    /// connection may have a leaked channel entry. Attempting further transfers
+    /// on the same client could fail unpredictably. The leaked channel is bounded
+    /// by the connection lifetime (single transfer then drop is typical usage).
+    /// Reconnect to get a fresh client.
+    #[error("SCP client unusable after cancellation during channel open — reconnect to retry")]
+    ScpClientPoisoned,
 }
 
 /// Framing layer errors (EOM or chunked framing).

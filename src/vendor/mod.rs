@@ -94,7 +94,7 @@ pub trait VendorProfile: Send + Sync {
 
     /// Parse a facts-gathering RPC response into [`Facts`].
     ///
-    /// Called with the raw XML response from the RPC returned by [`facts_rpc()`].
+    /// Called with the raw XML response from the facts RPC.
     fn parse_facts(&self, _response: &str) -> Facts {
         Facts::default()
     }

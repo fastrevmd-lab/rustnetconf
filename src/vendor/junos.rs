@@ -25,7 +25,7 @@ const JUNOS_CAPABILITY: &str = "http://xml.juniper.net/netconf/junos/1.0";
 pub struct JunosVendor {
     /// True when the device is part of a chassis cluster.
     /// Detected from `<multi-routing-engine-results>` in the facts response.
-    /// Uses AtomicBool for interior mutability (required for Arc<dyn VendorProfile>).
+    /// Uses AtomicBool for interior mutability (required for `Arc<dyn VendorProfile>`).
     is_cluster: AtomicBool,
 }
 
