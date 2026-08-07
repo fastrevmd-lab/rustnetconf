@@ -19,7 +19,6 @@ tls = ["rustls", "tokio-rustls", "webpki-roots"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-tokio-util = "0.7"
 russh = { version = "0.62", default-features = false, features = ["flate2", "aws-lc-rs"] }
 aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
 base64ct = { version = "1", features = ["std"] }
@@ -31,10 +30,8 @@ zeroize = { version = "1", features = ["derive"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
 tokio-rustls = { version = "0.26", optional = true }
 webpki-roots = { version = "0.26", optional = true }
-libc = "0.2"
 
 [dev-dependencies]
 tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
-rand = "0.10"
