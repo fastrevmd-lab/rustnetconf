@@ -167,31 +167,31 @@ pub struct JumpHostConfig {
 /// rejects, we record the structured error here; after `client::connect`
 /// fails with a generic auth/key error, the caller swaps in this error.
 #[derive(Clone, Default)]
-pub(crate) struct HostKeyErrorSlot(Arc<std::sync::Mutex<Option<TransportError>>>);
+struct HostKeyErrorSlot(Arc<std::sync::Mutex<Option<TransportError>>>);
 
 impl HostKeyErrorSlot {
-    pub(crate) fn set(&self, err: TransportError) {
+    fn set(&self, err: TransportError) {
         if let Ok(mut guard) = self.0.lock() {
             *guard = Some(err);
         }
     }
 
-    pub(crate) fn take(&self) -> Option<TransportError> {
+    fn take(&self) -> Option<TransportError> {
         self.0.lock().ok().and_then(|mut g| g.take())
     }
 }
 
 /// Internal SSH client handler for russh callbacks.
-pub(crate) struct SshHandler {
-    pub(crate) host_key_verification: HostKeyVerification,
+struct SshHandler {
+    host_key_verification: HostKeyVerification,
     /// Host this handler is verifying — used for known_hosts lookup and
     /// for structured error messages.
-    pub(crate) host: String,
-    pub(crate) port: u16,
+    host: String,
+    port: u16,
     /// Shared slot to surface structured rejection errors back to the
     /// outer connect call. Cloned `Arc` so it's visible after the handler
     /// is moved into `client::connect`.
-    pub(crate) error_slot: HostKeyErrorSlot,
+    error_slot: HostKeyErrorSlot,
 }
 
 impl client::Handler for SshHandler {
@@ -292,7 +292,7 @@ impl client::Handler for SshHandler {
 /// Convert a `known_hosts::LookupOutcome` into either `Ok(())` (accept) or a
 /// structured [`TransportError`] (reject). Pure — no I/O — so the mapping is
 /// unit-testable.
-pub(crate) fn known_hosts_outcome_to_result(
+fn known_hosts_outcome_to_result(
     outcome: crate::transport::known_hosts::LookupOutcome,
     host: &str,
     port: u16,
@@ -327,10 +327,7 @@ pub(crate) fn known_hosts_outcome_to_result(
 /// (typically `"SHA256:<base64>"`); comparison against
 /// [`HostKeyVerification::Fingerprint`] is tolerant of a missing `SHA256:`
 /// prefix on the expected side.
-pub(crate) fn evaluate_host_key_policy(
-    policy: &HostKeyVerification,
-    actual_fingerprint: &str,
-) -> bool {
+fn evaluate_host_key_policy(policy: &HostKeyVerification, actual_fingerprint: &str) -> bool {
     match policy {
         HostKeyVerification::KnownHosts(_) => false,
         HostKeyVerification::AcceptAll => true,
@@ -356,7 +353,7 @@ struct ChannelStream {
 /// Network devices (Juniper, Cisco) often only support ECDH NIST or DH
 /// group key exchange — not Curve25519 which is russh's default
 /// preference, so we extend the preferred list.
-pub(crate) fn build_russh_config() -> client::Config {
+fn build_russh_config() -> client::Config {
     let preferred = Preferred {
         kex: Cow::Borrowed(&[
             kex::CURVE25519,
@@ -481,7 +478,7 @@ fn spawn_proxy_command(
 /// Authenticate an open SSH session against the given username/auth method.
 ///
 /// Used uniformly for jump hosts and the final target.
-pub(crate) async fn authenticate(
+async fn authenticate(
     handle: &mut client::Handle<SshHandler>,
     username: &str,
     auth: &SshAuth,

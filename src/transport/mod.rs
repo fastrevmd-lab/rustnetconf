@@ -7,14 +7,6 @@
 //! - Future transports (TLS, RESTCONF) plug in without reimplementing framing
 
 pub mod known_hosts;
-
-/// SCP file transfer client (Unix-only).
-///
-/// Requires `O_NOFOLLOW`, `O_NONBLOCK`, and `MetadataExt` for secure file handling.
-/// Not available on Windows or other non-Unix platforms.
-#[cfg(unix)]
-pub mod scp;
-
 pub mod ssh;
 #[cfg(feature = "tls")]
 pub mod tls;
