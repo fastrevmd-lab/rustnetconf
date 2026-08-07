@@ -24,9 +24,9 @@ Async NETCONF client library, YANG code generation, vendor profiles, connection 
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.13.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.13.0)** (vendor-profile plumbing).
-> Now on crates.io: `rustnetconf` 0.13.0 · `rustnetconf-cli` 0.3.4 · `rustnetconf-yang` 0.1.4.
-> See [What's New in v0.13.0](#whats-new-in-v0130) below for the pool vendor-override fix and vendor-aware CLI diffs.
+> **Latest release — [v0.13.3](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.13.3)** (dependency and parser maintenance).
+> On crates.io: `rustnetconf` 0.13.3 · `rustnetconf-cli` 0.3.4 · `rustnetconf-yang` 0.1.4.
+> See [What's New in v0.13.3](#whats-new-in-v0133) below.
 
 ## Workspace
 
@@ -47,6 +47,16 @@ SSH is present as a *transport for NETCONF*, not as a general-purpose capability
 - Remote shell or command execution
 
 Consumers that need those should use a dedicated SSH crate alongside this one. A native SCP1 client was briefly added and then reverted before it was ever released (#52, reverted by #53) for exactly this reason; issues #47 and #51 were closed as not planned on the same grounds. The round trip is visible in `git log` between v0.13.2 and the next release — it was a deliberate reversal, not an accident.
+
+## What's New in v0.13.3
+
+Maintenance release for `rustnetconf` (0.13.3). `rustnetconf-cli` (0.3.4) and `rustnetconf-yang` (0.1.4) are unchanged. No public API changes — a drop-in patch upgrade from 0.13.2.
+
+- **RPC reply parsing hardened** (#49). Reply parsing and repair moved into a dedicated `reply` module with tightened handling of malformed and partial replies. `parse_rpc_reply`, `RpcReply`, and `RpcErrorInfo` keep their existing paths and signatures via re-export.
+- **russh 0.62.4 → 0.62.5** (#50). Picks up the `Channel::data()` backpressure fix. The GHSA-m65r-rprj-r5rg advisory in that release is server-side only; this crate uses `russh::client` exclusively and was never exposed to it.
+- **cmov 0.5.3 → 0.5.4** (#46).
+- **License gating in CI.** A `deny.toml` allow-list now exists, and CI runs `cargo deny check bans sources licenses`. Previously licenses were ungated, because with no config cargo-deny rejects every license by default.
+- **Scope documented** — see [Scope](#scope). A native SCP1 client was added (#52) and reverted (#53) within this cycle, before any release; issues #47 and #51 were closed on the same grounds. No released version ever contained it.
 
 ## What's New in v0.13.0
 
