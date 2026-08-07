@@ -42,7 +42,10 @@ jobs:
         uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-      - name: cargo-deny (bans + sources)
+      - name: cargo-deny (bans + sources + licenses)
         uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
         with:
-          command: check bans sources
+          # Licenses are gated by the allow-list in deny.toml. Before that file
+          # existed this ran `check bans sources` only, because with no config
+          # cargo-deny rejects every license by default.
+          command: check bans sources licenses
