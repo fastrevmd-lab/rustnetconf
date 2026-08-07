@@ -36,6 +36,18 @@ Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and
 | **rustnetconf-yang** | YANG model code generation (compile-time config validation) |
 | **rustnetconf-cli** | Terraform-like CLI tool (`netconf` binary) |
 
+## Scope
+
+This is a **NETCONF library** — RFC 6241 (the protocol) and RFC 6242 (NETCONF over SSH) — plus YANG code generation and a CLI built on it.
+
+SSH is present as a *transport for NETCONF*, not as a general-purpose capability. The crate deliberately does **not** provide:
+
+- File transfer (SFTP, SCP) — it is not a file-transfer library
+- A public `russh` handle, or a generic "open any SSH subsystem" escape hatch — the SSH connection is an implementation detail of the NETCONF transport, and keeping it private is what stops this crate's public API from becoming russh's version surface
+- Remote shell or command execution
+
+Consumers that need those should use a dedicated SSH crate alongside this one. A native SCP1 client was briefly added and then reverted before it was ever released (#52, reverted by #53) for exactly this reason; issues #47 and #51 were closed as not planned on the same grounds. The round trip is visible in `git log` between v0.13.2 and the next release — it was a deliberate reversal, not an accident.
+
 ## What's New in v0.13.0
 
 Vendor-profile plumbing for `rustnetconf` (0.13.0) and `rustnetconf-cli` (0.3.4), from a project review (PRs #37, #38). `rustnetconf-yang` is unchanged at 0.1.4.

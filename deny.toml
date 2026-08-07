@@ -1,0 +1,49 @@
+# cargo-deny configuration.
+#
+# CI runs `cargo deny check bans sources licenses` (.github/workflows/security.yml).
+# Advisories are covered separately by `cargo audit` in the same workflow.
+
+[graph]
+all-features = true
+
+[licenses]
+# Permissive licenses only. Every entry below is present in the current
+# dependency tree — this is an inventory, not an aspirational list. Adding a
+# license here is a deliberate act: check the obligations it imposes first.
+#
+# Deliberately absent: LGPL-2.1-or-later. It appears in the tree via r-efi,
+# which is `MIT OR Apache-2.0 OR LGPL-2.1-or-later`, so the MIT arm satisfies
+# it and no copyleft obligation attaches. If a crate ever arrives that offers
+# LGPL *only*, this check should fail and prompt a decision rather than
+# silently accept it.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    # Mozilla's CA root bundle (webpki-roots), reached via the `tls` feature.
+    # A permissive *data* license — no copyleft, no source obligation.
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+# Refuse to guess when a license file is ambiguous — an unclear license should
+# fail the check, not be approximated.
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
