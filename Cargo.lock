@@ -1838,7 +1838,7 @@ dependencies = [
 
 [[package]]
 name = "rustnetconf"
-version = "0.13.3"
+version = "0.14.0"
 dependencies = [
  "async-trait",
  "aws-lc-rs",
@@ -1859,7 +1859,7 @@ dependencies = [
 
 [[package]]
 name = "rustnetconf-cli"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "clap",
  "colored",
@@ -1876,7 +1876,7 @@ dependencies = [
 
 [[package]]
 name = "rustnetconf-yang"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "quick-xml",
  "rustnetconf",

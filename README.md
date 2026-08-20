@@ -24,9 +24,9 @@ Async NETCONF client library, YANG code generation, vendor profiles, connection 
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.13.3](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.13.3)** (dependency and parser maintenance).
-> On crates.io: `rustnetconf` 0.13.3 · `rustnetconf-cli` 0.3.4 · `rustnetconf-yang` 0.1.4.
-> See [What's New in v0.13.3](#whats-new-in-v0133) below.
+> **Latest release — [v0.14.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.14.0)** (Junos candidate-datastore safety).
+> On crates.io: `rustnetconf` 0.14.0 · `rustnetconf-cli` 0.3.5 · `rustnetconf-yang` 0.1.5.
+> See [What's New in v0.14.0](#whats-new-in-v0140) below.
 
 ## Workspace
 
@@ -47,6 +47,22 @@ SSH is present as a *transport for NETCONF*, not as a general-purpose capability
 - Remote shell or command execution
 
 Consumers that need those should use a dedicated SSH crate alongside this one. A native SCP1 client was briefly added and then reverted before it was ever released (#52, reverted by #53) for exactly this reason; issues #47 and #51 were closed as not planned on the same grounds. The round trip is visible in `git log` between v0.13.2 and the next release — it was a deliberate reversal, not an accident.
+
+## What's New in v0.14.0
+
+Junos candidate-datastore safety for `rustnetconf` (0.14.0), from a bug reproduced on hardware (#55, PR #56). `rustnetconf-cli` (0.3.5) and `rustnetconf-yang` (0.1.5) carry the new dependency requirement but have no source changes.
+
+**This is a behaviour change on close, which is why it is a minor bump and not a patch.** Read the last bullet before upgrading if you send candidate-modifying RPCs through the raw `rpc()` escape hatch.
+
+- **`close_session()` no longer discards a candidate this session never touched** (#55). Junos returns `CloseSequence::DiscardThenClose`, and the discard fired unconditionally — including for sessions that only read. On a standalone Junos device the candidate datastore is *shared*, so closing such a session destroyed uncommitted work belonging to an operator at the CLI or to another NETCONF client. The session now tracks whether it dirtied the candidate and discards only then.
+
+  The tracking is deliberately asymmetric. `edit_config` (candidate target only), `load_configuration`, and `rollback_configuration` mark *before* sending, so a partial or failed edit still counts; `commit`, `commit_configuration`, `confirmed_commit`, `discard_changes`, and `close_configuration` clear it only on success. Anything that fails after the write begins still marks dirty, because a partially applied change does need cleaning up.
+
+- **New `Session::rpc_candidate_change()` / `Client::rpc_candidate_change()`** — additive. The supported way to send a vendor-specific candidate-modifying RPC (Junos `<load-configuration>` and friends) through the raw path. It validates the fragment, completes the send preflight, marks the candidate dirty, and only then writes, so a locally rejected fragment or a failed keepalive probe cannot leave a false mark that a later close would act on.
+
+- **New `mark_candidate_dirty()` / `candidate_dirty()`** on both `Session` and `Client` — additive, for callers who need manual control. Prefer `rpc_candidate_change()`: marking by hand before an RPC that never reaches the device reintroduces exactly the bug above.
+
+- **Upgrade note.** If you send candidate-modifying RPCs through raw `rpc()`, you were previously relying on the unconditional discard to clean up after them. That cleanup is now conditional and will not fire for those calls. Switch them to `rpc_candidate_change()`. Everything going through the typed operations (`edit_config`, `load_configuration`, `rollback_configuration`) is tracked automatically and needs no change.
 
 ## What's New in v0.13.3
 
