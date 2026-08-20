@@ -259,7 +259,7 @@ impl Session {
 
     /// Mark the candidate datastore as dirty.
     ///
-    /// Call this after issuing a candidate-modifying RPC through the raw `rpc()`
+    /// Call this **before** issuing a candidate-modifying RPC through the raw `rpc()`
     /// escape hatch, so `close_session()` will send `<discard-changes/>` to clean
     /// up the shared candidate datastore.
     ///
@@ -267,6 +267,21 @@ impl Session {
     /// candidate datastore. When a session closes without committing, uncommitted
     /// changes must be discarded so they don't interfere with the next operator's
     /// session.
+    ///
+    /// # Why mark BEFORE the RPC?
+    ///
+    /// Marking before (not after) the RPC ensures that a timeout, cancellation,
+    /// or error-after-partial-application still counts as dirty, matching the
+    /// behavior of built-in operations like `load_configuration()`. A failed or
+    /// partially-applied RPC may still leave uncommitted changes that need cleanup.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Mark BEFORE awaiting the RPC
+    /// session.mark_candidate_dirty();
+    /// session.rpc("<load-configuration>...</load-configuration>").await?;
+    /// ```
     pub fn mark_candidate_dirty(&mut self) {
         self.candidate_dirty = true;
     }

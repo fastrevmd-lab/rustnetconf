@@ -495,6 +495,45 @@ impl Client {
         self.session.vendor_name()
     }
 
+    /// Check if this session may have dirtied the candidate datastore.
+    ///
+    /// Returns `true` if the session has called candidate-modifying operations
+    /// like `edit_config(Datastore::Candidate, ...)`, `load_configuration()`,
+    /// or `rollback_configuration()` since the last `commit()` or `discard_changes()`.
+    pub fn candidate_dirty(&self) -> bool {
+        self.session.candidate_dirty()
+    }
+
+    /// Mark the candidate datastore as dirty.
+    ///
+    /// Call this **before** issuing a candidate-modifying RPC through the raw
+    /// [`rpc()`](Self::rpc) or [`rpc_with_warnings()`](Self::rpc_with_warnings)
+    /// escape hatch, so [`close_session()`](Self::close_session) will send
+    /// `<discard-changes/>` to clean up the shared candidate datastore.
+    ///
+    /// This is a safety mechanism for Junos and other devices with a shared
+    /// candidate datastore. When a session closes without committing, uncommitted
+    /// changes must be discarded so they don't interfere with the next operator's
+    /// session.
+    ///
+    /// # Why mark BEFORE the RPC?
+    ///
+    /// Marking before (not after) the RPC ensures that a timeout, cancellation,
+    /// or error-after-partial-application still counts as dirty, matching the
+    /// behavior of built-in operations like `load_configuration()`. A failed or
+    /// partially-applied RPC may still leave uncommitted changes that need cleanup.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Mark BEFORE awaiting the RPC
+    /// client.mark_candidate_dirty();
+    /// client.rpc("<load-configuration>...</load-configuration>").await?;
+    /// ```
+    pub fn mark_candidate_dirty(&mut self) {
+        self.session.mark_candidate_dirty()
+    }
+
     /// Normalize a config fragment using the connected device's vendor profile.
     ///
     /// Junos strips the outer `<configuration>` wrapper; generic vendors pass
@@ -1317,5 +1356,144 @@ mod tests {
 
         let input = "<configuration junos:commit-seconds=\"1\"><foo>bar</foo></configuration>";
         assert_eq!(client.unwrap_config(input), "<foo>bar</foo>");
+    }
+
+    /// Build a mock Junos hello response with EOM framing.
+    fn mock_junos_hello() -> Vec<u8> {
+        let hello = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability>urn:ietf:params:netconf:base:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:candidate:1.0</capability>
+    <capability>http://xml.juniper.net/netconf/junos/1.0</capability>
+  </capabilities>
+  <session-id>1</session-id>
+</hello>"#;
+        let mut buf = hello.as_bytes().to_vec();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    /// Test that Client exposes mark_candidate_dirty and that it causes
+    /// close_session to send discard-changes on Junos.
+    #[tokio::test]
+    async fn client_mark_candidate_dirty_causes_discard_on_close() {
+        use crate::transport::mock::MockTransport;
+        let mut response_data = mock_junos_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // raw rpc reply
+        response_data.extend_from_slice(&mock_ok_reply("2")); // discard-changes reply
+        response_data.extend_from_slice(&mock_ok_reply("3")); // close-session reply
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        assert_eq!(session.vendor_name(), "junos");
+
+        let mut client = Client::from_session_for_test(session);
+
+        // Send a raw RPC (simulating a candidate-modifying vendor RPC)
+        client
+            .rpc("<load-configuration><configuration><foo/></configuration></load-configuration>")
+            .await
+            .expect("raw rpc failed");
+
+        // Mark candidate as dirty
+        client.mark_candidate_dirty();
+
+        // Close session
+        client.close_session().await.expect("close failed");
+
+        // Verify discard-changes was sent exactly once
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        let discard_count = written_str.matches("discard-changes").count();
+        assert_eq!(
+            discard_count, 1,
+            "Junos session with marked candidate should send discard-changes once on close"
+        );
+    }
+
+    /// Test that Client without mark_candidate_dirty does not send discard.
+    #[tokio::test]
+    async fn client_without_mark_dirty_does_not_send_discard() {
+        use crate::transport::mock::MockTransport;
+        let mut response_data = mock_junos_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // raw rpc reply
+        response_data.extend_from_slice(&mock_ok_reply("2")); // close-session reply (no discard)
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        assert_eq!(session.vendor_name(), "junos");
+
+        let mut client = Client::from_session_for_test(session);
+
+        // Send a read-only raw RPC
+        client
+            .rpc("<get-configuration><configuration/></get-configuration>")
+            .await
+            .expect("raw rpc failed");
+
+        // Do NOT mark candidate as dirty
+
+        // Close session
+        client.close_session().await.expect("close failed");
+
+        // Verify no discard-changes was sent
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        let discard_count = written_str.matches("discard-changes").count();
+        assert_eq!(
+            discard_count, 0,
+            "Junos session without mark_candidate_dirty should NOT send discard-changes on close"
+        );
+    }
+
+    /// Test that candidate_dirty() reflects state correctly.
+    #[tokio::test]
+    async fn client_candidate_dirty_reflects_state() {
+        use crate::transport::mock::MockTransport;
+        let mut response_data = mock_junos_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // raw rpc reply
+        response_data.extend_from_slice(&mock_ok_reply("2")); // discard-changes reply
+        response_data.extend_from_slice(&mock_ok_reply("3")); // close-session reply
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let mut client = Client::from_session_for_test(session);
+
+        // Initially false
+        assert!(
+            !client.candidate_dirty(),
+            "candidate should not be dirty initially"
+        );
+
+        // Send a raw RPC
+        client
+            .rpc("<load-configuration><configuration><foo/></configuration></load-configuration>")
+            .await
+            .expect("raw rpc failed");
+
+        // Still false (not marked)
+        assert!(
+            !client.candidate_dirty(),
+            "candidate should not be dirty before marking"
+        );
+
+        // Mark it
+        client.mark_candidate_dirty();
+
+        // Now true
+        assert!(
+            client.candidate_dirty(),
+            "candidate should be dirty after marking"
+        );
+
+        // Close to clean up
+        client.close_session().await.expect("close failed");
     }
 }
