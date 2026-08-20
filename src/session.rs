@@ -617,20 +617,20 @@ impl Session {
     /// sanitized before passing to this method.
     pub async fn rpc(&mut self, rpc_content: &str) -> Result<String, NetconfError> {
         rpc::validate_xml_fragment(rpc_content)?;
-        self.send_raw_rpc(rpc_content).await
+        self.dispatch_rpc_fragment(rpc_content).await
     }
 
     /// Send an arbitrary RPC that modifies the candidate datastore.
     ///
     /// This is the preferred way to send vendor-specific candidate-modifying RPCs
     /// (e.g., Junos `<load-configuration>`). It validates the XML fragment locally
-    /// first; if validation fails, the error is returned WITHOUT marking the
-    /// candidate dirty. If validation passes, the candidate is marked dirty and
-    /// the RPC is sent.
+    /// first, then runs all preflight checks (keepalive probe and session state).
+    /// Only after all checks pass does it mark the candidate dirty and send the RPC.
     ///
-    /// Marking happens AFTER local validation but BEFORE sending to ensure that:
+    /// Marking happens AFTER all preflight checks but BEFORE the write begins, so:
     /// - A locally-malformed fragment does not incorrectly mark dirty
-    /// - A timeout or partially-applied change still marks dirty for cleanup
+    /// - A failed preflight check (e.g., un-established session) does not mark dirty
+    /// - A timeout or error AFTER the write begins still marks dirty for cleanup
     ///
     /// When `close_session()` is called, it will send `<discard-changes/>` to
     /// clean up this session's uncommitted changes on devices with a shared
@@ -639,7 +639,7 @@ impl Session {
     /// # Example
     ///
     /// ```ignore
-    /// // Atomic: validates first, marks only if valid, then sends
+    /// // Atomic: validates, runs preflight, marks only if preflight passes, then sends
     /// session.rpc_candidate_change(
     ///     "<load-configuration><configuration><foo/></configuration></load-configuration>"
     /// ).await?;
@@ -648,24 +648,47 @@ impl Session {
         &mut self,
         rpc_content: &str,
     ) -> Result<String, NetconfError> {
-        // Validate locally first - if this fails, do NOT mark dirty
+        // 1. Validate locally first - if this fails, do NOT mark dirty
         rpc::validate_xml_fragment(rpc_content)?;
 
-        // Validation passed - mark dirty BEFORE sending
+        // 2. Run keepalive check if configured - if this fails, do NOT mark dirty
+        self.keepalive_check().await?;
+
+        // 3. Ensure session is established - if this fails, do NOT mark dirty
+        self.ensure_established()?;
+
+        // 4. All preflight passed - mark dirty NOW, before the write begins
         self.candidate_dirty = true;
 
-        // Send the RPC
-        self.send_raw_rpc(rpc_content).await
+        // 5. Build the RPC envelope and send via send_rpc_raw (bypasses keepalive re-check)
+        let msg_id = self.next_message_id();
+        let xml = Self::wrap_rpc_envelope(&msg_id, rpc_content);
+        let reply = self.send_rpc_raw(&xml, &msg_id).await?;
+
+        // 6. Map reply to String the same way rpc() does
+        match reply {
+            RpcReply::Data(data) | RpcReply::DataWithWarnings(data, _) => Ok(data),
+            RpcReply::Ok | RpcReply::OkWithWarnings(_) => Ok(String::new()),
+        }
     }
 
-    /// Internal helper: send an already-validated RPC fragment.
-    /// Used by both `rpc()` and `rpc_candidate_change()` after validation.
-    async fn send_raw_rpc(&mut self, rpc_content: &str) -> Result<String, NetconfError> {
-        let msg_id = self.next_message_id();
-        let safe_id = crate::rpc::operations::escape_xml_attr(&msg_id);
-        let xml = format!(
+    /// Internal helper: wrap a validated fragment in the `<rpc>` envelope.
+    ///
+    /// Shared by the raw-RPC paths so the envelope is built identically
+    /// whether or not the call marks the candidate dirty.
+    fn wrap_rpc_envelope(message_id: &str, rpc_content: &str) -> String {
+        let safe_id = crate::rpc::operations::escape_xml_attr(message_id);
+        format!(
             r#"<?xml version="1.0" encoding="UTF-8"?><nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">{rpc_content}</nc:rpc>"#
-        );
+        )
+    }
+
+    /// Internal helper: dispatch an already-validated RPC fragment.
+    /// Wraps the fragment in an `<rpc>` envelope, sends it, and extracts the response.
+    /// Used by `rpc()` after validation. Calls `send_rpc()` which runs the keepalive check.
+    async fn dispatch_rpc_fragment(&mut self, rpc_content: &str) -> Result<String, NetconfError> {
+        let msg_id = self.next_message_id();
+        let xml = Self::wrap_rpc_envelope(&msg_id, rpc_content);
         let reply = self.send_rpc(&xml, &msg_id).await?;
         match reply {
             RpcReply::Data(data) | RpcReply::DataWithWarnings(data, _) => Ok(data),
@@ -687,10 +710,7 @@ impl Session {
     ) -> Result<(String, Vec<RpcErrorInfo>), NetconfError> {
         rpc::validate_xml_fragment(rpc_content)?;
         let msg_id = self.next_message_id();
-        let safe_id = crate::rpc::operations::escape_xml_attr(&msg_id);
-        let xml = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?><nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">{rpc_content}</nc:rpc>"#
-        );
+        let xml = Self::wrap_rpc_envelope(&msg_id, rpc_content);
         let reply = self.send_rpc(&xml, &msg_id).await?;
         match reply {
             RpcReply::Data(data) => Ok((data, Vec::new())),
@@ -2232,6 +2252,118 @@ mod tests {
         assert_eq!(
             discard_count, 0,
             "generic vendor should never send discard-changes, even if candidate was edited"
+        );
+    }
+
+    // ── rpc_candidate_change preflight regression tests ────────────────
+
+    /// Test 1: rpc_candidate_change on un-established session returns error
+    /// and does NOT mark dirty. This is the core regression test for the
+    /// ensure_established preflight failure path.
+    #[tokio::test]
+    async fn test_rpc_candidate_change_failed_keepalive_does_not_mark_dirty() {
+        // Hello only: the keepalive probe that fires before the candidate RPC
+        // gets EOF, so nothing of the candidate change ever reaches the wire.
+        let response_data = mock_junos_hello();
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // A zero interval makes `last.elapsed() >= interval` true immediately,
+        // so the next RPC probes first — no sleeping, fully deterministic.
+        session.set_keepalive_interval(Duration::ZERO);
+
+        let result = session
+            .rpc_candidate_change(
+                "<load-configuration><configuration><foo/></configuration></load-configuration>",
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "keepalive probe hit EOF, so the RPC must fail"
+        );
+        assert!(
+            !session.candidate_dirty(),
+            "a candidate RPC that died in the keepalive preflight never reached \
+             the device, so it must not mark the shared candidate dirty"
+        );
+
+        let written = String::from_utf8_lossy(&written_handle.lock().unwrap()).into_owned();
+        assert!(
+            !written.contains("load-configuration"),
+            "the candidate change must not have been written"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rpc_candidate_change_not_established_does_not_mark_dirty() {
+        let transport = MockTransport::new(vec![]);
+        let mut session = Session::new(Box::new(transport));
+
+        // Do NOT call establish()
+
+        let result = session
+            .rpc_candidate_change(
+                "<load-configuration><configuration><foo/></configuration></load-configuration>",
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "rpc_candidate_change on un-established session should fail"
+        );
+
+        // Candidate must NOT be marked dirty
+        assert!(
+            !session.candidate_dirty(),
+            "candidate_dirty must be false when ensure_established() fails"
+        );
+    }
+
+    /// Test 2: rpc_candidate_change on properly established Junos session
+    /// with well-formed fragment still marks dirty and causes close_session
+    /// to send discard-changes. This is a guard against the restructure
+    /// breaking the happy path.
+    #[tokio::test]
+    async fn test_rpc_candidate_change_established_marks_dirty() {
+        let mut response_data = mock_junos_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // rpc_candidate_change reply
+        response_data.extend_from_slice(&mock_ok_reply("2")); // discard-changes reply
+        response_data.extend_from_slice(&mock_ok_reply("3")); // close-session reply
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        assert_eq!(session.vendor_name(), "junos");
+
+        // Call rpc_candidate_change with well-formed XML
+        session
+            .rpc_candidate_change(
+                "<load-configuration><configuration><foo/></configuration></load-configuration>",
+            )
+            .await
+            .expect("rpc_candidate_change failed");
+
+        // Candidate should be marked dirty
+        assert!(
+            session.candidate_dirty(),
+            "candidate should be dirty after successful rpc_candidate_change"
+        );
+
+        // Close session
+        session.close_session().await.expect("close failed");
+
+        // Verify discard-changes was sent exactly once
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        let discard_count = written_str.matches("discard-changes").count();
+        assert_eq!(
+            discard_count, 1,
+            "Junos session with rpc_candidate_change should send discard-changes once on close"
         );
     }
 }
