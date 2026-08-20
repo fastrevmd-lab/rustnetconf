@@ -259,14 +259,26 @@ impl Session {
 
     /// Mark the candidate datastore as dirty.
     ///
-    /// Call this **before** issuing a candidate-modifying RPC through the raw `rpc()`
-    /// escape hatch, so `close_session()` will send `<discard-changes/>` to clean
-    /// up the shared candidate datastore.
+    /// For vendor-specific candidate-modifying RPCs, prefer
+    /// [`rpc_candidate_change()`](Self::rpc_candidate_change) over manually
+    /// marking with this method. `rpc_candidate_change()` validates the fragment
+    /// locally first and only marks dirty if validation passes, preventing a
+    /// locally-rejected RPC from incorrectly marking the candidate dirty.
+    ///
+    /// If you must use the raw [`rpc()`](Self::rpc) escape hatch, call this
+    /// **before** sending the RPC, so [`close_session()`](Self::close_session)
+    /// will send `<discard-changes/>` to clean up the shared candidate datastore.
     ///
     /// This is a safety mechanism for Junos and other devices with a shared
     /// candidate datastore. When a session closes without committing, uncommitted
     /// changes must be discarded so they don't interfere with the next operator's
     /// session.
+    ///
+    /// # Warning
+    ///
+    /// If you mark manually, ensure the RPC actually reached the device. Marking
+    /// before a locally-rejected RPC (e.g., malformed XML) can cause `close_session()`
+    /// to discard another session's work on a shared candidate.
     ///
     /// # Why mark BEFORE the RPC?
     ///
@@ -605,6 +617,50 @@ impl Session {
     /// sanitized before passing to this method.
     pub async fn rpc(&mut self, rpc_content: &str) -> Result<String, NetconfError> {
         rpc::validate_xml_fragment(rpc_content)?;
+        self.send_raw_rpc(rpc_content).await
+    }
+
+    /// Send an arbitrary RPC that modifies the candidate datastore.
+    ///
+    /// This is the preferred way to send vendor-specific candidate-modifying RPCs
+    /// (e.g., Junos `<load-configuration>`). It validates the XML fragment locally
+    /// first; if validation fails, the error is returned WITHOUT marking the
+    /// candidate dirty. If validation passes, the candidate is marked dirty and
+    /// the RPC is sent.
+    ///
+    /// Marking happens AFTER local validation but BEFORE sending to ensure that:
+    /// - A locally-malformed fragment does not incorrectly mark dirty
+    /// - A timeout or partially-applied change still marks dirty for cleanup
+    ///
+    /// When `close_session()` is called, it will send `<discard-changes/>` to
+    /// clean up this session's uncommitted changes on devices with a shared
+    /// candidate datastore (e.g., Junos).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Atomic: validates first, marks only if valid, then sends
+    /// session.rpc_candidate_change(
+    ///     "<load-configuration><configuration><foo/></configuration></load-configuration>"
+    /// ).await?;
+    /// ```
+    pub async fn rpc_candidate_change(
+        &mut self,
+        rpc_content: &str,
+    ) -> Result<String, NetconfError> {
+        // Validate locally first - if this fails, do NOT mark dirty
+        rpc::validate_xml_fragment(rpc_content)?;
+
+        // Validation passed - mark dirty BEFORE sending
+        self.candidate_dirty = true;
+
+        // Send the RPC
+        self.send_raw_rpc(rpc_content).await
+    }
+
+    /// Internal helper: send an already-validated RPC fragment.
+    /// Used by both `rpc()` and `rpc_candidate_change()` after validation.
+    async fn send_raw_rpc(&mut self, rpc_content: &str) -> Result<String, NetconfError> {
         let msg_id = self.next_message_id();
         let safe_id = crate::rpc::operations::escape_xml_attr(&msg_id);
         let xml = format!(
