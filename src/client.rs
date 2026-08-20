@@ -887,6 +887,18 @@ impl Client {
         self.session.commit_configuration().await
     }
 
+    /// Commit with a log comment using the Junos-native `<commit-configuration>` RPC.
+    ///
+    /// Attaches a Junos commit log comment to the commit, visible in `show system commit`.
+    /// The log text is automatically XML-escaped. The candidate-dirty flag is cleared on
+    /// success, just as with [`commit_configuration()`](Self::commit_configuration).
+    ///
+    /// Use this instead of [`commit()`](Self::commit) on Junos devices,
+    /// especially when a private/exclusive configuration database is open.
+    pub async fn commit_configuration_with_log(&mut self, log: &str) -> Result<(), NetconfError> {
+        self.session.commit_configuration_with_log(log).await
+    }
+
     /// Rollback the candidate configuration to a previous commit (Junos).
     ///
     /// `rollback` is the rollback index (0 = most recent commit, up to 49).
