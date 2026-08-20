@@ -24,9 +24,9 @@ Async NETCONF client library, YANG code generation, vendor profiles, connection 
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.14.2](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.14.2)** (Junos commit with a log comment).
-> On crates.io: `rustnetconf` 0.14.2 · `rustnetconf-cli` 0.3.5 · `rustnetconf-yang` 0.1.5.
-> See [What's New in v0.14.2](#whats-new-in-v0142) below.
+> **Latest release — [v0.14.3](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.14.3)** (cancellation-safe commit classification).
+> On crates.io: `rustnetconf` 0.14.3 · `rustnetconf-cli` 0.3.5 · `rustnetconf-yang` 0.1.5.
+> See [What's New in v0.14.3](#whats-new-in-v0143) below.
 
 ## Workspace
 
@@ -47,6 +47,20 @@ SSH is present as a *transport for NETCONF*, not as a general-purpose capability
 - Remote shell or command execution
 
 Consumers that need those should use a dedicated SSH crate alongside this one. A native SCP1 client was briefly added and then reverted before it was ever released (#52, reverted by #53) for exactly this reason; issues #47 and #51 were closed as not planned on the same grounds. The round trip is visible in `git log` between v0.13.2 and the next release — it was a deliberate reversal, not an accident.
+
+## What's New in v0.14.3
+
+Bug-fix release (#61). `rustnetconf-cli` and `rustnetconf-yang` are unchanged. No API changes — every function touched is private — so a drop-in patch upgrade from 0.14.2.
+
+- **Fixed: a cancelled commit no longer misclassifies the next unrelated failure.** `Session` tracked "a commit is in flight" in a `pending_commit` field, set before the send and cleared after it. Drop that future at its `.await` — a `tokio::time::timeout`, a `select!` — and the reset never ran, so the flag stayed set for the life of the session. The next unrelated transport EOF, during a `get-config` or anything else, was then reported as `RpcError::CommitUnknown`.
+
+  That is the flag's purpose inverted. It exists so a genuinely indeterminate commit is not mistaken for a clean I/O failure; the leak made a clean I/O failure look like an indeterminate commit, which can send a caller hunting for a commit that never happened or stop it retrying something perfectly safe to retry.
+
+- **The fix removes state rather than guarding it.** "This is a commit" describes one call, not the session, so it is now an `is_commit` parameter threaded through the private `send_rpc_raw` → `read_rpc_reply` → `read_message` chain, and the field is gone. Cancellation-safety follows by construction: the fact lives in the call frame and dies with any future that is dropped. Commit paths call a new private `send_rpc_commit()`; the other 20 `send_rpc` call sites are untouched.
+
+  An RAII guard was considered and rejected — holding `&mut self.pending_commit` across `self.send_rpc(&mut self)` does not borrow-check, so it would have forced the flag into `Rc<Cell<bool>>`/`Arc<AtomicBool>`, adding an allocation and indirection to every session to fix an error path.
+
+- **Regression test.** `test_cancelled_commit_does_not_poison_later_eof` cancels a commit mid-await against a transport that parks, then asserts a following non-commit EOF is reported as a transport error. It was verified to **fail** against the 0.14.2 implementation, returning `CommitUnknown`, so it guards the fix rather than passing vacuously. A `StallingMockTransport` was added for it, because the existing mock reads synchronously and can never be interrupted mid-await.
 
 ## What's New in v0.14.2
 

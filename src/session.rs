@@ -77,8 +77,6 @@ pub struct Session {
     read_buffer: Vec<u8>,
     /// The negotiated NETCONF version.
     version: Option<NetconfVersion>,
-    /// True while a `<commit>` RPC has been sent but the reply hasn't arrived.
-    pending_commit: bool,
     /// Vendor-specific behavior profile. Set during establish() via auto-detection,
     /// or overridden by the user via Client::vendor() / Client::vendor_profile().
     vendor_profile: Arc<dyn VendorProfile>,
@@ -122,7 +120,6 @@ impl Session {
             state: SessionState::Connected,
             read_buffer: Vec::new(),
             version: None,
-            pending_commit: false,
             vendor_profile: Arc::new(crate::vendor::generic::GenericVendor),
             facts: Facts::default(),
             keepalive_interval: None,
@@ -180,7 +177,7 @@ impl Session {
         self.transport.write_all(&framed).await?;
 
         // Read device hello
-        let device_hello = self.read_message().await?;
+        let device_hello = self.read_message(false).await?;
         let mut caps =
             capability::parse_device_hello(&device_hello).map_err(ProtocolError::HelloFailed)?;
 
@@ -383,7 +380,7 @@ impl Session {
     pub async fn probe(&mut self) -> bool {
         let msg_id = self.next_message_id();
         let xml = operations::get_xml(&msg_id, Some(""));
-        match self.send_rpc_raw(&xml, &msg_id).await {
+        match self.send_rpc_raw(&xml, &msg_id, false).await {
             Ok(_) => true,
             Err(err) => {
                 tracing::warn!(%err, "session probe failed — marking session dead");
@@ -422,7 +419,27 @@ impl Session {
     /// [`send_rpc_raw`].
     async fn send_rpc(&mut self, xml: &str, message_id: &str) -> Result<RpcReply, NetconfError> {
         self.keepalive_check().await?;
-        self.send_rpc_raw(xml, message_id).await
+        self.send_rpc_raw(xml, message_id, false).await
+    }
+
+    /// Send a commit RPC with keepalive check.
+    ///
+    /// Like [`send_rpc`], but marks the call as a commit operation. If the
+    /// transport returns EOF while awaiting the reply, this returns
+    /// [`RpcError::CommitUnknown`] instead of a generic transport error,
+    /// signaling that the device may have applied the commit before the
+    /// connection dropped.
+    ///
+    /// Threading `is_commit` as an argument (rather than storing it on the
+    /// session) makes this method cancellation-safe: a dropped future cannot
+    /// leave stale state behind that would affect subsequent, unrelated RPCs.
+    async fn send_rpc_commit(
+        &mut self,
+        xml: &str,
+        message_id: &str,
+    ) -> Result<RpcReply, NetconfError> {
+        self.keepalive_check().await?;
+        self.send_rpc_raw(xml, message_id, true).await
     }
 
     /// Send an RPC without keepalive check.
@@ -434,10 +451,13 @@ impl Session {
     /// When `rpc_timeout` is configured, the entire read loop is bounded by
     /// [`tokio::time::timeout()`]. If the device does not produce a matching
     /// reply within the deadline, `RpcError::Timeout` is returned.
+    ///
+    /// `is_commit`: whether this is a commit RPC; passed through to the read path.
     async fn send_rpc_raw(
         &mut self,
         xml: &str,
         message_id: &str,
+        is_commit: bool,
     ) -> Result<RpcReply, NetconfError> {
         self.ensure_established()?;
 
@@ -447,10 +467,12 @@ impl Session {
         self.transport.write_all(&framed).await?;
 
         match self.rpc_timeout {
-            Some(timeout) => tokio::time::timeout(timeout, self.read_rpc_reply(message_id))
-                .await
-                .map_err(|_| crate::error::RpcError::Timeout(timeout))?,
-            None => self.read_rpc_reply(message_id).await,
+            Some(timeout) => {
+                tokio::time::timeout(timeout, self.read_rpc_reply(message_id, is_commit))
+                    .await
+                    .map_err(|_| crate::error::RpcError::Timeout(timeout))?
+            }
+            None => self.read_rpc_reply(message_id, is_commit).await,
         }
     }
 
@@ -458,10 +480,16 @@ impl Session {
     ///
     /// Extracted from `send_rpc_raw` so that `tokio::time::timeout` can
     /// wrap the entire read loop.
-    async fn read_rpc_reply(&mut self, message_id: &str) -> Result<RpcReply, NetconfError> {
+    ///
+    /// `is_commit`: whether this is a commit RPC; passed through to `read_message`.
+    async fn read_rpc_reply(
+        &mut self,
+        message_id: &str,
+        is_commit: bool,
+    ) -> Result<RpcReply, NetconfError> {
         let mut drain_attempt = 0;
         loop {
-            let response = self.read_message().await?;
+            let response = self.read_message(is_commit).await?;
 
             // Demux: if a notification arrives during RPC exchange, buffer it
             if notification::classify_message(&response) == Some(MessageKind::Notification) {
@@ -524,7 +552,11 @@ impl Session {
     }
 
     /// Read one complete framed message from the transport.
-    async fn read_message(&mut self) -> Result<String, NetconfError> {
+    ///
+    /// `is_commit`: whether this read is for a commit RPC. If `true`, a transport
+    /// EOF is reported as `RpcError::CommitUnknown` because the device may have
+    /// applied the commit before the connection dropped.
+    async fn read_message(&mut self, is_commit: bool) -> Result<String, NetconfError> {
         let mut temp_buf = vec![0u8; READ_BUF_SIZE];
 
         loop {
@@ -549,8 +581,7 @@ impl Session {
             // Read more data from transport
             let bytes_read = self.transport.read(&mut temp_buf).await?;
             if bytes_read == 0 {
-                if self.pending_commit {
-                    self.pending_commit = false;
+                if is_commit {
                     return Err(crate::error::RpcError::CommitUnknown.into());
                 }
                 return Err(TransportError::Io(std::io::Error::new(
@@ -728,7 +759,7 @@ impl Session {
         // 5. Build the RPC envelope and send via send_rpc_raw (bypasses keepalive re-check)
         let msg_id = self.next_message_id();
         let xml = Self::wrap_rpc_envelope(&msg_id, rpc_content);
-        self.send_rpc_raw(&xml, &msg_id).await
+        self.send_rpc_raw(&xml, &msg_id, false).await
     }
 
     /// Internal helper: wrap a validated fragment in the `<rpc>` envelope.
@@ -895,11 +926,7 @@ impl Session {
         let msg_id = self.next_message_id();
         let xml = operations::commit_xml(&msg_id);
 
-        self.pending_commit = true;
-        let result = self.send_rpc(&xml, &msg_id).await;
-        self.pending_commit = false;
-
-        result?;
+        self.send_rpc_commit(&xml, &msg_id).await?;
         // Clear dirty flag on success
         self.candidate_dirty = false;
         Ok(())
@@ -981,12 +1008,11 @@ impl Session {
     /// Clears the candidate-dirty flag only on success, so a failed commit that
     /// may have partially applied still leaves the flag set for cleanup on close.
     ///
-    /// The send is bracketed by `pending_commit` so that a transport EOF while
-    /// awaiting the reply surfaces as [`RpcError::CommitUnknown`] rather than a
-    /// generic I/O error. The device may have applied the commit before the
-    /// connection dropped, and a caller that mistakes that for a clean failure
-    /// may retry a commit that already took effect. `commit()` and
-    /// `confirmed_commit()` already did this; `commit_configuration()` did not.
+    /// Uses [`send_rpc_commit`] so that a transport EOF while awaiting the reply
+    /// surfaces as [`RpcError::CommitUnknown`] rather than a generic I/O error.
+    /// The device may have applied the commit before the connection dropped, and
+    /// a caller that mistakes that for a clean failure may retry a commit that
+    /// already took effect. `commit()` and `confirmed_commit()` do the same.
     async fn dispatch_commit_configuration(
         &mut self,
         log: Option<&str>,
@@ -997,11 +1023,7 @@ impl Session {
             None => operations::commit_configuration_xml(&msg_id),
         };
 
-        self.pending_commit = true;
-        let result = self.send_rpc(&xml, &msg_id).await;
-        self.pending_commit = false;
-
-        result?;
+        self.send_rpc_commit(&xml, &msg_id).await?;
         // Clear dirty flag on success
         self.candidate_dirty = false;
         Ok(())
@@ -1151,11 +1173,7 @@ impl Session {
         let msg_id = self.next_message_id();
         let xml = operations::confirmed_commit_xml(&msg_id, confirm_timeout);
 
-        self.pending_commit = true;
-        let result = self.send_rpc(&xml, &msg_id).await;
-        self.pending_commit = false;
-
-        result?;
+        self.send_rpc_commit(&xml, &msg_id).await?;
         // Clear dirty flag on success
         self.candidate_dirty = false;
         Ok(())
@@ -1368,7 +1386,7 @@ impl Session {
 
         // Read from transport until we get a notification or EOF
         loop {
-            let response = match self.read_message().await {
+            let response = match self.read_message(false).await {
                 Ok(msg) => msg,
                 Err(NetconfError::Transport(TransportError::Io(ref e)))
                     if e.kind() == std::io::ErrorKind::UnexpectedEof =>
@@ -1426,7 +1444,7 @@ impl Session {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transport::mock::MockTransport;
+    use crate::transport::mock::{MockTransport, StallingMockTransport};
 
     /// Build a mock device hello response with EOM framing.
     fn mock_device_hello() -> Vec<u8> {
@@ -1503,6 +1521,45 @@ mod tests {
         }
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn test_cancelled_commit_does_not_poison_later_eof() {
+        // The #61 regression. A commit whose future is dropped mid-await must not
+        // leave "a commit is in flight" behind, or the NEXT unrelated EOF gets
+        // misreported as CommitUnknown — the flag's purpose inverted.
+        //
+        // This is why the fact is a parameter rather than a field: it lives on the
+        // call frame and dies with the cancelled future. Against the old
+        // field-based implementation this test fails, because the reset after the
+        // await never ran.
+        let transport = StallingMockTransport::new(mock_junos_hello());
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // The transport parks on this read, so the timeout cancels the commit
+        // future exactly at its .await.
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            session.commit_configuration(),
+        )
+        .await;
+        assert!(
+            cancelled.is_err(),
+            "commit should have been cancelled by the timeout"
+        );
+
+        // A different, non-commit operation now hits EOF. It must be reported as
+        // what it is — a dropped connection — not as an indeterminate commit.
+        let result = session.get_config(Datastore::Running, None).await;
+        match result {
+            Err(NetconfError::Rpc(crate::error::RpcError::CommitUnknown)) => panic!(
+                "a cancelled commit poisoned a later unrelated EOF: got CommitUnknown \
+                 for a get-config, which is the #61 bug"
+            ),
+            Err(_) => {}
+            Ok(_) => panic!("expected the get-config to fail against a closed transport"),
+        }
+    }
+
     #[tokio::test]
     async fn test_non_commit_disconnect_is_transport_error() {
         // Mock transport: serves the hello, then EOF during get-config
@@ -1527,12 +1584,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_successful_commit_clears_pending_flag() {
-        // Mock transport: hello + lock reply + commit reply
+    async fn test_successful_commit_then_eof_is_transport_error() {
+        // After a successful commit, a subsequent non-commit RPC that hits EOF
+        // should return a transport error, NOT CommitUnknown. This ensures that
+        // the commit-tracking state does not leak across calls.
         let mut response_data = mock_device_hello();
         response_data.extend_from_slice(&mock_ok_reply("1")); // lock
         response_data.extend_from_slice(&mock_ok_reply("2")); // commit
         response_data.extend_from_slice(&mock_ok_reply("3")); // unlock
+                                                              // No reply for the final get-config — EOF
 
         let transport = MockTransport::new(response_data);
         let mut session = Session::new(Box::new(transport));
@@ -1543,17 +1603,76 @@ mod tests {
             .await
             .expect("lock failed");
         session.commit().await.expect("commit failed");
-
-        // pending_commit should be false after successful commit
-        assert!(
-            !session.pending_commit,
-            "pending_commit should be cleared after success"
-        );
-
         session
             .unlock(Datastore::Candidate)
             .await
             .expect("unlock failed");
+
+        // get-config should return a transport error, NOT CommitUnknown
+        let result = session.get_config(Datastore::Running, None).await;
+        match result {
+            Err(NetconfError::Transport(_)) => {
+                // Expected — generic transport error for non-commit operations
+            }
+            Err(NetconfError::Rpc(crate::error::RpcError::CommitUnknown)) => {
+                panic!(
+                    "CommitUnknown should not leak to a non-commit RPC after a successful commit"
+                );
+            }
+            other => panic!("expected TransportError, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_commit_eof_then_non_commit_eof_reports_correctly() {
+        // NOT the #61 regression test — see
+        // test_cancelled_commit_does_not_poison_later_eof for that one. This
+        // case passed under the old field-based implementation too, because the
+        // EOF branch cleared the flag on its way out. It is kept as a guard on
+        // the ordinary path: a commit that reports CommitUnknown must not change
+        // how the next unrelated failure is classified.
+        //
+        // This test verifies that after a commit hits EOF (returning CommitUnknown),
+        // a subsequent non-commit operation that also hits EOF correctly returns
+        // a transport error, not CommitUnknown.
+        let mut response_data = mock_device_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // lock
+                                                              // No commit reply — message-id "2" will hit EOF
+                                                              // No get-config reply — message-id "3" will also hit EOF
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session
+            .lock(Datastore::Candidate)
+            .await
+            .expect("lock failed");
+
+        // Commit hits EOF — should return CommitUnknown
+        let commit_result = session.commit().await;
+        match commit_result {
+            Err(NetconfError::Rpc(crate::error::RpcError::CommitUnknown)) => {
+                // Expected
+            }
+            other => panic!("expected CommitUnknown, got: {other:?}"),
+        }
+
+        // Now a non-commit operation hits EOF — should return TransportError, NOT CommitUnknown.
+        // With the old field-based approach and a mid-await cancellation, pending_commit
+        // could have been left set, poisoning this call.
+        let result = session.get_config(Datastore::Running, None).await;
+        match result {
+            Err(NetconfError::Transport(_)) => {
+                // Expected — generic transport error for non-commit operations
+            }
+            Err(NetconfError::Rpc(crate::error::RpcError::CommitUnknown)) => {
+                panic!(
+                    "CommitUnknown should not leak to a non-commit RPC after a commit that returned CommitUnknown"
+                );
+            }
+            other => panic!("expected TransportError, got: {other:?}"),
+        }
     }
 
     #[test]
