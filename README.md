@@ -24,9 +24,9 @@ Async NETCONF client library, YANG code generation, vendor profiles, connection 
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.14.1](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.14.1)** (warnings-returning candidate change).
-> On crates.io: `rustnetconf` 0.14.1 · `rustnetconf-cli` 0.3.5 · `rustnetconf-yang` 0.1.5.
-> See [What's New in v0.14.1](#whats-new-in-v0141) below.
+> **Latest release — [v0.14.2](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.14.2)** (Junos commit with a log comment).
+> On crates.io: `rustnetconf` 0.14.2 · `rustnetconf-cli` 0.3.5 · `rustnetconf-yang` 0.1.5.
+> See [What's New in v0.14.2](#whats-new-in-v0142) below.
 
 ## Workspace
 
@@ -47,6 +47,20 @@ SSH is present as a *transport for NETCONF*, not as a general-purpose capability
 - Remote shell or command execution
 
 Consumers that need those should use a dedicated SSH crate alongside this one. A native SCP1 client was briefly added and then reverted before it was ever released (#52, reverted by #53) for exactly this reason; issues #47 and #51 were closed as not planned on the same grounds. The round trip is visible in `git log` between v0.13.2 and the next release — it was a deliberate reversal, not an accident.
+
+## What's New in v0.14.2
+
+Follow-up to 0.14.1, from wiring the consumer side in [rustez#41](https://github.com/fastrevmd-lab/rustez/issues/41) (#60). `rustnetconf-cli` and `rustnetconf-yang` are unchanged — their `rustnetconf = "0.14"` requirement already matches.
+
+No API removals and no source-breaking changes, so a drop-in patch upgrade. One deliberate behaviour change, on an error path only: a Junos `commit-configuration` that disconnects before its reply now reports `CommitUnknown` instead of a generic transport error — see the second bullet.
+
+- **New `Session::commit_configuration_with_log()` / `Client::commit_configuration_with_log()`** — additive. A Junos commit carrying a log comment, visible in `show system commit`. The log text is XML-escaped for you. Clears the candidate-dirty flag on success, exactly as `commit_configuration()` does.
+
+  `commit_configuration()` takes no arguments and `commit_configuration_xml()` hard-coded a bare `<commit-configuration/>`, so a caller wanting Junos's `<log>` child had to build the fragment and send it through raw `rpc()`. Every method that clears the dirty flag does so as a private side effect, and there is no public way to clear it — so that raw path could not. The session stayed marked dirty across a commit that genuinely cleaned the candidate, and `close_session()` then discarded afterwards. Harmless for that session's own work; on the **shared** Junos candidate it destroys anything another operator staged between the commit and the close. This is the mirror of #58: that was an RPC that could not atomically *set* the flag, this was a commit that could not *clear* it.
+
+- **`commit_configuration()` keeps its signature and its XML.** Both methods now delegate to one private helper; the no-log path emits byte-identical XML, asserted in a test. `rpc::operations::commit_configuration_xml()` also keeps its one-argument form — the log variant is a separate `commit_configuration_with_log_xml()`, because that module is public API and changing the arity would break existing callers at source.
+
+- **Fixed: a Junos commit that disconnects before its reply now reports `RpcError::CommitUnknown`.** `commit()` and `confirmed_commit()` already bracketed their send with the pending-commit state; `commit_configuration()` never did, so a mid-commit disconnect surfaced as a generic transport EOF. The device may have applied the commit, and a caller that reads that as a clean failure can retry a commit that already took effect. Both `commit_configuration()` and the new log variant now signal it correctly. This is a behaviour change on an error path only — the success path is untouched.
 
 ## What's New in v0.14.1
 

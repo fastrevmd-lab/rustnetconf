@@ -961,9 +961,47 @@ impl Session {
     /// Use this instead of [`commit()`](Self::commit) on Junos devices,
     /// especially when a private/exclusive configuration database is open.
     pub async fn commit_configuration(&mut self) -> Result<(), NetconfError> {
+        self.dispatch_commit_configuration(None).await
+    }
+
+    /// Commit with a log comment using the Junos-native `<commit-configuration>` RPC.
+    ///
+    /// Attaches a Junos commit log comment to the commit, visible in `show system commit`.
+    /// The log text is automatically XML-escaped. The candidate-dirty flag is cleared on
+    /// success, just as with [`commit_configuration()`](Self::commit_configuration).
+    ///
+    /// Use this instead of [`commit()`](Self::commit) on Junos devices,
+    /// especially when a private/exclusive configuration database is open.
+    pub async fn commit_configuration_with_log(&mut self, log: &str) -> Result<(), NetconfError> {
+        self.dispatch_commit_configuration(Some(log)).await
+    }
+
+    /// Internal helper for commit_configuration and commit_configuration_with_log.
+    ///
+    /// Clears the candidate-dirty flag only on success, so a failed commit that
+    /// may have partially applied still leaves the flag set for cleanup on close.
+    ///
+    /// The send is bracketed by `pending_commit` so that a transport EOF while
+    /// awaiting the reply surfaces as [`RpcError::CommitUnknown`] rather than a
+    /// generic I/O error. The device may have applied the commit before the
+    /// connection dropped, and a caller that mistakes that for a clean failure
+    /// may retry a commit that already took effect. `commit()` and
+    /// `confirmed_commit()` already did this; `commit_configuration()` did not.
+    async fn dispatch_commit_configuration(
+        &mut self,
+        log: Option<&str>,
+    ) -> Result<(), NetconfError> {
         let msg_id = self.next_message_id();
-        let xml = operations::commit_configuration_xml(&msg_id);
-        self.send_rpc(&xml, &msg_id).await?;
+        let xml = match log {
+            Some(text) => operations::commit_configuration_with_log_xml(&msg_id, text),
+            None => operations::commit_configuration_xml(&msg_id),
+        };
+
+        self.pending_commit = true;
+        let result = self.send_rpc(&xml, &msg_id).await;
+        self.pending_commit = false;
+
+        result?;
         // Clear dirty flag on success
         self.candidate_dirty = false;
         Ok(())
@@ -1439,6 +1477,28 @@ mod tests {
             Err(NetconfError::Rpc(crate::error::RpcError::CommitUnknown)) => {
                 // This is the expected error
             }
+            other => panic!("expected CommitUnknown, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_commit_configuration_with_log_disconnect_is_commit_unknown() {
+        // A Junos commit that disconnects before its reply is indeterminate: the
+        // device may have applied it. commit_configuration* must report that as
+        // CommitUnknown, not a generic transport error, or a caller can retry a
+        // commit that already took effect.
+        let mut response_data = mock_junos_hello();
+        // No commit reply — EOF after the hello simulates a mid-commit disconnect.
+
+        let transport = MockTransport::new(response_data.split_off(0));
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let result = session
+            .commit_configuration_with_log("attributed change")
+            .await;
+        match result {
+            Err(NetconfError::Rpc(crate::error::RpcError::CommitUnknown)) => {}
             other => panic!("expected CommitUnknown, got: {other:?}"),
         }
     }
@@ -2220,6 +2280,116 @@ mod tests {
         assert_eq!(
             discard_count, 1,
             "explicit discard_changes followed by close should produce exactly 1 discard"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_commit_configuration_with_log_clears_dirty_flag() {
+        let mut response_data = mock_junos_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // load-configuration reply
+        response_data.extend_from_slice(&mock_ok_reply("2")); // commit-configuration reply
+        response_data.extend_from_slice(&mock_ok_reply("3")); // close-session reply (no discard)
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // Load config (dirties candidate)
+        session
+            .load_configuration(
+                crate::types::LoadAction::Merge,
+                crate::types::LoadFormat::Text,
+                "set system host-name test",
+            )
+            .await
+            .expect("load_configuration failed");
+
+        // Commit with log (clears dirty flag)
+        session
+            .commit_configuration_with_log("test commit comment")
+            .await
+            .expect("commit_configuration_with_log failed");
+
+        // Close (should NOT send discard-changes)
+        session.close_session().await.expect("close failed");
+
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        let discard_count = written_str.matches("discard-changes").count();
+        assert_eq!(
+            discard_count, 0,
+            "commit_configuration_with_log should clear dirty flag, so close sends no discard-changes"
+        );
+        // Verify the log comment was sent
+        assert!(
+            written_str.contains("<nc:log>test commit comment</nc:log>"),
+            "commit should include log comment"
+        );
+    }
+
+    /// Build a mock commit-configuration error response.
+    fn mock_commit_error_reply(message_id: &str) -> Vec<u8> {
+        let reply = format!(
+            r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+  <rpc-error>
+    <error-type>protocol</error-type>
+    <error-tag>operation-failed</error-tag>
+    <error-severity>error</error-severity>
+    <error-message>commit failed: configuration check-out failed</error-message>
+  </rpc-error>
+</rpc-reply>"#
+        );
+        let mut buf = reply.into_bytes();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    #[tokio::test]
+    async fn test_commit_configuration_with_log_failed_leaves_dirty() {
+        let mut response_data = mock_junos_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // load-configuration reply
+        response_data.extend_from_slice(&mock_commit_error_reply("2")); // commit-configuration fails
+        response_data.extend_from_slice(&mock_ok_reply("3")); // discard-changes reply
+        response_data.extend_from_slice(&mock_ok_reply("4")); // close-session reply
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // Load config (dirties candidate)
+        session
+            .load_configuration(
+                crate::types::LoadAction::Merge,
+                crate::types::LoadFormat::Text,
+                "set system host-name test",
+            )
+            .await
+            .expect("load_configuration failed");
+
+        // Commit with log fails (leaves dirty flag set)
+        let result = session.commit_configuration_with_log("failed commit").await;
+        assert!(
+            result.is_err(),
+            "commit_configuration_with_log should fail with error reply"
+        );
+
+        // Candidate should still be dirty
+        assert!(
+            session.candidate_dirty(),
+            "failed commit should leave candidate dirty"
+        );
+
+        // Close (SHOULD send discard-changes)
+        session.close_session().await.expect("close failed");
+
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        let discard_count = written_str.matches("discard-changes").count();
+        assert_eq!(
+            discard_count, 1,
+            "failed commit should leave candidate dirty, so close sends discard-changes"
         );
     }
 

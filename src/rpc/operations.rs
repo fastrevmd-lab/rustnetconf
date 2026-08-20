@@ -300,11 +300,44 @@ pub fn close_configuration_xml(message_id: &str) -> String {
 /// `<commit>` when working with Junos private/exclusive configuration
 /// databases opened via `<open-configuration>`.
 pub fn commit_configuration_xml(message_id: &str) -> String {
+    build_commit_configuration_xml(message_id, None)
+}
+
+/// Generate a Junos `<commit-configuration>` RPC carrying a `<log>` comment.
+///
+/// The comment is visible in Junos `show system commit`. `log` is XML-escaped
+/// here, so callers pass plain text and must not pre-escape it.
+///
+/// This is a separate function rather than an `Option` parameter on
+/// [`commit_configuration_xml`] deliberately: this module is public API, so
+/// changing that function's arity would break existing callers at source.
+pub fn commit_configuration_with_log_xml(message_id: &str, log: &str) -> String {
+    build_commit_configuration_xml(message_id, Some(log))
+}
+
+/// Shared builder for the two `<commit-configuration>` shapes above.
+///
+/// `None` emits the bare self-closing element, byte-identical to what
+/// `commit_configuration_xml` produced before the log variant existed.
+fn build_commit_configuration_xml(message_id: &str, log: Option<&str>) -> String {
     let safe_id = escape_xml_attr(message_id);
+    let Some(text) = log else {
+        return format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:commit-configuration/>
+</nc:rpc>"#,
+        );
+    };
+    // The log is element character data, not an attribute — escape_xml_text,
+    // matching how load_configuration_xml escapes its Text-format payload.
+    let escaped_log = escape_xml_text(text);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
-  <nc:commit-configuration/>
+  <nc:commit-configuration>
+    <nc:log>{escaped_log}</nc:log>
+  </nc:commit-configuration>
 </nc:rpc>"#,
     )
 }
@@ -628,6 +661,41 @@ mod tests {
         let xml = commit_configuration_xml("30");
         assert!(xml.contains("<nc:commit-configuration/>"));
         assert!(xml.contains("message-id=\"30\""));
+        // Verify byte-identical to pre-log form
+        let expected = r#"<?xml version="1.0" encoding="UTF-8"?>
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="30">
+  <nc:commit-configuration/>
+</nc:rpc>"#;
+        assert_eq!(xml, expected, "None should produce exact pre-log output");
+    }
+
+    #[test]
+    fn test_commit_configuration_with_log() {
+        let xml = commit_configuration_with_log_xml("31", "reason for change");
+        assert!(xml.contains("message-id=\"31\""));
+        assert!(xml.contains("<nc:log>reason for change</nc:log>"));
+        assert!(xml.contains("<nc:commit-configuration>"));
+        assert!(!xml.contains("<nc:commit-configuration/>"));
+    }
+
+    #[test]
+    fn test_commit_configuration_log_escaping() {
+        let xml = commit_configuration_with_log_xml("32", "fix & update <critical> items");
+        assert!(xml.contains("<nc:log>fix &amp; update &lt;critical&gt; items</nc:log>"));
+        // Verify raw markup does not appear
+        assert!(!xml.contains("fix & update <critical> items"));
+    }
+
+    #[test]
+    fn test_commit_configuration_log_injection_defense() {
+        let xml = commit_configuration_with_log_xml("33", "evil</nc:log><nc:rollback/>");
+        // The injected markup must be escaped
+        assert!(xml.contains("&lt;/nc:log&gt;&lt;nc:rollback/&gt;"));
+        // The raw injection must NOT appear as live markup
+        assert!(!xml.contains("</nc:log><nc:rollback/>"));
+        // Exactly one <nc:log> open tag should exist
+        assert_eq!(xml.matches("<nc:log>").count(), 1);
+        assert_eq!(xml.matches("</nc:log>").count(), 1);
     }
 
     #[test]
