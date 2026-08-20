@@ -101,6 +101,10 @@ pub struct Session {
     /// Maximum number of bytes that may accumulate in `read_buffer` before
     /// the read is aborted. Defaults to [`MAX_READ_BUFFER`].
     max_read_buffer: usize,
+    /// True if this session may have left uncommitted changes in the shared
+    /// candidate datastore. Used to decide whether to send `<discard-changes/>`
+    /// on close.
+    candidate_dirty: bool,
 }
 
 impl Session {
@@ -128,6 +132,7 @@ impl Session {
             has_subscription: false,
             rpc_timeout: None,
             max_read_buffer: MAX_READ_BUFFER,
+            candidate_dirty: false,
         }
     }
 
@@ -241,6 +246,29 @@ impl Session {
     /// Get the vendor profile name (e.g., "junos", "generic").
     pub fn vendor_name(&self) -> &str {
         self.vendor_profile.name()
+    }
+
+    /// Check if this session may have dirtied the candidate datastore.
+    ///
+    /// Returns `true` if the session has called candidate-modifying operations
+    /// like `edit_config(Datastore::Candidate, ...)`, `load_configuration()`,
+    /// or `rollback_configuration()` since the last `commit()` or `discard_changes()`.
+    pub fn candidate_dirty(&self) -> bool {
+        self.candidate_dirty
+    }
+
+    /// Mark the candidate datastore as dirty.
+    ///
+    /// Call this after issuing a candidate-modifying RPC through the raw `rpc()`
+    /// escape hatch, so `close_session()` will send `<discard-changes/>` to clean
+    /// up the shared candidate datastore.
+    ///
+    /// This is a safety mechanism for Junos and other devices with a shared
+    /// candidate datastore. When a session closes without committing, uncommitted
+    /// changes must be discarded so they don't interfere with the next operator's
+    /// session.
+    pub fn mark_candidate_dirty(&mut self) {
+        self.candidate_dirty = true;
     }
 
     /// Normalize a config fragment the way this session's vendor profile does
@@ -674,6 +702,12 @@ impl Session {
             error_option,
         };
         let xml = operations::edit_config_xml(&msg_id, &params);
+
+        // Mark candidate as dirty BEFORE sending, so a partial edit still counts
+        if target == Datastore::Candidate {
+            self.candidate_dirty = true;
+        }
+
         self.send_rpc(&xml, &msg_id).await?;
         Ok(())
     }
@@ -711,6 +745,8 @@ impl Session {
         self.pending_commit = false;
 
         result?;
+        // Clear dirty flag on success
+        self.candidate_dirty = false;
         Ok(())
     }
 
@@ -730,6 +766,8 @@ impl Session {
         let msg_id = self.next_message_id();
         let xml = operations::discard_changes_xml(&msg_id);
         self.send_rpc(&xml, &msg_id).await?;
+        // Clear dirty flag on success
+        self.candidate_dirty = false;
         Ok(())
     }
 
@@ -758,6 +796,8 @@ impl Session {
         let xml = operations::close_configuration_xml(&msg_id);
         self.send_rpc(&xml, &msg_id).await?;
         self.private_config_open = false;
+        // Clear dirty flag on success
+        self.candidate_dirty = false;
         Ok(())
     }
 
@@ -769,6 +809,8 @@ impl Session {
         let msg_id = self.next_message_id();
         let xml = operations::commit_configuration_xml(&msg_id);
         self.send_rpc(&xml, &msg_id).await?;
+        // Clear dirty flag on success
+        self.candidate_dirty = false;
         Ok(())
     }
 
@@ -778,6 +820,10 @@ impl Session {
     pub async fn rollback_configuration(&mut self, rollback: u32) -> Result<(), NetconfError> {
         let msg_id = self.next_message_id();
         let xml = operations::rollback_configuration_xml(&msg_id, rollback);
+
+        // Mark candidate as dirty before sending
+        self.candidate_dirty = true;
+
         self.send_rpc(&xml, &msg_id).await?;
         Ok(())
     }
@@ -819,6 +865,10 @@ impl Session {
     ) -> Result<String, NetconfError> {
         let msg_id = self.next_message_id();
         let xml = operations::load_configuration_xml(&msg_id, action, format, config);
+
+        // Mark candidate as dirty before sending
+        self.candidate_dirty = true;
+
         let reply = self.send_rpc(&xml, &msg_id).await?;
         match reply {
             RpcReply::Data(data) | RpcReply::DataWithWarnings(data, _) => Ok(data),
@@ -839,8 +889,9 @@ impl Session {
     /// Close the NETCONF session gracefully.
     ///
     /// Respects the vendor profile's close sequence. For example, Junos
-    /// discards uncommitted candidate changes before closing to avoid
-    /// leaving dirty state.
+    /// discards uncommitted candidate changes before closing, but only if
+    /// this session dirtied the candidate (to avoid destroying another
+    /// operator's uncommitted work in the shared candidate datastore).
     pub async fn close_session(&mut self) -> Result<(), NetconfError> {
         if self.state == SessionState::Closed {
             return Ok(());
@@ -852,8 +903,11 @@ impl Session {
             self.private_config_open = false;
         }
 
-        // Vendor-specific pre-close actions
-        if self.vendor_profile.close_sequence() == CloseSequence::DiscardThenClose {
+        // Vendor-specific pre-close actions: discard uncommitted changes
+        // if this session dirtied the candidate
+        if self.vendor_profile.close_sequence() == CloseSequence::DiscardThenClose
+            && self.candidate_dirty
+        {
             // Best-effort discard — don't fail the close if this errors
             let _ = self.discard_changes().await;
         }
@@ -909,6 +963,8 @@ impl Session {
         self.pending_commit = false;
 
         result?;
+        // Clear dirty flag on success
+        self.candidate_dirty = false;
         Ok(())
     }
 
@@ -1778,6 +1834,333 @@ mod tests {
             session.vendor_name(),
             "junos",
             "explicit Arc vendor override should survive auto-detection"
+        );
+    }
+
+    // ── Candidate dirty tracking tests ─────────────────────────────────
+
+    /// Build a mock Junos device hello response with EOM framing.
+    fn mock_junos_hello() -> Vec<u8> {
+        let hello = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability>urn:ietf:params:netconf:base:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:candidate:1.0</capability>
+    <capability>http://xml.juniper.net/netconf/junos/1.0</capability>
+  </capabilities>
+  <session-id>1</session-id>
+</hello>"#;
+        let mut buf = hello.as_bytes().to_vec();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    #[tokio::test]
+    async fn test_junos_read_only_session_does_not_discard_on_close() {
+        let mut response_data = mock_junos_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // get-config reply
+        response_data.extend_from_slice(&mock_ok_reply("2")); // close-session reply (no discard)
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        assert_eq!(session.vendor_name(), "junos");
+
+        // Read-only operation
+        session
+            .get_config(Datastore::Candidate, None)
+            .await
+            .expect("get_config failed");
+
+        // Close session
+        session.close_session().await.expect("close failed");
+
+        // Verify no discard-changes was sent
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        let discard_count = written_str.matches("discard-changes").count();
+        assert_eq!(
+            discard_count, 0,
+            "read-only Junos session should NOT send discard-changes on close"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_junos_load_configuration_dirties_candidate() {
+        let mut response_data = mock_junos_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // load-configuration reply
+        response_data.extend_from_slice(&mock_ok_reply("2")); // discard-changes reply
+        response_data.extend_from_slice(&mock_ok_reply("3")); // close-session reply
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        assert_eq!(session.vendor_name(), "junos");
+
+        // Load configuration (dirties candidate)
+        session
+            .load_configuration(
+                crate::types::LoadAction::Merge,
+                crate::types::LoadFormat::Text,
+                "set system host-name test",
+            )
+            .await
+            .expect("load_configuration failed");
+
+        // Close session
+        session.close_session().await.expect("close failed");
+
+        // Verify discard-changes WAS sent
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        let discard_count = written_str.matches("discard-changes").count();
+        assert_eq!(
+            discard_count, 1,
+            "Junos session that loaded config should send discard-changes on close"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_junos_edit_config_candidate_dirties() {
+        let mut response_data = mock_junos_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // edit-config reply
+        response_data.extend_from_slice(&mock_ok_reply("2")); // discard-changes reply
+        response_data.extend_from_slice(&mock_ok_reply("3")); // close-session reply
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // Edit candidate (dirties it)
+        session
+            .edit_config(
+                Datastore::Candidate,
+                "<system><host-name>test</host-name></system>",
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("edit_config failed");
+
+        session.close_session().await.expect("close failed");
+
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        let discard_count = written_str.matches("discard-changes").count();
+        assert_eq!(
+            discard_count, 1,
+            "edit-config on candidate should send discard-changes on close"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_junos_edit_config_running_does_not_dirty_candidate() {
+        let mut response_data = mock_junos_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // edit-config reply
+        response_data.extend_from_slice(&mock_ok_reply("2")); // close-session reply (no discard)
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // Edit running (does NOT dirty candidate)
+        session
+            .edit_config(
+                Datastore::Running,
+                "<system><host-name>test</host-name></system>",
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("edit_config failed");
+
+        session.close_session().await.expect("close failed");
+
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        let discard_count = written_str.matches("discard-changes").count();
+        assert_eq!(
+            discard_count, 0,
+            "edit-config on running should NOT send discard-changes on close"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_junos_commit_clears_dirty_flag() {
+        let mut response_data = mock_junos_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // load-configuration reply
+        response_data.extend_from_slice(&mock_ok_reply("2")); // commit reply
+        response_data.extend_from_slice(&mock_ok_reply("3")); // close-session reply (no discard)
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // Load config (dirties candidate)
+        session
+            .load_configuration(
+                crate::types::LoadAction::Merge,
+                crate::types::LoadFormat::Text,
+                "set system host-name test",
+            )
+            .await
+            .expect("load_configuration failed");
+
+        // Commit (clears dirty flag)
+        session.commit().await.expect("commit failed");
+
+        // Close (should NOT send discard-changes)
+        session.close_session().await.expect("close failed");
+
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        let discard_count = written_str.matches("discard-changes").count();
+        assert_eq!(
+            discard_count, 0,
+            "commit should clear dirty flag, so close sends no discard-changes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_junos_explicit_discard_clears_dirty_flag() {
+        let mut response_data = mock_junos_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // load-configuration reply
+        response_data.extend_from_slice(&mock_ok_reply("2")); // explicit discard-changes reply
+        response_data.extend_from_slice(&mock_ok_reply("3")); // close-session reply (no second discard)
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // Load config (dirties candidate)
+        session
+            .load_configuration(
+                crate::types::LoadAction::Merge,
+                crate::types::LoadFormat::Text,
+                "set system host-name test",
+            )
+            .await
+            .expect("load_configuration failed");
+
+        // Explicit discard (clears dirty flag)
+        session
+            .discard_changes()
+            .await
+            .expect("discard_changes failed");
+
+        // Close (should NOT send another discard-changes)
+        session.close_session().await.expect("close failed");
+
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        let discard_count = written_str.matches("discard-changes").count();
+        assert_eq!(
+            discard_count, 1,
+            "explicit discard_changes followed by close should produce exactly 1 discard"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_junos_rollback_dirties_candidate() {
+        let mut response_data = mock_junos_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // rollback-configuration reply
+        response_data.extend_from_slice(&mock_ok_reply("2")); // discard-changes reply
+        response_data.extend_from_slice(&mock_ok_reply("3")); // close-session reply
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // Rollback (dirties candidate)
+        session
+            .rollback_configuration(0)
+            .await
+            .expect("rollback_configuration failed");
+
+        session.close_session().await.expect("close failed");
+
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        let discard_count = written_str.matches("discard-changes").count();
+        assert_eq!(
+            discard_count, 1,
+            "rollback_configuration should send discard-changes on close"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_junos_mark_candidate_dirty_forces_discard() {
+        let mut response_data = mock_junos_hello();
+        response_data.extend_from_slice(&mock_ok_reply("1")); // get-config reply (read-only)
+        response_data.extend_from_slice(&mock_ok_reply("2")); // discard-changes reply
+        response_data.extend_from_slice(&mock_ok_reply("3")); // close-session reply
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        // Read-only operation
+        session
+            .get_config(Datastore::Candidate, None)
+            .await
+            .expect("get_config failed");
+
+        // Manually mark dirty (escape hatch for raw rpc() calls)
+        session.mark_candidate_dirty();
+
+        session.close_session().await.expect("close failed");
+
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        let discard_count = written_str.matches("discard-changes").count();
+        assert_eq!(
+            discard_count, 1,
+            "mark_candidate_dirty should force discard-changes on close"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_generic_vendor_never_discards_on_close() {
+        let mut response_data = mock_device_hello(); // generic, NOT Junos
+        response_data.extend_from_slice(&mock_ok_reply("1")); // edit-config reply
+        response_data.extend_from_slice(&mock_ok_reply("2")); // close-session reply (no discard)
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        assert_eq!(session.vendor_name(), "generic");
+
+        // Edit candidate (would dirty it on Junos)
+        session
+            .edit_config(
+                Datastore::Candidate,
+                "<system><host-name>test</host-name></system>",
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("edit_config failed");
+
+        session.close_session().await.expect("close failed");
+
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        let discard_count = written_str.matches("discard-changes").count();
+        assert_eq!(
+            discard_count, 0,
+            "generic vendor should never send discard-changes, even if candidate was edited"
         );
     }
 }

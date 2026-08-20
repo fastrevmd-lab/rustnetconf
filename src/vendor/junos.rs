@@ -122,8 +122,11 @@ impl VendorProfile for JunosVendor {
     }
 
     fn close_sequence(&self) -> CloseSequence {
-        // Junos may have uncommitted candidate changes. Discard before closing
-        // to avoid leaving dirty state that blocks the next session's lock.
+        // Junos has a shared candidate datastore. If this session dirtied the
+        // candidate, discard uncommitted changes before closing to avoid leaving
+        // dirty state that blocks the next session's lock or destroys another
+        // operator's uncommitted work. The session tracks whether it dirtied the
+        // candidate and only sends discard-changes when necessary.
         CloseSequence::DiscardThenClose
     }
 

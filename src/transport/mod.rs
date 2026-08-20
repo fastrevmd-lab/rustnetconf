@@ -38,13 +38,14 @@ pub trait Transport: Send + Sync {
 #[cfg(test)]
 pub mod mock {
     use super::*;
+    use std::sync::{Arc, Mutex};
 
     pub struct MockTransport {
         /// Data the "device" will send back (pre-loaded).
         read_data: Vec<u8>,
         read_pos: usize,
         /// Data written by the client (captured for assertions).
-        pub written: Vec<u8>,
+        written: Arc<Mutex<Vec<u8>>>,
         /// Whether the transport has been closed.
         pub closed: bool,
     }
@@ -55,9 +56,15 @@ pub mod mock {
             Self {
                 read_data,
                 read_pos: 0,
-                written: Vec::new(),
+                written: Arc::new(Mutex::new(Vec::new())),
                 closed: false,
             }
+        }
+
+        /// Get a handle to the written data that remains accessible after the
+        /// transport is moved into a Session.
+        pub fn written_handle(&self) -> Arc<Mutex<Vec<u8>>> {
+            Arc::clone(&self.written)
         }
     }
 
@@ -70,7 +77,7 @@ pub mod mock {
                     "transport closed",
                 )));
             }
-            self.written.extend_from_slice(data);
+            self.written.lock().unwrap().extend_from_slice(data);
             Ok(())
         }
 
