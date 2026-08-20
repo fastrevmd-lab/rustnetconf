@@ -24,9 +24,9 @@ Async NETCONF client library, YANG code generation, vendor profiles, connection 
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.14.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.14.0)** (Junos candidate-datastore safety).
-> On crates.io: `rustnetconf` 0.14.0 · `rustnetconf-cli` 0.3.5 · `rustnetconf-yang` 0.1.5.
-> See [What's New in v0.14.0](#whats-new-in-v0140) below.
+> **Latest release — [v0.14.1](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.14.1)** (warnings-returning candidate change).
+> On crates.io: `rustnetconf` 0.14.1 · `rustnetconf-cli` 0.3.5 · `rustnetconf-yang` 0.1.5.
+> See [What's New in v0.14.1](#whats-new-in-v0141) below.
 
 ## Workspace
 
@@ -47,6 +47,16 @@ SSH is present as a *transport for NETCONF*, not as a general-purpose capability
 - Remote shell or command execution
 
 Consumers that need those should use a dedicated SSH crate alongside this one. A native SCP1 client was briefly added and then reverted before it was ever released (#52, reverted by #53) for exactly this reason; issues #47 and #51 were closed as not planned on the same grounds. The round trip is visible in `git log` between v0.13.2 and the next release — it was a deliberate reversal, not an accident.
+
+## What's New in v0.14.1
+
+Additive follow-up to 0.14.0 for `rustnetconf` (0.14.1), from wiring the consumer side in [rustez#36](https://github.com/fastrevmd-lab/rustez/issues/36) (#58). `rustnetconf-cli` (0.3.5) and `rustnetconf-yang` (0.1.5) are unchanged — their `rustnetconf = "0.14"` requirement already matches. No behaviour changes and no API removals: a drop-in patch upgrade from 0.14.0.
+
+- **New `Session::rpc_candidate_change_with_warnings()` / `Client::rpc_candidate_change_with_warnings()`** — additive. The warnings-returning counterpart of `rpc_candidate_change()`, returning the same `(String, Vec<RpcErrorInfo>)` tuple as `rpc_with_warnings()` with the same preflight-then-mark ordering.
+
+  0.14.0 left the warnings path without an atomic option. A caller who needed the warnings back from a candidate-modifying RPC had only `rpc_with_warnings()` plus a hand call to `mark_candidate_dirty()`, and that is not equivalent: `rpc_with_warnings()` validates the fragment and returns *before sending anything*, so a hand-marked malformed fragment left the candidate marked dirty for an RPC that never reached the device — and the next `close_session()` would then send `<discard-changes/>` against another operator's uncommitted work. That is the #55 bug reached by a different route. Hand-marking also could not replicate the keepalive and session-state preflight, since neither is public.
+
+- **No change needed if you already use `rpc_candidate_change()`.** Its ordering and behaviour are identical; the sequence simply moved into a shared internal helper that both methods now call.
 
 ## What's New in v0.14.0
 

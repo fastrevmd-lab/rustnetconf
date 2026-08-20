@@ -260,10 +260,12 @@ impl Session {
     /// Mark the candidate datastore as dirty.
     ///
     /// For vendor-specific candidate-modifying RPCs, prefer
-    /// [`rpc_candidate_change()`](Self::rpc_candidate_change) over manually
-    /// marking with this method. `rpc_candidate_change()` validates the fragment
-    /// locally first and only marks dirty if validation passes, preventing a
-    /// locally-rejected RPC from incorrectly marking the candidate dirty.
+    /// [`rpc_candidate_change()`](Self::rpc_candidate_change) — or
+    /// [`rpc_candidate_change_with_warnings()`](Self::rpc_candidate_change_with_warnings)
+    /// when you need the warnings back — over manually marking with this method.
+    /// Those methods validate the fragment locally first and only mark dirty if
+    /// validation and the transport preflight pass, preventing a locally-rejected
+    /// RPC from incorrectly marking the candidate dirty.
     ///
     /// If you must use the raw [`rpc()`](Self::rpc) escape hatch, call this
     /// **before** sending the RPC, so [`close_session()`](Self::close_session)
@@ -648,6 +650,69 @@ impl Session {
         &mut self,
         rpc_content: &str,
     ) -> Result<String, NetconfError> {
+        let reply = self.dispatch_candidate_change(rpc_content).await?;
+
+        // Map reply to String the same way rpc() does
+        match reply {
+            RpcReply::Data(data) | RpcReply::DataWithWarnings(data, _) => Ok(data),
+            RpcReply::Ok | RpcReply::OkWithWarnings(_) => Ok(String::new()),
+        }
+    }
+
+    /// Send an arbitrary candidate-modifying RPC, returning the response and any warnings.
+    ///
+    /// The warnings-returning counterpart of
+    /// [`rpc_candidate_change()`](Self::rpc_candidate_change): identical
+    /// preflight-then-mark ordering, but it returns the `(data, warnings)` tuple
+    /// that [`rpc_with_warnings()`](Self::rpc_with_warnings) returns.
+    ///
+    /// Prefer this over marking by hand and calling `rpc_with_warnings()`.
+    /// `rpc_with_warnings()` validates the fragment and returns *before sending
+    /// anything*, so a hand-marked malformed fragment leaves the candidate marked
+    /// dirty for an RPC that never reached the device — and the next
+    /// `close_session()` would then send `<discard-changes/>`, destroying another
+    /// operator's uncommitted work on a shared candidate. Marking by hand also
+    /// cannot replicate the keepalive and session-state preflight, which is not
+    /// otherwise reachable from outside the crate.
+    ///
+    /// Marking happens AFTER all preflight checks but BEFORE the write begins, so:
+    /// - A locally-malformed fragment does not incorrectly mark dirty
+    /// - A failed preflight check (e.g., un-established session) does not mark dirty
+    /// - A timeout or error AFTER the write begins still marks dirty for cleanup
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let (data, warnings) = session.rpc_candidate_change_with_warnings(
+    ///     "<load-configuration><configuration><foo/></configuration></load-configuration>"
+    /// ).await?;
+    /// ```
+    pub async fn rpc_candidate_change_with_warnings(
+        &mut self,
+        rpc_content: &str,
+    ) -> Result<(String, Vec<RpcErrorInfo>), NetconfError> {
+        let reply = self.dispatch_candidate_change(rpc_content).await?;
+
+        // Map reply the same way rpc_with_warnings() does
+        match reply {
+            RpcReply::Data(data) => Ok((data, Vec::new())),
+            RpcReply::DataWithWarnings(data, warnings) => Ok((data, warnings)),
+            RpcReply::Ok => Ok((String::new(), Vec::new())),
+            RpcReply::OkWithWarnings(warnings) => Ok((String::new(), warnings)),
+        }
+    }
+
+    /// Internal helper: the atomic validate-preflight-mark-send sequence shared by
+    /// [`rpc_candidate_change()`](Self::rpc_candidate_change) and
+    /// [`rpc_candidate_change_with_warnings()`](Self::rpc_candidate_change_with_warnings).
+    ///
+    /// Returns the raw [`RpcReply`] so each caller can map it to its own return shape.
+    /// The ordering here is the whole point: nothing marks the candidate dirty until
+    /// every check that can fail *before* the write has passed.
+    async fn dispatch_candidate_change(
+        &mut self,
+        rpc_content: &str,
+    ) -> Result<RpcReply, NetconfError> {
         // 1. Validate locally first - if this fails, do NOT mark dirty
         rpc::validate_xml_fragment(rpc_content)?;
 
@@ -663,13 +728,7 @@ impl Session {
         // 5. Build the RPC envelope and send via send_rpc_raw (bypasses keepalive re-check)
         let msg_id = self.next_message_id();
         let xml = Self::wrap_rpc_envelope(&msg_id, rpc_content);
-        let reply = self.send_rpc_raw(&xml, &msg_id).await?;
-
-        // 6. Map reply to String the same way rpc() does
-        match reply {
-            RpcReply::Data(data) | RpcReply::DataWithWarnings(data, _) => Ok(data),
-            RpcReply::Ok | RpcReply::OkWithWarnings(_) => Ok(String::new()),
-        }
+        self.send_rpc_raw(&xml, &msg_id).await
     }
 
     /// Internal helper: wrap a validated fragment in the `<rpc>` envelope.
@@ -704,6 +763,11 @@ impl Session {
     ///
     /// `rpc_content` is validated as well-formed XML before sending; see
     /// [`rpc()`](Self::rpc) for details.
+    ///
+    /// If the RPC modifies the candidate datastore, use
+    /// [`rpc_candidate_change_with_warnings()`](Self::rpc_candidate_change_with_warnings)
+    /// instead — it marks the candidate dirty atomically with the send, which
+    /// hand-marking before this method cannot do safely.
     pub async fn rpc_with_warnings(
         &mut self,
         rpc_content: &str,

@@ -516,6 +516,39 @@ impl Client {
         self.session.rpc_candidate_change(rpc_content).await
     }
 
+    /// Send an arbitrary candidate-modifying RPC, returning the response and any warnings.
+    ///
+    /// The warnings-returning counterpart of
+    /// [`rpc_candidate_change()`](Self::rpc_candidate_change): identical
+    /// preflight-then-mark ordering, but it returns the `(data, warnings)` tuple
+    /// that [`rpc_with_warnings()`](Self::rpc_with_warnings) returns. Use it for
+    /// Junos `<load-configuration>` and other candidate-modifying RPCs whose
+    /// warnings carry diagnostic value.
+    ///
+    /// Prefer this over marking by hand and calling `rpc_with_warnings()`.
+    /// `rpc_with_warnings()` validates the fragment and returns *before sending
+    /// anything*, so a hand-marked malformed fragment leaves the candidate marked
+    /// dirty for an RPC that never reached the device — and the next
+    /// [`close_session()`](Self::close_session) would then send
+    /// `<discard-changes/>`, destroying another operator's uncommitted work on a
+    /// shared candidate.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let (data, warnings) = client.rpc_candidate_change_with_warnings(
+    ///     "<load-configuration><configuration><foo/></configuration></load-configuration>"
+    /// ).await?;
+    /// ```
+    pub async fn rpc_candidate_change_with_warnings(
+        &mut self,
+        rpc_content: &str,
+    ) -> Result<(String, Vec<RpcErrorInfo>), NetconfError> {
+        self.session
+            .rpc_candidate_change_with_warnings(rpc_content)
+            .await
+    }
+
     /// Check if the device supports a specific capability URI.
     pub fn supports(&self, capability_uri: &str) -> bool {
         self.session.supports(capability_uri)
@@ -538,10 +571,12 @@ impl Client {
     /// Mark the candidate datastore as dirty.
     ///
     /// For vendor-specific candidate-modifying RPCs, prefer
-    /// [`rpc_candidate_change()`](Self::rpc_candidate_change) over manually
-    /// marking with this method. `rpc_candidate_change()` validates the fragment
-    /// locally first and only marks dirty if validation passes, preventing a
-    /// locally-rejected RPC from incorrectly marking the candidate dirty.
+    /// [`rpc_candidate_change()`](Self::rpc_candidate_change) — or
+    /// [`rpc_candidate_change_with_warnings()`](Self::rpc_candidate_change_with_warnings)
+    /// when you need the warnings back — over manually marking with this method.
+    /// Those methods validate the fragment locally first and only mark dirty if
+    /// validation and the transport preflight pass, preventing a locally-rejected
+    /// RPC from incorrectly marking the candidate dirty.
     ///
     /// If you must use the raw [`rpc()`](Self::rpc) or
     /// [`rpc_with_warnings()`](Self::rpc_with_warnings) escape hatch, call this
@@ -816,6 +851,11 @@ impl Client {
     /// Send an arbitrary RPC, returning both the response and any warnings.
     ///
     /// Like [`rpc()`](Self::rpc), but returns warnings alongside the data.
+    ///
+    /// If the RPC modifies the candidate datastore, use
+    /// [`rpc_candidate_change_with_warnings()`](Self::rpc_candidate_change_with_warnings)
+    /// instead — it marks the candidate dirty atomically with the send, which
+    /// hand-marking before this method cannot do safely.
     pub async fn rpc_with_warnings(
         &mut self,
         rpc_content: &str,
@@ -1305,6 +1345,17 @@ mod tests {
         buf
     }
 
+    /// An `<ok/>` reply carrying one `warning`-severity `<rpc-error>`, as Junos
+    /// returns from `<load-configuration>` for a non-fatal complaint.
+    fn mock_ok_with_warning_reply(message_id: &str) -> Vec<u8> {
+        let reply = format!(
+            r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}"><rpc-error><error-type>application</error-type><error-tag>operation-failed</error-tag><error-severity>warning</error-severity><error-message>statement not found</error-message></rpc-error><ok/></rpc-reply>"#
+        );
+        let mut buf = reply.into_bytes();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
     fn mock_rpc_error_reply(message_id: &str) -> Vec<u8> {
         let reply = format!(
             r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}"><rpc-error><error-type>protocol</error-type><error-tag>operation-failed</error-tag><error-severity>error</error-severity></rpc-error></rpc-reply>"#
@@ -1658,6 +1709,154 @@ mod tests {
         assert_eq!(
             discard_count, 1,
             "Junos session with marked candidate should send discard-changes once on close"
+        );
+    }
+
+    /// `rpc_candidate_change_with_warnings` returns the warnings AND marks dirty,
+    /// so a well-formed candidate change still discards on close.
+    #[tokio::test]
+    async fn rpc_candidate_change_with_warnings_returns_warnings_and_causes_discard() {
+        use crate::transport::mock::MockTransport;
+        let mut response_data = mock_junos_hello();
+        response_data.extend_from_slice(&mock_ok_with_warning_reply("1")); // candidate change reply
+        response_data.extend_from_slice(&mock_ok_reply("2")); // discard-changes reply
+        response_data.extend_from_slice(&mock_ok_reply("3")); // close-session reply
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        assert_eq!(session.vendor_name(), "junos");
+
+        let mut client = Client::from_session_for_test(session);
+
+        let (data, warnings) = client
+            .rpc_candidate_change_with_warnings(
+                "<load-configuration><configuration><foo/></configuration></load-configuration>",
+            )
+            .await
+            .expect("rpc_candidate_change_with_warnings failed");
+
+        assert!(data.is_empty(), "an <ok/> reply carries no data");
+        assert_eq!(warnings.len(), 1, "the warning should be surfaced");
+        assert!(
+            warnings[0].message.contains("statement not found"),
+            "warning text should survive: {:?}",
+            warnings[0]
+        );
+        assert!(
+            client.candidate_dirty(),
+            "a sent candidate change must mark dirty"
+        );
+
+        client.close_session().await.expect("close failed");
+
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        assert_eq!(
+            written_str.matches("discard-changes").count(),
+            1,
+            "warnings path should send discard-changes once on close"
+        );
+    }
+
+    /// The core regression test for the warnings path: a locally-malformed
+    /// fragment must not mark dirty, and must not provoke a discard on close.
+    /// This is the hole that hand-marking before `rpc_with_warnings()` left open.
+    #[tokio::test]
+    async fn rpc_candidate_change_with_warnings_malformed_does_not_mark_dirty() {
+        use crate::transport::mock::MockTransport;
+        let mut response_data = mock_junos_hello();
+        // No RPC reply needed - the malformed XML is rejected locally before sending
+        response_data.extend_from_slice(&mock_ok_reply("1")); // close-session reply (no discard)
+
+        let transport = MockTransport::new(response_data);
+        let written_handle = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        assert_eq!(session.vendor_name(), "junos");
+
+        let mut client = Client::from_session_for_test(session);
+
+        let result = client
+            .rpc_candidate_change_with_warnings(
+                "<load-configuration><configuration><foo></configuration></load-configuration>",
+            )
+            .await;
+
+        assert!(result.is_err(), "Malformed XML should be rejected");
+        assert!(
+            !client.candidate_dirty(),
+            "candidate should not be dirty after locally-rejected RPC"
+        );
+
+        client.close_session().await.expect("close failed");
+
+        let written = written_handle.lock().unwrap();
+        let written_str = String::from_utf8_lossy(&written);
+        assert_eq!(
+            written_str.matches("discard-changes").count(),
+            0,
+            "locally-rejected RPC should NOT send discard-changes on close"
+        );
+    }
+
+    /// Once the write has begun, a failure still marks dirty, so a partially
+    /// applied change gets cleaned up. Mirrors `rpc_candidate_change_eof_still_marks_dirty`.
+    #[tokio::test]
+    async fn rpc_candidate_change_with_warnings_eof_still_marks_dirty() {
+        use crate::transport::mock::MockTransport;
+        let response_data = mock_junos_hello();
+        // No reply for the RPC - EOF
+
+        let transport = MockTransport::new(response_data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let mut client = Client::from_session_for_test(session);
+
+        let result = client
+            .rpc_candidate_change_with_warnings(
+                "<load-configuration><configuration><foo/></configuration></load-configuration>",
+            )
+            .await;
+
+        assert!(result.is_err(), "RPC with no reply should fail");
+        assert!(
+            client.candidate_dirty(),
+            "candidate should be dirty after RPC was sent (even though it failed)"
+        );
+    }
+
+    /// An un-established session fails preflight, so nothing is marked and
+    /// nothing is written. This is the check hand-marking cannot replicate,
+    /// since `ensure_established()` is not public.
+    #[tokio::test]
+    async fn rpc_candidate_change_with_warnings_unestablished_does_not_mark_dirty() {
+        use crate::transport::mock::MockTransport;
+        // Never establish: no hello exchanged, session stays Connected.
+        let transport = MockTransport::new(Vec::new());
+        let written_handle = transport.written_handle();
+        let session = Session::new(Box::new(transport));
+
+        let mut client = Client::from_session_for_test(session);
+
+        let result = client
+            .rpc_candidate_change_with_warnings(
+                "<load-configuration><configuration><foo/></configuration></load-configuration>",
+            )
+            .await;
+
+        assert!(result.is_err(), "un-established session should be rejected");
+        assert!(
+            !client.candidate_dirty(),
+            "failed preflight must not mark the candidate dirty"
+        );
+
+        let written = written_handle.lock().unwrap();
+        assert!(
+            written.is_empty(),
+            "nothing should reach the wire when preflight fails"
         );
     }
 }
