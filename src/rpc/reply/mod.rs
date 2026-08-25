@@ -539,6 +539,42 @@ mod tests {
     }
 
     #[test]
+    fn load_warning_without_error_type_or_tag_parses() {
+        // Captured off the wire from the SRX345. Deleting a statement that is
+        // not present returns a *warning* rpc-error carrying only severity and
+        // message — RFC 6241 makes error-type and error-tag mandatory, and
+        // Junos omits both. Requiring them turned a benign warning into
+        // "rpc-error is missing error-type" and failed the whole load.
+        let xml = include_str!("../../../tests/fixtures/commit_check/standalone_load_warning.xml");
+        match parse_rpc_reply(xml, "101").expect("warning must not fail the reply") {
+            RpcReply::OkWithWarnings(warnings) => {
+                assert_eq!(warnings.len(), 1);
+                assert_eq!(warnings[0].severity, Some(ErrorSeverity::Warning));
+                assert!(warnings[0].message.contains("statement not found"));
+                assert_eq!(warnings[0].error_type, None);
+            }
+            other => panic!("expected OkWithWarnings, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_hard_error_still_requires_error_type_and_tag() {
+        // The tolerance above is scoped to warnings. An error-severity
+        // rpc-error missing its type must still be rejected rather than
+        // silently reported with an invented tag.
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="12">
+<rpc-error>
+<error-severity>error</error-severity>
+<error-message>configuration check-out failed</error-message>
+</rpc-error>
+</rpc-reply>"#;
+        assert!(matches!(
+            parse_rpc_reply(xml, "12"),
+            Err(RpcError::ParseError(_))
+        ));
+    }
+
+    #[test]
     fn unrelated_direct_payload_with_ok_is_not_silently_discarded() {
         // An op-command payload followed by <ok/> must not resolve to Ok:
         // that would hand the caller an empty string and lose the response.

@@ -1,0 +1,11 @@
+<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" xmlns:junos="http://xml.juniper.net/junos/21.2R0/junos" message-id="101">
+<load-configuration-results>
+<rpc-error>
+<error-severity>warning</error-severity>
+<error-message>
+statement not found
+</error-message>
+</rpc-error>
+<ok/>
+</load-configuration-results>
+</rpc-reply>
