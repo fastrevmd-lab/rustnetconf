@@ -35,6 +35,14 @@
 //! See [ARCHITECTURE.md](https://github.com/fastrevmd-lab/rustnetconf/blob/main/ARCHITECTURE.md)
 //! for full design details.
 
+// `NetconfError` and `RpcError` are 128 bytes, exactly clippy's
+// `result_large_err` threshold, so every fallible public function trips the
+// lint (72 sites across client.rs, session.rs, and pool/mod.rs). Both types
+// are public API of a published crate, so shrinking them means boxing a
+// variant, which is a breaking change and does not belong in a patch release.
+// Tracked in #66; remove this allow when the error types shrink.
+#![allow(clippy::result_large_err)]
+
 pub mod capability;
 pub mod client;
 pub mod error;
