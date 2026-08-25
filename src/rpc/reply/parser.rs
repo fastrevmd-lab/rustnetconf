@@ -110,6 +110,9 @@ struct ReplyParser<'a> {
     message_id: Option<String>,
     payload: PayloadState,
     protocol_ok: bool,
+    /// Whether the direct payload's root element is Junos `<commit-results>`,
+    /// the one shape allowed to be followed by a sibling `<ok/>`.
+    direct_root_is_commit_results: bool,
     current_error: Option<ErrorState>,
     errors: Vec<RpcErrorInfo>,
     deferred_payload_error: Option<&'static str>,
@@ -126,6 +129,7 @@ impl<'a> ReplyParser<'a> {
             message_id: None,
             payload: PayloadState::None,
             protocol_ok: false,
+            direct_root_is_commit_results: false,
             current_error: None,
             errors: Vec::new(),
             deferred_payload_error: None,
@@ -343,6 +347,13 @@ impl ReplyParser<'_> {
         }
     }
 
+    /// Whether `tag` is the Junos `<commit-results>` element, in either the
+    /// NETCONF namespace or none.
+    fn is_commit_results(&self, tag: &BytesStart<'_>) -> bool {
+        let qualified_name = tag.name();
+        self.netconf_local_name(qualified_name.as_ref()) == Some(b"commit-results")
+    }
+
     fn in_open_direct_payload(&self) -> bool {
         matches!(
             self.payload,
@@ -524,16 +535,27 @@ impl ReplyParser<'_> {
 
     fn open_direct(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
         let parent_namespaces = self.parent_namespaces();
+        let is_commit_results = self.is_commit_results(tag);
+        if self.protocol_ok {
+            self.defer_payload_conflict("direct payload conflicts with an existing payload");
+            self.ignored_payload = Some(IgnoredPayload::Direct { depth: 1 });
+            return Ok(());
+        }
         match &mut self.payload {
             PayloadState::None => {
                 let mut capture = FragmentCapture::with_namespaces(parent_namespaces);
                 capture.start(tag)?;
                 self.payload = PayloadState::Direct { capture, depth: 1 };
+                self.direct_root_is_commit_results = is_commit_results;
                 Ok(())
             }
             PayloadState::Direct { capture, depth } if *depth == 0 => {
+                // A second direct root joins the aggregate, so the payload is
+                // no longer a lone <commit-results> and the <ok/> exception
+                // must not apply.
                 capture.start(tag)?;
                 *depth = 1;
+                self.direct_root_is_commit_results = false;
                 Ok(())
             }
             _ => {
@@ -546,14 +568,25 @@ impl ReplyParser<'_> {
 
     fn capture_direct_empty(&mut self, tag: &BytesStart<'_>) -> Result<(), RpcError> {
         let parent_namespaces = self.parent_namespaces();
+        let is_commit_results = self.is_commit_results(tag);
+        if self.protocol_ok {
+            self.defer_payload_conflict("direct payload conflicts with an existing payload");
+            return Ok(());
+        }
         match &mut self.payload {
             PayloadState::None => {
                 let mut capture = FragmentCapture::with_namespaces(parent_namespaces);
                 capture.empty(tag)?;
                 self.payload = PayloadState::Direct { capture, depth: 0 };
+                self.direct_root_is_commit_results = is_commit_results;
                 Ok(())
             }
-            PayloadState::Direct { capture, depth } if *depth == 0 => capture.empty(tag),
+            PayloadState::Direct { capture, depth } if *depth == 0 => {
+                // See open_direct: a second direct root ends the exception.
+                capture.empty(tag)?;
+                self.direct_root_is_commit_results = false;
+                Ok(())
+            }
             _ => {
                 self.defer_payload_conflict("direct payload conflicts with an existing payload");
                 Ok(())
@@ -641,6 +674,24 @@ impl ReplyParser<'_> {
         match self.payload {
             PayloadState::None => {
                 self.payload = PayloadState::Ok;
+                Ok(())
+            }
+            // Junos answers a commit-check with `<commit-results>` and a
+            // sibling `<ok/>`, which RFC 6241 does not allow together. On a
+            // chassis cluster the element is left unclosed, so `handle_empty`
+            // already tolerates it through `in_open_direct_payload`. A
+            // standalone device closes it correctly and reaches here instead;
+            // the well-formed reply must not fare worse than the malformed
+            // one. The `<ok/>` carries the verdict, so record it.
+            //
+            // Scoped to exactly one `<ok/>` after a closed `<commit-results>`.
+            // Any other direct payload keeps the conflict: resolving to `Ok`
+            // would hand the caller an empty string and silently drop a
+            // response body it asked for.
+            PayloadState::Direct { depth: 0, .. }
+                if self.direct_root_is_commit_results && !self.protocol_ok =>
+            {
+                self.protocol_ok = true;
                 Ok(())
             }
             _ => {
