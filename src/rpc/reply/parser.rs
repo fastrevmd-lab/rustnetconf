@@ -1128,18 +1128,40 @@ impl RpcErrorBuilder {
     }
 
     fn finish(self) -> Result<RpcErrorInfo, RpcError> {
+        // RFC 6241 makes error-type and error-tag mandatory. Junos omits both
+        // on warnings — deleting an absent statement returns nothing but
+        // `<error-severity>warning</error-severity>` and "statement not
+        // found". Requiring them turned that benign warning into a hard parse
+        // failure that sank the entire load.
+        //
+        // Scoped to warnings on purpose. A warning carries no verdict, so a
+        // missing classification costs nothing; an error-severity rpc-error
+        // still must say what it is, rather than be reported under an invented
+        // tag.
+        //
+        // Severity is read but not consumed here, so the strict path keeps
+        // reporting error-type, then error-tag, then error-severity in that
+        // order — an empty <rpc-error/> fails exactly as it always did.
+        let lenient = self.severity == Some(ErrorSeverity::Warning);
+        let error_type = match self.error_type {
+            Some(error_type) => Some(error_type),
+            None if lenient => None,
+            None => return Err(parse_error("rpc-error is missing error-type")),
+        };
+        let tag = match self.tag {
+            Some(tag) => tag,
+            None if lenient => ErrorTag::Other("unspecified".to_owned()),
+            None => return Err(parse_error("rpc-error is missing error-tag")),
+        };
+
+        let severity = self
+            .severity
+            .ok_or_else(|| parse_error("rpc-error is missing error-severity"))?;
+
         Ok(RpcErrorInfo {
-            error_type: Some(
-                self.error_type
-                    .ok_or_else(|| parse_error("rpc-error is missing error-type"))?,
-            ),
-            tag: self
-                .tag
-                .ok_or_else(|| parse_error("rpc-error is missing error-tag"))?,
-            severity: Some(
-                self.severity
-                    .ok_or_else(|| parse_error("rpc-error is missing error-severity"))?,
-            ),
+            error_type,
+            tag,
+            severity: Some(severity),
             app_tag: self.app_tag,
             path: self.path,
             message: self.message.unwrap_or_default(),
