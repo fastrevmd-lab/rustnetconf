@@ -488,6 +488,144 @@ mod tests {
     }
 
     #[test]
+    fn parses_standalone_commit_check_with_ok_sibling() {
+        // Captured off the wire from a standalone single-RE SRX345 running
+        // Junos 21.2R3-S6.11. Unlike the chassis-cluster form, this reply is
+        // well-formed: <commit-results> is closed, and <ok/> follows it as a
+        // sibling. RFC 6241 does not allow both, but Junos sends both.
+        let xml =
+            include_str!("../../../tests/fixtures/commit_check/standalone_validate_success.xml");
+        let result = parse_rpc_reply(xml, "101").unwrap();
+        assert!(
+            matches!(result, RpcReply::Ok | RpcReply::OkWithWarnings(_)),
+            "standalone commit-check should parse as Ok, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn ok_sibling_after_a_closed_direct_payload_is_not_a_conflict() {
+        // The same shape with content in the payload, to pin that the verdict
+        // survives regardless of what <commit-results> carries.
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="7">
+<commit-results>
+<routing-engine><name>re0</name><commit-check-success/></routing-engine>
+</commit-results>
+<ok/>
+</rpc-reply>"#;
+        assert!(matches!(parse_rpc_reply(xml, "7"), Ok(RpcReply::Ok)));
+    }
+
+    #[test]
+    fn ok_sibling_does_not_mask_a_device_error() {
+        // A hard rpc-error must still win over the tolerated <ok/> sibling,
+        // so a failed check is never reported as a passing one.
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="8">
+<commit-results>
+</commit-results>
+<rpc-error>
+<error-type>protocol</error-type>
+<error-tag>operation-failed</error-tag>
+<error-severity>error</error-severity>
+<error-message>configuration check-out failed</error-message>
+</rpc-error>
+<ok/>
+</rpc-reply>"#;
+        match parse_rpc_reply(xml, "8") {
+            Err(RpcError::ServerError { message, .. }) => {
+                assert_eq!(message, "configuration check-out failed");
+            }
+            other => panic!("expected ServerError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unrelated_direct_payload_with_ok_is_not_silently_discarded() {
+        // An op-command payload followed by <ok/> must not resolve to Ok:
+        // that would hand the caller an empty string and lose the response.
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="4">
+<software-information><host-name>srx345</host-name></software-information>
+<ok/>
+</rpc-reply>"#;
+        assert!(matches!(
+            parse_rpc_reply(xml, "4"),
+            Err(RpcError::ParseError(_))
+        ));
+    }
+
+    #[test]
+    fn commit_results_plus_another_sibling_then_ok_still_conflicts() {
+        // Direct siblings aggregate into one payload
+        // (public_direct_payload_aggregates_siblings_contract). The <ok/>
+        // exception is for a reply whose only direct root is
+        // <commit-results>; once a second root joins it, resolving to Ok
+        // would drop the aggregate.
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="10">
+<commit-results/>
+<software-information><host-name>srx345</host-name></software-information>
+<ok/>
+</rpc-reply>"#;
+        assert!(matches!(
+            parse_rpc_reply(xml, "10"),
+            Err(RpcError::ParseError(_))
+        ));
+    }
+
+    #[test]
+    fn commit_results_after_another_sibling_then_ok_still_conflicts() {
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="11">
+<software-information><host-name>srx345</host-name></software-information>
+<commit-results/>
+<ok/>
+</rpc-reply>"#;
+        assert!(matches!(
+            parse_rpc_reply(xml, "11"),
+            Err(RpcError::ParseError(_))
+        ));
+    }
+
+    #[test]
+    fn duplicate_ok_after_commit_results_still_conflicts() {
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="5">
+<commit-results>
+</commit-results>
+<ok/>
+<ok/>
+</rpc-reply>"#;
+        assert!(matches!(
+            parse_rpc_reply(xml, "5"),
+            Err(RpcError::ParseError(_))
+        ));
+    }
+
+    #[test]
+    fn direct_sibling_after_the_tolerated_ok_still_conflicts() {
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="6">
+<commit-results>
+</commit-results>
+<ok/>
+<software-information><host-name>srx345</host-name></software-information>
+</rpc-reply>"#;
+        assert!(matches!(
+            parse_rpc_reply(xml, "6"),
+            Err(RpcError::ParseError(_))
+        ));
+    }
+
+    #[test]
+    fn two_data_payloads_still_conflict() {
+        // The tolerance is scoped to a direct payload followed by <ok/>. A
+        // genuinely ambiguous reply must still be rejected.
+        let xml = r#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="9">
+<data><a/></data>
+<ok/>
+</rpc-reply>"#;
+        assert!(matches!(
+            parse_rpc_reply(xml, "9"),
+            Err(RpcError::ParseError(_))
+        ));
+    }
+
+    #[test]
     fn test_repair_two_node_unclosed_routing_engine() {
         // Synthetic two-node cluster with two consecutive unclosed routing-engine blocks.
         let xml = r#"<nc:rpc-reply xmlns:junos="http://xml.juniper.net/junos/25.4R1.12/junos" xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="101">
