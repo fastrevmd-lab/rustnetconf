@@ -25,7 +25,7 @@ Async NETCONF client library, YANG code generation, vendor profiles, connection 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
 > **Latest release — [v0.15.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.15.0)** (smaller error types — one breaking change).
-> On crates.io: `rustnetconf` 0.15.0 · `rustnetconf-cli` 0.3.5 · `rustnetconf-yang` 0.1.5.
+> On crates.io: `rustnetconf` 0.15.0 · `rustnetconf-cli` 0.3.6 · `rustnetconf-yang` 0.1.6.
 > See [What's New in v0.15.0](#whats-new-in-v0150) below.
 
 ## Workspace
@@ -50,7 +50,7 @@ Consumers that need those should use a dedicated SSH crate alongside this one. A
 
 ## What's New in v0.15.0
 
-Breaking change (#66). One variant changes shape; nothing else in the public API moves. `rustnetconf-cli` and `rustnetconf-yang` have no source changes and only carry the new dependency requirement.
+Breaking change (#66). One variant changes shape; nothing else in the public API moves. `rustnetconf-cli` (0.3.6) and `rustnetconf-yang` (0.1.6) have no source changes and bump only to carry the new `rustnetconf = "0.15"` requirement, exactly as they did at 0.14.0.
 
 - **`RpcError::ServerError` now carries a boxed struct.** Its 7 RFC 6241 §4.3 fields moved into a new public `RpcServerError`, and the variant became `ServerError(Box<RpcServerError>)`. The fields are unchanged, still public, and still all present — only where they live moved.
 
