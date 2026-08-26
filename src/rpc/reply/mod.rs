@@ -102,12 +102,10 @@ mod tests {
 </rpc-reply>"#;
         let err = parse_rpc_reply(xml, "3").unwrap_err();
         match err {
-            RpcError::ServerError {
-                tag, message, path, ..
-            } => {
-                assert_eq!(tag, ErrorTag::InvalidValue);
-                assert_eq!(message, "invalid interface name");
-                assert!(path.unwrap().contains("ge-0/0/0"));
+            RpcError::ServerError(ref server_error) => {
+                assert_eq!(server_error.tag, ErrorTag::InvalidValue);
+                assert_eq!(server_error.message, "invalid interface name");
+                assert!(server_error.path.as_deref().unwrap().contains("ge-0/0/0"));
             }
             _ => panic!("expected ServerError, got {err:?}"),
         }
@@ -135,12 +133,10 @@ mod tests {
 </rpc-reply>"#;
         let err = parse_rpc_reply(xml, "5").unwrap_err();
         match err {
-            RpcError::ServerError {
-                tag, info, message, ..
-            } => {
-                assert_eq!(tag, ErrorTag::LockDenied);
-                assert!(message.contains("Lock failed"));
-                assert!(info.unwrap().contains("42"));
+            RpcError::ServerError(server_error) => {
+                assert_eq!(server_error.tag, ErrorTag::LockDenied);
+                assert!(server_error.message.contains("Lock failed"));
+                assert!(server_error.info.unwrap().contains("42"));
             }
             _ => panic!("expected ServerError"),
         }
@@ -251,9 +247,9 @@ mod tests {
 </rpc-reply>"#;
         let err = parse_rpc_reply(xml, "12").unwrap_err();
         match err {
-            RpcError::ServerError { tag, message, .. } => {
-                assert_eq!(tag, ErrorTag::InvalidValue);
-                assert_eq!(message, "real error");
+            RpcError::ServerError(ref server_error) => {
+                assert_eq!(server_error.tag, ErrorTag::InvalidValue);
+                assert_eq!(server_error.message, "real error");
             }
             _ => panic!("expected ServerError for hard error, got {err:?}"),
         }
@@ -322,8 +318,8 @@ mod tests {
 </rpc-reply>"#;
         let err = parse_rpc_reply(xml, "5").unwrap_err();
         match err {
-            RpcError::ServerError { message, .. } => {
-                assert_eq!(message, "syntax error before <get> & after");
+            RpcError::ServerError(server_error) => {
+                assert_eq!(server_error.message, "syntax error before <get> & after");
             }
             other => panic!("expected ServerError, got {other:?}"),
         }
@@ -363,9 +359,8 @@ mod tests {
 </rpc-reply>"#;
         let err = parse_rpc_reply(xml, "7").unwrap_err();
         match err {
-            RpcError::ServerError {
-                info: Some(info), ..
-            } => {
+            RpcError::ServerError(server_error) if server_error.info.is_some() => {
+                let info = server_error.info.expect("info checked above");
                 validate_xml_fragment(&info).expect("error-info must stay well-formed");
                 let decoded = quick_xml::escape::unescape(&info).expect("must unescape");
                 assert!(
@@ -429,8 +424,8 @@ mod tests {
 </rpc-reply>"#;
         let err = parse_rpc_reply(xml, "10").unwrap_err();
         match err {
-            RpcError::ServerError { message, .. } => {
-                assert_eq!(message, "bad & input");
+            RpcError::ServerError(server_error) => {
+                assert_eq!(server_error.message, "bad & input");
             }
             other => panic!("expected ServerError, got {other:?}"),
         }
@@ -531,8 +526,8 @@ mod tests {
 <ok/>
 </rpc-reply>"#;
         match parse_rpc_reply(xml, "8") {
-            Err(RpcError::ServerError { message, .. }) => {
-                assert_eq!(message, "configuration check-out failed");
+            Err(RpcError::ServerError(server_error)) => {
+                assert_eq!(server_error.message, "configuration check-out failed");
             }
             other => panic!("expected ServerError, got {other:?}"),
         }
@@ -695,11 +690,14 @@ mod tests {
 </nc:rpc-reply>"#;
         let err = parse_rpc_reply(xml, "101").unwrap_err();
         match err {
-            RpcError::ServerError { tag, message, .. } => {
-                assert_eq!(tag, ErrorTag::OperationFailed);
+            RpcError::ServerError(ref server_error) => {
+                assert_eq!(server_error.tag, ErrorTag::OperationFailed);
                 assert!(
-                    message.contains("configuration check-out failed"),
-                    "error message should be preserved, got: {message}"
+                    server_error
+                        .message
+                        .contains("configuration check-out failed"),
+                    "error message should be preserved, got: {}",
+                    server_error.message
                 );
             }
             other => panic!("expected ServerError, got {other:?}"),

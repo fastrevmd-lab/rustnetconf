@@ -24,9 +24,9 @@ Async NETCONF client library, YANG code generation, vendor profiles, connection 
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.14.3](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.14.3)** (cancellation-safe commit classification).
-> On crates.io: `rustnetconf` 0.14.3 · `rustnetconf-cli` 0.3.5 · `rustnetconf-yang` 0.1.5.
-> See [What's New in v0.14.3](#whats-new-in-v0143) below.
+> **Latest release — [v0.15.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.15.0)** (smaller error types — one breaking change).
+> On crates.io: `rustnetconf` 0.15.0 · `rustnetconf-cli` 0.3.5 · `rustnetconf-yang` 0.1.5.
+> See [What's New in v0.15.0](#whats-new-in-v0150) below.
 
 ## Workspace
 
@@ -47,6 +47,30 @@ SSH is present as a *transport for NETCONF*, not as a general-purpose capability
 - Remote shell or command execution
 
 Consumers that need those should use a dedicated SSH crate alongside this one. A native SCP1 client was briefly added and then reverted before it was ever released (#52, reverted by #53) for exactly this reason; issues #47 and #51 were closed as not planned on the same grounds. The round trip is visible in `git log` between v0.13.2 and the next release — it was a deliberate reversal, not an accident.
+
+## What's New in v0.15.0
+
+Breaking change (#66). One variant changes shape; nothing else in the public API moves. `rustnetconf-cli` and `rustnetconf-yang` have no source changes and only carry the new dependency requirement.
+
+- **`RpcError::ServerError` now carries a boxed struct.** Its 7 RFC 6241 §4.3 fields moved into a new public `RpcServerError`, and the variant became `ServerError(Box<RpcServerError>)`. The fields are unchanged, still public, and still all present — only where they live moved.
+
+  ```rust
+  // before
+  Err(NetconfError::Rpc(RpcError::ServerError { tag, message, .. })) => ...
+
+  // after
+  Err(NetconfError::Rpc(RpcError::ServerError(e))) => ... // e.tag, e.message
+  ```
+
+  Construction gets `From<RpcServerError>` for both `RpcError` and `NetconfError`, so `rpc_server_error.into()` boxes for you. `Display` output is byte-for-byte what it was — code matching on the error *string* is unaffected.
+
+- **Why: the error types were exactly 128 bytes.** `NetconfError` and `RpcError` both measured 128, which is precisely clippy's `result_large_err` threshold, so every fallible function in the public surface tripped the lint — 71 sites once the suppression was lifted. `ServerError` was the whole of it: `message` plus three `Option<String>` is 96 bytes before `ErrorTag`'s own 24. Boxing that one variant takes `RpcError` 128 → 48 and `NetconfError` 128 → 72, and the ceiling becomes `TransportError::HostKeyMismatch` at 72.
+
+  Every `Result<T, NetconfError>` in the crate was moving 128 bytes on the success path too, since a `Result` is as wide as its larger arm.
+
+- **The suppression is gone, not relocated.** `#![allow(clippy::result_large_err)]` in `src/lib.rs` and two local allows in `src/session.rs` were removed; `cargo clippy --workspace --all-targets --all-features -- -D warnings` passes clean without them. A new test asserts each error enum stays under 128 bytes, so a future inline `String` field fails the suite rather than quietly re-arming the lint.
+
+- **The toolchain is now pinned.** `rust-toolchain.toml` pins 1.98.0, matching every sibling crate. CI installed `stable` unpinned, which is why a clippy release turned the gate red with no change on this side.
 
 ## What's New in v0.14.3
 

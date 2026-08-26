@@ -606,7 +606,6 @@ impl Session {
     }
 
     /// Ensure the session is established before sending RPCs.
-    #[allow(clippy::result_large_err)]
     fn ensure_established(&self) -> Result<(), NetconfError> {
         match self.state {
             SessionState::Established => Ok(()),
@@ -619,7 +618,6 @@ impl Session {
     }
 
     /// Ensure the device supports a capability, or return an error.
-    #[allow(clippy::result_large_err)]
     fn require_capability(&self, uri: &str, operation: &str) -> Result<(), NetconfError> {
         if !self.supports(uri) {
             return Err(ProtocolError::CapabilityMissing(format!(
@@ -1202,13 +1200,12 @@ impl Session {
     ) -> Result<Option<u32>, NetconfError> {
         match self.lock(target).await {
             Ok(()) => Ok(None),
-            Err(NetconfError::Rpc(crate::error::RpcError::ServerError {
-                ref tag,
-                ref info,
-                ..
-            })) if *tag == crate::types::ErrorTag::LockDenied => {
+            Err(NetconfError::Rpc(crate::error::RpcError::ServerError(ref server_error)))
+                if server_error.tag == crate::types::ErrorTag::LockDenied =>
+            {
                 // Try to extract session-id from error-info
-                let stale_session_id = info
+                let stale_session_id = server_error
+                    .info
                     .as_ref()
                     .and_then(|info_xml| parse_session_id_from_info(info_xml));
 
@@ -1226,7 +1223,7 @@ impl Session {
                 // Couldn't parse session-id — return the original error
                 Err(ProtocolError::CapabilityMissing(format!(
                     "lock denied but could not extract stale session-id from error-info: {:?}",
-                    info
+                    server_error.info
                 ))
                 .into())
             }
