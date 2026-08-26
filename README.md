@@ -72,6 +72,28 @@ Breaking change (#66). One variant changes shape; nothing else in the public API
 
 - **The toolchain is now pinned.** `rust-toolchain.toml` pins 1.98.0, matching every sibling crate. CI installed `stable` unpinned, which is why a clippy release turned the gate red with no change on this side.
 
+## What's New in v0.14.5
+
+Bug-fix release (#67). `rustnetconf-cli` and `rustnetconf-yang` are unchanged. No API changes — a drop-in patch upgrade from 0.14.4.
+
+- **Fixed: a benign Junos warning no longer sinks the whole load.** Deleting a statement that is not present on an SRX345 returns an `<rpc-error>` carrying only severity and message — RFC 6241 makes `error-type` and `error-tag` mandatory, and Junos omits both. `RpcErrorBuilder::finish` rejected the reply with "rpc-error is missing error-type", so a warning failed the load and took `commit_check_config` and `apply_junos_change_set` with it — the same tools 0.14.4 had just unblocked on the same device.
+
+- **The tolerance is keyed on severity.** A missing `error-type`/`error-tag` is accepted only when severity is `warning`: a warning carries no verdict, so an absent classification costs nothing, while an `error`-severity `rpc-error` still has to say what it is rather than be reported under an invented tag. `RpcErrorInfo` already modelled `error_type` as `Option`, so the struct did not change; a missing tag becomes `ErrorTag::Other("unspecified")`.
+
+  Severity is read but not consumed before the type and tag checks, so the strict path still reports error-type, then error-tag, then error-severity in that order — an empty `<rpc-error/>` fails exactly as it always did.
+
+## What's New in v0.14.4
+
+Bug-fix release (#65). `rustnetconf-cli` and `rustnetconf-yang` are unchanged. No API changes — a drop-in patch upgrade from 0.14.3.
+
+- **Fixed: a standalone SRX's commit-check verdict was lost.** A single-RE SRX345 answers a commit-check with a closed `<commit-results>` followed by a sibling `<ok/>`. RFC 6241 does not allow a payload and `<ok/>` together, so the reply failed to parse with "`<ok/>` conflicts with an existing payload" and the verdict was discarded even though the check had passed. This made the governed write path unusable on the lab's physical SRX345 while the ungoverned one worked ([rustjunosmcp#358](https://github.com/fastrevmd-lab/rustjunosmcp/issues/358)).
+
+  The chassis-cluster form of the same reply already parsed, because there Junos leaves `<routing-engine>` unclosed — the payload is still open when `<ok/>` arrives. That existing tolerance was keyed on depth > 0, so it covered only the malformed shape: a device that closed the element correctly fared *worse* than one that did not.
+
+- **The scope is deliberately narrow.** Exactly one `<ok/>` after a closed `<commit-results>` is tolerated. An earlier draft accepted `<ok/>` after any closed direct payload, which turned `<software-information>…</software-information><ok/>` into `RpcReply::Ok` — handing the caller an empty string and silently dropping a body it had asked for. Trading a loud parse error for silent data loss is the wrong trade, so every other direct payload keeps the conflict, as do a duplicate `<ok/>` and any direct sibling following the tolerated one. A hard `<rpc-error>` still wins, so a failed check is never reported as passing. All four boundaries are pinned by tests, against a fixture captured off the wire from the SRX345 on Junos 21.2R3-S6.11.
+
+- **Also: `clippy::result_large_err` suppressed.** Stable 1.98.0 turned it into a red gate on main. Suppression was the right scope for a patch release carrying a production bugfix; the lint is fixed properly in 0.15.0 (#66).
+
 ## What's New in v0.14.3
 
 Bug-fix release (#61). `rustnetconf-cli` and `rustnetconf-yang` are unchanged. No API changes — every function touched is private — so a drop-in patch upgrade from 0.14.2.
