@@ -1,0 +1,7 @@
+# Pinned so a new stable clippy cannot turn CI red without a deliberate bump
+# here first. Every sibling crate in the fleet pins the same way; this repo was
+# the one that did not, which is how the 1.98 `result_large_err` change (#66)
+# landed as a surprise.
+[toolchain]
+channel = "1.98.0"
+components = ["clippy", "rustfmt"]

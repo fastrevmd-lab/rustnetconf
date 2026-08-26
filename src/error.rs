@@ -116,28 +116,44 @@ pub enum FramingError {
     Mismatch { advertised: String, actual: String },
 }
 
+/// The parsed contents of a device's `<rpc-error>` response — all 7 fields
+/// defined by RFC 6241 §4.3.
+///
+/// Carried behind a [`Box`] in [`RpcError::ServerError`] so that the error
+/// enums stay small: at 128 bytes inline this struct made every
+/// `Result<T, NetconfError>` in the crate a large-`Err` return.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RpcServerError {
+    /// The conceptual layer where the error occurred.
+    pub error_type: Option<RpcErrorType>,
+    /// The error condition tag.
+    pub tag: ErrorTag,
+    /// Error severity.
+    pub severity: Option<ErrorSeverity>,
+    /// Vendor-specific or implementation-specific error tag.
+    pub app_tag: Option<String>,
+    /// XPath expression identifying the element in error.
+    pub path: Option<String>,
+    /// Human-readable error message.
+    pub message: String,
+    /// Additional error information (raw XML).
+    pub info: Option<String>,
+}
+
+impl std::fmt::Display for RpcServerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "server error: [{:?}] {}", self.tag, self.message)
+    }
+}
+
 /// RPC layer errors — the device responded with `<rpc-error>`.
 #[derive(Debug, Error)]
 pub enum RpcError {
     /// Device returned a structured `<rpc-error>` response.
-    /// All 7 RFC 6241 §4.3 fields are parsed and available.
-    #[error("server error: [{tag:?}] {message}")]
-    ServerError {
-        /// The conceptual layer where the error occurred.
-        error_type: Option<RpcErrorType>,
-        /// The error condition tag.
-        tag: ErrorTag,
-        /// Error severity.
-        severity: Option<ErrorSeverity>,
-        /// Vendor-specific or implementation-specific error tag.
-        app_tag: Option<String>,
-        /// XPath expression identifying the element in error.
-        path: Option<String>,
-        /// Human-readable error message.
-        message: String,
-        /// Additional error information (raw XML).
-        info: Option<String>,
-    },
+    /// All 7 RFC 6241 §4.3 fields are parsed and available on
+    /// [`RpcServerError`].
+    #[error("{0}")]
+    ServerError(Box<RpcServerError>),
 
     /// RPC response was not received within the deadline.
     #[error("RPC timeout after {0:?}")]
@@ -156,6 +172,20 @@ pub enum RpcError {
     /// Response message-id does not match the request.
     #[error("message-id mismatch: expected {expected}, got {actual}")]
     MessageIdMismatch { expected: String, actual: String },
+}
+
+impl From<RpcServerError> for RpcError {
+    /// Box the payload into [`RpcError::ServerError`].
+    fn from(err: RpcServerError) -> Self {
+        RpcError::ServerError(Box::new(err))
+    }
+}
+
+impl From<RpcServerError> for NetconfError {
+    /// Box the payload into [`RpcError::ServerError`] and wrap it.
+    fn from(err: RpcServerError) -> Self {
+        NetconfError::Rpc(err.into())
+    }
 }
 
 /// Protocol layer errors (capability negotiation, session state).
@@ -213,6 +243,55 @@ mod tests {
         assert!(s.contains("device-a.lab"), "got {s:?}");
         assert!(s.contains("830"), "got {s:?}");
         assert!(s.contains("/etc/jmcp/known_hosts"), "got {s:?}");
+    }
+
+    /// Guards the fix for #66. `RpcError::ServerError` carried its 7 fields
+    /// inline at 128 bytes, which put both error enums exactly on clippy's
+    /// `result_large_err` threshold and lit the lint at 71 call sites.
+    /// Boxing the payload dropped them well under; these bounds keep a new
+    /// inline `String` field from silently pushing them back over.
+    #[test]
+    fn error_enums_stay_well_under_the_large_err_threshold() {
+        use std::mem::size_of;
+
+        const CLIPPY_LARGE_ERR_THRESHOLD: usize = 128;
+
+        for (name, size) in [
+            ("NetconfError", size_of::<NetconfError>()),
+            ("RpcError", size_of::<RpcError>()),
+            ("TransportError", size_of::<TransportError>()),
+            ("FramingError", size_of::<FramingError>()),
+            ("ProtocolError", size_of::<ProtocolError>()),
+        ] {
+            assert!(
+                size < CLIPPY_LARGE_ERR_THRESHOLD,
+                "{name} is {size} bytes, at or over clippy's \
+                 result_large_err threshold of {CLIPPY_LARGE_ERR_THRESHOLD} — \
+                 box the variant that grew rather than re-adding the allow"
+            );
+        }
+    }
+
+    #[test]
+    fn server_error_display_matches_the_pre_boxing_format() {
+        let err: RpcError = RpcServerError {
+            error_type: Some(RpcErrorType::Application),
+            tag: ErrorTag::InvalidValue,
+            severity: Some(ErrorSeverity::Error),
+            app_tag: None,
+            path: None,
+            message: "invalid interface name".into(),
+            info: None,
+        }
+        .into();
+        assert_eq!(
+            err.to_string(),
+            "server error: [InvalidValue] invalid interface name"
+        );
+        assert_eq!(
+            NetconfError::from(err).to_string(),
+            "RPC error: server error: [InvalidValue] invalid interface name"
+        );
     }
 
     #[test]

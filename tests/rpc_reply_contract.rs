@@ -110,9 +110,9 @@ fn public_hard_error_contract() {
 
     let error = parse_rpc_reply(xml, "44").expect_err("hard error must fail");
     match error {
-        RpcError::ServerError { tag, message, .. } => {
-            assert_eq!(tag, ErrorTag::InvalidValue);
-            assert_eq!(message, "invalid interface");
+        RpcError::ServerError(ref server_error) => {
+            assert_eq!(server_error.tag, ErrorTag::InvalidValue);
+            assert_eq!(server_error.message, "invalid interface");
         }
         other => panic!("expected ServerError, got {other:?}"),
     }

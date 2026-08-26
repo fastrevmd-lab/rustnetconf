@@ -141,7 +141,8 @@ NetconfError
 ├── Framing(FramingError)
 │   ├── Invalid, Incomplete, Mismatch (firmware bug detection)
 ├── Rpc(RpcError)
-│   ├── ServerError{7 fields}, Timeout, CommitUnknown, ParseError, MessageIdMismatch
+│   ├── ServerError(Box<RpcServerError>)  — the 7 RFC 6241 §4.3 fields, boxed
+│   ├── Timeout, CommitUnknown, ParseError, MessageIdMismatch
 └── Protocol(ProtocolError)
     ├── CapabilityMissing, SessionClosed, HelloFailed, Xml
 ```

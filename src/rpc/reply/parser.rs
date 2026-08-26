@@ -6,7 +6,7 @@ use super::lexical::{
     contains_only_xml_space, decode_attribute, validate_xml_chars, DocumentLexicalState,
 };
 use super::{RpcErrorInfo, RpcReply};
-use crate::error::RpcError;
+use crate::error::{RpcError, RpcServerError};
 use crate::types::{ErrorSeverity, ErrorTag, RpcErrorType};
 use quick_xml::events::{BytesCData, BytesEnd, BytesRef, BytesStart, BytesText, Event};
 use quick_xml::Reader;
@@ -1023,7 +1023,7 @@ impl ReplyParser<'_> {
             .partition(|error| error.severity != Some(ErrorSeverity::Warning));
 
         if let Some(error) = hard_errors.into_iter().next() {
-            return Err(RpcError::ServerError {
+            return Err(RpcError::ServerError(Box::new(RpcServerError {
                 error_type: error.error_type,
                 tag: error.tag,
                 severity: error.severity,
@@ -1031,7 +1031,7 @@ impl ReplyParser<'_> {
                 path: error.path,
                 message: error.message,
                 info: error.info,
-            });
+            })));
         }
 
         if let Some(message) = self.deferred_payload_error {
@@ -1304,11 +1304,8 @@ mod tests {
         for xml in cases {
             assert!(matches!(
                 parse_strict(&xml, "1"),
-                Err(RpcError::ServerError {
-                    tag: ErrorTag::InvalidValue,
-                    message,
-                    ..
-                }) if message == "hard failure"
+                Err(RpcError::ServerError(e))
+                    if e.tag == ErrorTag::InvalidValue && e.message == "hard failure"
             ));
         }
 
@@ -1478,7 +1475,7 @@ mod tests {
           </nc:rpc-error></nc:rpc-reply>"#;
         assert!(matches!(
             parse_strict(error, "1"),
-            Err(RpcError::ServerError { info: Some(_), .. })
+            Err(RpcError::ServerError(e)) if e.info.is_some()
         ));
     }
 
@@ -2109,10 +2106,8 @@ mod tests {
         </rpc-error></rpc-reply>"#;
         assert!(matches!(
             parse_strict(vendor, "1"),
-            Err(RpcError::ServerError {
-                tag: ErrorTag::Other(tag),
-                ..
-            }) if tag == "vendor-failure"
+            Err(RpcError::ServerError(e))
+                if matches!(&e.tag, ErrorTag::Other(tag) if tag == "vendor-failure")
         ));
     }
 
@@ -2187,12 +2182,12 @@ mod tests {
         </rpc-error></rpc-reply>"#;
 
         let error = parse_strict(xml, "1").expect_err("hard error");
-        let RpcError::ServerError {
-            info: Some(info), ..
-        } = error
-        else {
+        let RpcError::ServerError(server_error) = error else {
             panic!("expected ServerError with error-info");
         };
+        let info = server_error
+            .info
+            .expect("expected ServerError with error-info");
         assert!(info.contains("xmlns:v=\"urn:vendor\""));
         assert!(info.contains("v:source=\"candidate\""));
         assert!(info.contains("x &amp; y"));
@@ -2249,12 +2244,14 @@ mod tests {
             <error-info xmlns:e="urn:error-detail"><e:detail/></error-info>
           </rpc-error>
         </rpc-reply>"#;
-        let RpcError::ServerError {
-            info: Some(info), ..
-        } = parse_strict(error, "ns-error").expect_err("hard error")
+        let RpcError::ServerError(server_error) =
+            parse_strict(error, "ns-error").expect_err("hard error")
         else {
             panic!("expected ServerError with error-info");
         };
+        let info = server_error
+            .info
+            .expect("expected ServerError with error-info");
         assert!(info.contains("xmlns:e=\"urn:error-detail\""));
         validate_xml_fragment(&info).expect("error-info keeps inherited namespace");
     }
@@ -2372,12 +2369,12 @@ mod tests {
           <error-severity>error</error-severity>
           <error-info><x><![CDATA[once < & >]]></x></error-info>
         </rpc-error></rpc-reply>"#;
-        let RpcError::ServerError {
-            info: Some(info), ..
-        } = parse_strict(error_xml, "cdata-error").expect_err("hard error")
+        let RpcError::ServerError(server_error) =
+            parse_strict(error_xml, "cdata-error").expect_err("hard error")
         else {
             panic!("expected ServerError with info");
         };
+        let info = server_error.info.expect("expected ServerError with info");
         assert_eq!(info.matches("once &lt; &amp; &gt;").count(), 1);
     }
 
@@ -2413,12 +2410,12 @@ mod tests {
              <error-info>{children}</error-info>\
              </rpc-error></rpc-reply>"
         );
-        let RpcError::ServerError {
-            info: Some(info), ..
-        } = parse_strict(&error_xml, "error-eol").expect_err("hard rpc-error")
+        let RpcError::ServerError(server_error) =
+            parse_strict(&error_xml, "error-eol").expect_err("hard rpc-error")
         else {
             panic!("expected error-info fragment");
         };
+        let info = server_error.info.expect("expected error-info fragment");
 
         for (path, fragment) in [("data", data), ("direct", direct), ("error-info", info)] {
             assert!(fragment.contains(&expected_text), "{path}: {fragment:?}");
@@ -2442,11 +2439,12 @@ mod tests {
              <error-message>{literal}&#xD;&#xA;&amp;😀</error-message>\
              </rpc-error></rpc-reply>"
         );
-        let RpcError::ServerError { message, .. } =
+        let RpcError::ServerError(server_error) =
             parse_strict(&text_xml, "text-eol").expect_err("hard rpc-error")
         else {
             panic!("expected server error");
         };
+        let message = server_error.message;
         assert_eq!(message, "a\nb\nc\nd\r\n&😀");
 
         let cdata_xml = format!(
@@ -2457,11 +2455,12 @@ mod tests {
              <error-message><![CDATA[{literal}&😀]]></error-message>\
              </rpc-error></rpc-reply>"
         );
-        let RpcError::ServerError { message, .. } =
+        let RpcError::ServerError(server_error) =
             parse_strict(&cdata_xml, "cdata-eol").expect_err("hard rpc-error")
         else {
             panic!("expected server error");
         };
+        let message = server_error.message;
         assert_eq!(message, "a\nb\nc\nd&😀");
     }
 
@@ -2474,9 +2473,10 @@ mod tests {
         </rpc-error></rpc-reply>"#;
 
         let error = parse_strict(xml, "1").expect_err("hard error");
-        let RpcError::ServerError { message, .. } = error else {
+        let RpcError::ServerError(server_error) = error else {
             panic!("expected ServerError");
         };
+        let message = server_error.message;
         assert!(message.is_empty());
     }
 
@@ -3060,12 +3060,12 @@ mod tests {
              <error-info><detail probe=\"{references}\"/></error-info>\
              </rpc-error></rpc-reply>"
         );
-        let RpcError::ServerError {
-            info: Some(info), ..
-        } = parse_strict(&error_xml, "error").expect_err("hard rpc-error")
+        let RpcError::ServerError(server_error) =
+            parse_strict(&error_xml, "error").expect_err("hard rpc-error")
         else {
             panic!("expected captured error-info");
         };
+        let info = server_error.info.expect("expected captured error-info");
 
         for (path, fragment, element) in [
             ("data", data.as_str(), b"item".as_slice()),
