@@ -703,8 +703,6 @@ SKIP_INTEGRATION=1 cargo test             # Skip tests requiring a device
 
 ### Known Issues
 
-- **RSA timing sidechannel (RUSTSEC-2023-0071)** — The `rsa` crate (transitive dependency via `russh → internal-russh-forked-ssh-key → rsa`) has a known timing sidechannel that could theoretically allow RSA key recovery. No upstream fix is available. **Mitigation:** Use Ed25519 or ECDSA keys instead of RSA for SSH authentication.
-
 - **Debug logs may contain file paths** — When SSH key file loading fails, the key file path is included in `tracing::debug!` output. This is not exposed at info/warn/error levels. **Mitigation:** Disable debug-level logging in production, or filter `rustnetconf::transport` logs.
 
 ### Security Features
@@ -723,18 +721,28 @@ SKIP_INTEGRATION=1 cargo test             # Skip tests requiring a device
 
 ### Known advisories
 
-- **RUSTSEC-2023-0071** (Marvin Attack, `rsa` crate timing side-channel)
-  is present in the dependency graph via
-  `russh → internal-russh-forked-ssh-key → rsa 0.10.0-rc.16`. No fixed
-  upstream release is available yet. The advisory is risk-accepted with
-  rationale in `.cargo/audit.toml` and CI re-checks on every run. It only
-  matters when an **RSA** SSH key is used for authentication — Ed25519
-  and ECDSA paths are unaffected. Use the mitigation in the next section.
+None currently suppressed — `.cargo/audit.toml` has an empty `ignore` list,
+and `cargo audit` plus `cargo deny` run on every CI build.
+
+**RUSTSEC-2023-0071** (Marvin Attack, `rsa` timing side-channel) was carried
+here until russh 0.62. It is now *absent from the graph*, not tolerated within
+it: russh gates `rsa` behind a non-default feature and this crate builds with
+`default-features = false`, so both of these come up empty:
+
+```bash
+grep '^name = "rsa"' Cargo.lock
+cargo tree --workspace --all-features -i rsa
+```
+
+The suppression was removed rather than left in place, so that a future
+dependency bump reintroducing `rsa` fails the audit loudly instead of passing
+under an ignore nobody re-reads.
 
 ### Security Best Practices
 
-- Use Ed25519 SSH keys (not RSA) for device authentication (also mitigates
-  RUSTSEC-2023-0071 above)
+- Use Ed25519 SSH keys (not RSA) for device authentication — smaller, faster,
+  constant-time by construction, and not exposed to the RSA timing
+  side-channel class of bug in the first place
 - Set `host_key_verification(HostKeyVerification::Fingerprint(...))` or `HostKeyVerification::KnownHosts(path)` in production — the default is `RejectAll` (fail closed), so the connection will refuse to complete until you choose a policy. For the CLI, set either `host_key_fingerprint = "SHA256:..."` or `known_hosts_path = "/path/to/known_hosts"` per device in `inventory.toml` (or `known_hosts_path` under `[defaults]` for fleet-wide pinning). See `examples/known_hosts.rs` for the `ssh-keyscan` workflow.
 - Set `.rpc_timeout(Duration::from_secs(30))` to prevent hanging on unresponsive devices
 - Prefer SSH agent auth over inline passwords
