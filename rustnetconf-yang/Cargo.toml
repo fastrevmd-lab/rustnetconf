@@ -28,3 +28,6 @@ serde_json = "1"
 
 [build-dependencies]
 yang2 = "0.18"
+
+[lints]
+workspace = true

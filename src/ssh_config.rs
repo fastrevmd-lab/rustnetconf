@@ -322,14 +322,24 @@ pub fn parse_proxy_jump(value: &str) -> Vec<JumpHostConfig> {
 /// doesn't start with `~`. Falls back to leaving the path untouched if
 /// `$HOME` is unset.
 fn expand_tilde(path: &str) -> String {
+    expand_tilde_with(path, std::env::var("HOME").ok().as_deref())
+}
+
+/// `expand_tilde` with the home directory supplied rather than read from the
+/// environment.
+///
+/// Split out so the expansion rules can be tested directly. The alternative —
+/// having tests set `HOME` around each assertion — needs `unsafe` under the
+/// 2024 edition and is not thread-safe against a parallel test runner.
+fn expand_tilde_with(path: &str, home: Option<&str>) -> String {
+    let Some(home) = home else {
+        return path.to_string();
+    };
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            return format!("{home}/{rest}");
-        }
-    } else if path == "~" {
-        if let Ok(home) = std::env::var("HOME") {
-            return home;
-        }
+        return format!("{home}/{rest}");
+    }
+    if path == "~" {
+        return home.to_string();
     }
     path.to_string()
 }
@@ -862,23 +872,23 @@ mod tests {
 
     #[test]
     fn expand_tilde_with_home() {
-        // Save & restore HOME to make this hermetic.
-        let prev = std::env::var("HOME").ok();
-        // SAFETY: tests run single-threaded by default; we restore HOME below.
-        unsafe {
-            std::env::set_var("HOME", "/home/test-user");
-        }
-        assert_eq!(expand_tilde("~/foo/bar"), "/home/test-user/foo/bar");
-        assert_eq!(expand_tilde("~"), "/home/test-user");
-        assert_eq!(expand_tilde("/abs/path"), "/abs/path");
-        assert_eq!(expand_tilde("relative"), "relative");
-        // SAFETY: restoring HOME after the test.
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
+        let home = Some("/home/test-user");
+        assert_eq!(
+            expand_tilde_with("~/foo/bar", home),
+            "/home/test-user/foo/bar"
+        );
+        assert_eq!(expand_tilde_with("~", home), "/home/test-user");
+        assert_eq!(expand_tilde_with("/abs/path", home), "/abs/path");
+        assert_eq!(expand_tilde_with("relative", home), "relative");
+        // A bare "~user" form is not expanded - only "~" and "~/".
+        assert_eq!(expand_tilde_with("~other/x", home), "~other/x");
+    }
+
+    #[test]
+    fn expand_tilde_without_home_is_identity() {
+        assert_eq!(expand_tilde_with("~/foo", None), "~/foo");
+        assert_eq!(expand_tilde_with("~", None), "~");
+        assert_eq!(expand_tilde_with("/abs", None), "/abs");
     }
 
     #[test]
@@ -896,21 +906,19 @@ mod tests {
 
     #[test]
     fn identity_file_tilde_expansion() {
-        let prev = std::env::var("HOME").ok();
-        unsafe {
-            std::env::set_var("HOME", "/home/u");
-        }
+        // Reads HOME rather than setting it: mutating the environment needs
+        // `unsafe` under the 2024 edition and races a parallel test runner.
+        // The expansion rules themselves are covered by the pure tests above;
+        // this one only asserts that `resolve` applies them at all.
+        let Ok(home) = std::env::var("HOME") else {
+            eprintln!("HOME unset - skipping identity_file_tilde_expansion");
+            return;
+        };
         let cfg =
             SshConfigFile::parse_str("Host r1\n  IdentityFile ~/.ssh/id_lab\n", None).unwrap();
         assert_eq!(
             cfg.resolve("r1").identity_file.as_deref(),
-            Some("/home/u/.ssh/id_lab")
+            Some(format!("{home}/.ssh/id_lab").as_str())
         );
-        unsafe {
-            match prev {
-                Some(v) => std::env::set_var("HOME", v),
-                None => std::env::remove_var("HOME"),
-            }
-        }
     }
 }
