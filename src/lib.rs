@@ -59,7 +59,7 @@ pub use rpc::RpcErrorInfo;
 pub use ssh_config::{ResolvedHost, SshConfigError, SshConfigFile};
 pub use types::{
     ConfigLocation, CopySource, Datastore, DefaultOperation, DeleteTarget, ErrorOption, LoadAction,
-    LoadFormat, OpenConfigurationMode, TestOption,
+    LoadFormat, OpenConfigurationMode, TestOption, WithDefaults,
 };
 
 #[cfg(feature = "tls")]

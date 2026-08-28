@@ -37,6 +37,8 @@ pub mod uri {
     pub const XPATH: &str = "urn:ietf:params:netconf:capability:xpath:1.0";
     /// URL capability (RFC 6241 §8.8) — `<url>` as a config source or target.
     pub const URL: &str = "urn:ietf:params:netconf:capability:url:1.0";
+    /// With-defaults capability (RFC 6243).
+    pub const WITH_DEFAULTS: &str = "urn:ietf:params:netconf:capability:with-defaults:1.0";
 }
 
 /// The negotiated NETCONF version for the session.
@@ -88,6 +90,48 @@ impl Capabilities {
             return Some(NetconfVersion::V1_0);
         }
         None
+    }
+
+    /// The `<with-defaults>` modes this device supports (RFC 6243 §4).
+    ///
+    /// The capability publishes a mandatory `basic-mode` plus an optional
+    /// `also-supported` list:
+    ///
+    /// ```text
+    /// ...:with-defaults:1.0?basic-mode=explicit&also-supported=report-all,trim
+    /// ```
+    ///
+    /// `basic-mode` is always supported, so the returned set is that mode
+    /// together with anything in `also-supported`. Returns an empty vector when
+    /// the device does not advertise the capability at all.
+    pub fn with_defaults_modes(&self) -> Vec<String> {
+        let Some(uri) = self.uris.iter().find(|u| u.starts_with(uri::WITH_DEFAULTS)) else {
+            return Vec::new();
+        };
+
+        let mut modes = Vec::new();
+        let Some((_, query)) = uri.split_once('?') else {
+            return modes;
+        };
+        for param in query.split('&') {
+            let Some((key, value)) = param.split_once('=') else {
+                continue;
+            };
+            match key {
+                "basic-mode" => modes.push(value.trim().to_string()),
+                "also-supported" => modes.extend(
+                    value
+                        .split(',')
+                        .map(|m| m.trim().to_string())
+                        .filter(|m| !m.is_empty()),
+                ),
+                _ => {}
+            }
+        }
+        modes.retain(|m| !m.is_empty());
+        modes.sort();
+        modes.dedup();
+        modes
     }
 
     /// Returns all raw capability URIs.
@@ -380,5 +424,48 @@ mod tests {
         // Standard URIs must survive normalization intact
         assert!(caps.supports(uri::BASE_1_0));
         assert!(caps.supports(uri::CANDIDATE));
+    }
+}
+
+#[cfg(test)]
+mod with_defaults_tests {
+    use super::Capabilities;
+
+    fn caps(uris: &[&str]) -> Capabilities {
+        Capabilities::new(uris.iter().map(|s| s.to_string()).collect(), Some(1))
+    }
+
+    #[test]
+    fn basic_mode_is_always_supported() {
+        let c = caps(&["urn:ietf:params:netconf:capability:with-defaults:1.0?basic-mode=explicit"]);
+        assert_eq!(c.with_defaults_modes(), vec!["explicit".to_string()]);
+    }
+
+    #[test]
+    fn also_supported_is_unioned_with_basic_mode() {
+        let c = caps(&[
+            "urn:ietf:params:netconf:capability:with-defaults:1.0?basic-mode=explicit&also-supported=report-all,trim",
+        ]);
+        let mut got = c.with_defaults_modes();
+        got.sort();
+        assert_eq!(got, vec!["explicit", "report-all", "trim"]);
+    }
+
+    #[test]
+    fn absent_capability_yields_no_modes() {
+        assert!(caps(&["urn:ietf:params:netconf:base:1.0"])
+            .with_defaults_modes()
+            .is_empty());
+    }
+
+    #[test]
+    fn capability_without_parameters_yields_no_modes() {
+        // Malformed per RFC 6243 (basic-mode is mandatory) - claim nothing
+        // rather than guessing a mode the device may not implement.
+        assert!(
+            caps(&["urn:ietf:params:netconf:capability:with-defaults:1.0"])
+                .with_defaults_modes()
+                .is_empty()
+        );
     }
 }

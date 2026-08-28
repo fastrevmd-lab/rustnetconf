@@ -20,7 +20,7 @@ use crate::transport::ssh::{
 #[cfg(feature = "tls")]
 use crate::transport::tls::{TlsConfig, TlsTransport};
 use crate::transport::Transport;
-use crate::types::{ConfigLocation, CopySource, DeleteTarget};
+use crate::types::{ConfigLocation, CopySource, DeleteTarget, WithDefaults};
 use crate::types::{
     Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,
     TestOption,
@@ -750,6 +750,55 @@ impl Client {
     /// Fetch operational and configuration data using an XPath filter.
     pub async fn get_xpath(&mut self, filter: &XPathFilter) -> Result<String, NetconfError> {
         self.session.get_xpath(filter).await
+    }
+
+    /// Fetch configuration with an explicit `<with-defaults>` mode (RFC 6243).
+    ///
+    /// ```no_run
+    /// # use rustnetconf::{Client, Datastore, WithDefaults};
+    /// # async fn demo(client: &mut Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Omit leaves sitting at their YANG default, so a diff cannot mistake
+    /// // "absent" for "defaulted".
+    /// let xml = client
+    ///     .get_config_with_defaults(Datastore::Running, None, WithDefaults::Trim)
+    ///     .await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn get_config_with_defaults(
+        &mut self,
+        source: Datastore,
+        filter: Option<&str>,
+        mode: WithDefaults,
+    ) -> Result<String, NetconfError> {
+        self.session
+            .get_config_with_defaults(source, filter, mode)
+            .await
+    }
+
+    /// Fetch operational and configuration data with a `<with-defaults>` mode.
+    pub async fn get_with_defaults(
+        &mut self,
+        filter: Option<&str>,
+        mode: WithDefaults,
+    ) -> Result<String, NetconfError> {
+        self.session.get_with_defaults(filter, mode).await
+    }
+
+    /// `copy-config` with an RFC 6243 `<with-defaults>` mode.
+    pub async fn copy_config_with_defaults(
+        &mut self,
+        target: &ConfigLocation,
+        source: &CopySource,
+        mode: WithDefaults,
+    ) -> Result<(), NetconfError> {
+        self.session
+            .copy_config_with_defaults(target, source, mode)
+            .await
+    }
+
+    /// The `<with-defaults>` modes this device advertises (empty if unsupported).
+    pub fn with_defaults_modes(&self) -> Vec<String> {
+        self.session.with_defaults_modes()
     }
 
     /// Copy a configuration from one location to another (RFC 6241 §7.3).

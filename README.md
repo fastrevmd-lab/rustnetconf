@@ -284,7 +284,7 @@ audit (RNC-SEC-001..006 + CI hardening). Merged via PR #27.
 | RFC 5277 | Event Notifications | ✅ supported — tested on Junos 24.4 vSRX (subscription + capability; interleave limited by device) |
 | RFC 5717 | Partial Lock RPC | 💡 planned |
 | RFC 8071 | NETCONF Call Home | 💡 planned |
-| RFC 6243 | With-defaults Capability | 💡 planned |
+| RFC 6243 | With-defaults Capability | ✅ supported — mode gated on the device's `basic-mode`/`also-supported` list |
 | RFC 6022 | YANG Module for NETCONF Monitoring | 💡 planned |
 | RFC 8526 | NETCONF Extensions for NMDA | 💡 planned |
 | RFC 6470 | NETCONF Base Notifications | 💡 planned |
@@ -544,6 +544,7 @@ let config = conn.get_config(Datastore::Running).await?;
 - **SSH bastion support** — `ProxyJump` (multi-hop), `ProxyCommand` (shell-escaped), and OpenSSH `~/.ssh/config` alias resolution
 - **NETCONF 1.0 + 1.1** — EOM and chunked framing with auto-negotiation
 - **All core RPCs** — get, get-config, edit-config, copy-config, delete-config, lock/unlock, commit, confirmed-commit, cancel-commit, validate, close/kill-session, discard-changes
+- **With-defaults (RFC 6243)** — `report-all`, `report-all-tagged`, `trim`, `explicit`, on get, get-config and copy-config, each gated on the device's advertised `basic-mode`/`also-supported` list. Without this, an absent leaf and a leaf sitting at its YANG default are indistinguishable, so a diff shows phantom changes on devices that report defaults and misses them on devices that don't
 - **Subtree and XPath filters** — `SubtreeFilter` builds subtree filters; `XPathFilter` builds XPath ones (RFC 6241 §6.4) with namespace binding, gated on the device advertising `:xpath:1.0` so an unsupported filter fails loudly instead of silently returning the whole datastore
 - **Confirmed commit** — auto-rollback safety net (RFC 6241 §8.4)
 - **Event notifications** — `create-subscription`, inline notification demux, buffered drain/recv API (RFC 5277)
