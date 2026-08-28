@@ -6,6 +6,8 @@
 //! All RPCs use a prefixed namespace (`nc:`) instead of a default namespace
 //! to avoid `xmlns=""` on child elements, which Junos 24.4 rejects.
 
+use crate::error::NetconfError;
+use crate::rpc::filter::XPathFilter;
 use crate::types::{
     Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,
     TestOption,
@@ -25,6 +27,39 @@ pub(crate) fn escape_xml_text(value: &str) -> String {
         }
     }
     escaped
+}
+
+/// Escape for an XML attribute value, preserving significant whitespace.
+///
+/// [`escape_xml_attr`] is fine for values that contain no tabs or newlines, but
+/// an XML parser applies *attribute-value normalization* (XML 1.0 §3.3.3) and
+/// folds a literal TAB, LF, or CR in an attribute into a space before the value
+/// is ever seen. For an XPath `select` expression that is not cosmetic: a
+/// newline inside a string literal would silently become a different query.
+/// Emitting them as numeric character references survives normalization.
+///
+/// Returns `None` if the value contains any character XML 1.0 cannot represent
+/// — those cannot be escaped, only rejected. This uses the same
+/// `is_valid_xml_char` the reply parser validates incoming documents with, so
+/// the two directions cannot drift: C0 controls other than TAB/LF/CR, and also
+/// `U+FFFE`/`U+FFFF`, which are excluded from the `Char` production.
+pub(crate) fn escape_xml_attr_preserving_ws(value: &str) -> Option<String> {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&apos;"),
+            '\t' => escaped.push_str("&#9;"),
+            '\n' => escaped.push_str("&#10;"),
+            '\r' => escaped.push_str("&#13;"),
+            c if !crate::rpc::reply::lexical::is_valid_xml_char(c) => return None,
+            c => escaped.push(c),
+        }
+    }
+    Some(escaped)
 }
 
 /// Escape a string for safe inclusion in an XML attribute value.
@@ -68,6 +103,44 @@ pub fn get_config_xml(message_id: &str, source: Datastore, filter: Option<&str>)
 </nc:rpc>"#,
         source = source.as_xml_tag(),
     )
+}
+
+/// Build a `<get-config>` RPC with an XPath filter (RFC 6241 §6.4).
+///
+/// Unlike the subtree form, the expression is carried in a `select` attribute
+/// and is attribute-escaped by [`XPathFilter::to_filter_element`], so it does
+/// not need to be pre-validated as an XML fragment.
+pub fn get_config_xpath_xml(
+    message_id: &str,
+    source: Datastore,
+    filter: &XPathFilter,
+) -> Result<String, NetconfError> {
+    let safe_id = escape_xml_attr(message_id);
+    let filter_xml = filter.to_filter_element("nc:")?;
+    Ok(format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:get-config>
+    <nc:source>
+      <nc:{source}/>
+    </nc:source>{filter_xml}
+  </nc:get-config>
+</nc:rpc>"#,
+        source = source.as_xml_tag(),
+    ))
+}
+
+/// Build a `<get>` RPC with an XPath filter (RFC 6241 §6.4).
+pub fn get_xpath_xml(message_id: &str, filter: &XPathFilter) -> Result<String, NetconfError> {
+    let safe_id = escape_xml_attr(message_id);
+    let filter_xml = filter.to_filter_element("nc:")?;
+    Ok(format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:get>{filter_xml}
+  </nc:get>
+</nc:rpc>"#
+    ))
 }
 
 /// Generate a `<get>` RPC request.
@@ -472,6 +545,28 @@ mod tests {
         assert!(xml.contains("<nc:running/>"));
         assert!(xml.contains("<nc:get-config>"));
         assert!(!xml.contains("<nc:filter"));
+    }
+
+    #[test]
+    fn test_get_config_xpath_emits_type_and_source() {
+        let f = XPathFilter::new("/if:interfaces")
+            .namespace("if", "urn:ietf:params:xml:ns:yang:ietf-interfaces");
+        let xml = get_config_xpath_xml("7", Datastore::Running, &f).unwrap();
+        assert!(xml.contains(r#"type="xpath""#), "got {xml}");
+        assert!(xml.contains(r#"select="/if:interfaces""#), "got {xml}");
+        assert!(xml.contains("<nc:running/>"), "got {xml}");
+        assert!(xml.contains(r#"message-id="7""#), "got {xml}");
+        // XPath filters are attribute-only: no child content in <filter>.
+        assert!(xml.contains("/>"), "filter should be self-closing: {xml}");
+        assert!(!xml.contains("type=\"subtree\""), "got {xml}");
+    }
+
+    #[test]
+    fn test_get_xpath_has_no_source_element() {
+        let xml = get_xpath_xml("8", &XPathFilter::new("/x")).unwrap();
+        assert!(xml.contains("<nc:get>"), "got {xml}");
+        assert!(!xml.contains("<nc:source>"), "get takes no source: {xml}");
+        assert!(xml.contains(r#"type="xpath""#), "got {xml}");
     }
 
     #[test]

@@ -10,6 +10,7 @@ use crate::capability::Capabilities;
 use crate::error::NetconfError;
 use crate::facts::Facts;
 use crate::notification::Notification;
+use crate::rpc::filter::XPathFilter;
 use crate::rpc::RpcErrorInfo;
 use crate::session::Session;
 use crate::ssh_config::{SshConfigError, SshConfigFile};
@@ -721,6 +722,33 @@ impl Client {
     /// Fetch operational and configuration data.
     pub async fn get(&mut self, filter: Option<&str>) -> Result<String, NetconfError> {
         self.session.get(filter).await
+    }
+
+    /// Fetch configuration using an XPath filter (RFC 6241 §6.4).
+    ///
+    /// Errors with [`ProtocolError::CapabilityMissing`](crate::error::ProtocolError::CapabilityMissing)
+    /// if the device did not advertise `:xpath:1.0`.
+    ///
+    /// ```no_run
+    /// # use rustnetconf::{Client, Datastore};
+    /// # use rustnetconf::rpc::filter::XPathFilter;
+    /// # async fn demo(client: &mut Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let filter = XPathFilter::new("/if:interfaces/if:interface[if:name='ge-0/0/0']")
+    ///     .namespace("if", "urn:ietf:params:xml:ns:yang:ietf-interfaces");
+    /// let xml = client.get_config_xpath(Datastore::Running, &filter).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn get_config_xpath(
+        &mut self,
+        source: Datastore,
+        filter: &XPathFilter,
+    ) -> Result<String, NetconfError> {
+        self.session.get_config_xpath(source, filter).await
+    }
+
+    /// Fetch operational and configuration data using an XPath filter.
+    pub async fn get_xpath(&mut self, filter: &XPathFilter) -> Result<String, NetconfError> {
+        self.session.get_xpath(filter).await
     }
 
     /// Start building an edit-config operation.

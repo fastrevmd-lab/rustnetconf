@@ -281,7 +281,7 @@ fn is_ncname_char(value: char) -> bool {
         )
 }
 
-pub(super) fn is_valid_xml_char(value: char) -> bool {
+pub(crate) fn is_valid_xml_char(value: char) -> bool {
     matches!(
         value as u32,
         0x9 | 0xA | 0xD | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10FFFF

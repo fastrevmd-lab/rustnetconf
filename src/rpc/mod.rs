@@ -6,7 +6,7 @@
 pub mod filter;
 pub mod operations;
 
-mod reply;
+pub(crate) mod reply;
 
 pub use reply::{parse_rpc_reply, RpcErrorInfo, RpcReply};
 
