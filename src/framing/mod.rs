@@ -184,7 +184,7 @@ impl StreamDecoder {
 /// entire message is buffered, so peak memory is the reply size regardless of
 /// what the caller does with it.
 #[derive(Debug, PartialEq, Eq)]
-pub enum FramePart {
+pub(crate) enum FramePart {
     /// Payload ready to emit now, plus the input bytes consumed producing it.
     ///
     /// `consumed` may exceed `payload.len()` — framing overhead (chunk headers)

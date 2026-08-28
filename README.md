@@ -50,7 +50,19 @@ Consumers that need those should use a dedicated SSH crate alongside this one. A
 
 ## What's New in v0.16.0
 
-Feature release, and a **drop-in upgrade from 0.15.0** — nothing in the public API was removed or changed shape, 36 items were added. `rustnetconf-yang` takes a minor bump to 0.2.0 because #82 gave it a real feature flag; `rustnetconf-cli` (0.3.7) has no source changes and bumps only to carry the new `rustnetconf = "0.16"` requirement.
+Feature release. Nothing was removed and no existing item changed shape; 36 were added. `rustnetconf-yang` takes a minor bump to 0.2.0 because #81 gave it a real feature flag; `rustnetconf-cli` (0.3.7) has no source changes and bumps only to carry the new `rustnetconf = "0.16"` requirement.
+
+**One source-level break.** `ProtocolError` gains an `InvalidValue` variant, and the enum is not `#[non_exhaustive]`, so downstream code matching it exhaustively needs a new arm or a wildcard:
+
+```rust
+match err {
+    ProtocolError::CapabilityMissing { .. } => ...,
+    // ...
+    _ => ...,  // add this, or an explicit InvalidValue arm
+}
+```
+
+Nothing else in the crate is affected — every other new enum (`WithDefaults`, `DeleteTarget`, `CopySource`, `ConfigLocation`) is new, not an addition to an existing one. No public error enum is `#[non_exhaustive]` today, so variant additions will keep landing as breaks until that changes.
 
 ### Protocol coverage
 
