@@ -747,6 +747,57 @@ impl Client {
         self.session.get(filter).await
     }
 
+    /// Stream a `<get-config>` reply into `sink` instead of buffering it.
+    ///
+    /// Peak memory becomes one transport read plus one frame chunk rather than
+    /// the whole reply, so a configuration larger than
+    /// [`max_read_buffer`](Self::max_read_buffer) can be fetched — which
+    /// [`get_config`](Self::get_config) cannot do at any ceiling, since it holds
+    /// the response entire.
+    ///
+    /// The caller receives the raw `<rpc-reply>` document, **not** the unwrapped
+    /// `<data>` contents. Vendor unwrapping needs `rfind` over the whole string
+    /// and reply repair decides on a closed payload, so neither can run on a
+    /// stream. Parse the envelope yourself; `<rpc-error>` replies stream through
+    /// as documents rather than becoming `Err`.
+    ///
+    /// Returns the number of bytes written.
+    ///
+    /// ```no_run
+    /// # use rustnetconf::{Client, Datastore};
+    /// # async fn demo(client: &mut Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut file = tokio::fs::File::create("running.xml").await?;
+    /// let bytes = client.get_config_streaming(Datastore::Running, None, &mut file).await?;
+    /// eprintln!("wrote {bytes} bytes");
+    /// # Ok(()) }
+    /// ```
+    pub async fn get_config_streaming<W>(
+        &mut self,
+        source: Datastore,
+        filter: Option<&str>,
+        sink: &mut W,
+    ) -> Result<usize, NetconfError>
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        self.session
+            .get_config_streaming(source, filter, sink)
+            .await
+    }
+
+    /// Stream a `<get>` reply into `sink`. See
+    /// [`get_config_streaming`](Self::get_config_streaming).
+    pub async fn get_streaming<W>(
+        &mut self,
+        filter: Option<&str>,
+        sink: &mut W,
+    ) -> Result<usize, NetconfError>
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        self.session.get_streaming(filter, sink).await
+    }
+
     /// Fetch configuration using an XPath filter (RFC 6241 §6.4).
     ///
     /// Errors with [`ProtocolError::CapabilityMissing`](crate::error::ProtocolError::CapabilityMissing)

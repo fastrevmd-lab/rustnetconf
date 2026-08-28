@@ -15,7 +15,7 @@ use crate::framing::Framer;
 
 /// Maximum allowed chunk size (4 MB). Prevents memory exhaustion from
 /// malformed chunk headers advertising absurd lengths.
-const MAX_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
 /// End-of-chunks marker.
 const END_OF_CHUNKS: &[u8] = b"\n##\n";
@@ -62,11 +62,16 @@ impl Framer for ChunkedFramer {
                 // Detect EOM-framed data arriving when chunked was negotiated.
                 // This is a known firmware bug on some devices (e.g., certain Junos versions)
                 // that advertise :base:1.1 but actually send EOM-framed responses.
-                if looks_like_eom_data(&buffer[pos..]) {
-                    return Err(FramingError::Mismatch {
-                        advertised: "1.1 (chunked)".to_string(),
-                        actual: "1.0 (EOM)".to_string(),
-                    });
+                match eom_likeness(&buffer[pos..]) {
+                    EomLikeness::Yes => {
+                        return Err(FramingError::Mismatch {
+                            advertised: "1.1 (chunked)".to_string(),
+                            actual: "1.0 (EOM)".to_string(),
+                        });
+                    }
+                    // Too little to tell a truncated `<?xml` from real garbage.
+                    EomLikeness::Undecided => return Ok(None),
+                    EomLikeness::No => {}
                 }
                 return Err(FramingError::Invalid(format!(
                     "expected chunk header at position {pos}, got {:?}",
@@ -141,25 +146,65 @@ impl Framer for ChunkedFramer {
 
 /// Heuristic: does this buffer look like EOM-framed data rather than chunked?
 /// Checks for XML start (`<?xml` or `<rpc`) or the EOM delimiter `]]>]]>`.
-fn looks_like_eom_data(data: &[u8]) -> bool {
-    if data.is_empty() {
-        return false;
-    }
-    // Skip leading whitespace
-    let trimmed = match data.iter().position(|&b| !b.is_ascii_whitespace()) {
-        Some(pos) => &data[pos..],
-        None => return false,
+/// Whether a buffer that is not a chunk header looks like EOM-framed data.
+///
+/// Three-valued on purpose. A transport read may split anywhere, so a buffer
+/// holding only `<?` or `<r` is not yet distinguishable from the `<?xml` /
+/// `<rpc` that identifies the known firmware bug. Answering `No` there would
+/// report a generic parse failure for what is actually a framing mismatch,
+/// and the caller keys its recovery off that distinction.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum EomLikeness {
+    /// A recognised EOM marker is present.
+    Yes,
+    /// Cannot be EOM-framed data.
+    No,
+    /// Could still become a marker once more bytes arrive.
+    Undecided,
+}
+
+pub(crate) fn eom_likeness(data: &[u8]) -> EomLikeness {
+    const MARKERS: [&[u8]; 3] = [b"<?xml", b"<rpc", b"<!--"];
+    /// Bound on how long the answer may stay Undecided. The longest marker is
+    /// five bytes, plus slack for leading whitespace.
+    ///
+    /// Only the ambiguous answer needs bounding: Yes and No both make the
+    /// caller stop, so their scans run once. Undecided is retried after every
+    /// read without consuming anything, so leaving it unbounded lets a peer
+    /// dribble whitespace, rescan a growing buffer each time, and pin the
+    /// caller until the read ceiling.
+    const MAX_AMBIGUOUS: usize = 16;
+
+    let too_long_to_be_ambiguous = data.len() > MAX_AMBIGUOUS;
+
+    // All whitespace: nothing to judge yet, and no marker to find.
+    let Some(first) = data.iter().position(|&b| !b.is_ascii_whitespace()) else {
+        return if too_long_to_be_ambiguous {
+            EomLikeness::No
+        } else {
+            EomLikeness::Undecided
+        };
     };
-    // XML document or element start
-    if trimmed.starts_with(b"<?xml") || trimmed.starts_with(b"<rpc") || trimmed.starts_with(b"<!--")
-    {
-        return true;
+    let trimmed = &data[first..];
+
+    for marker in MARKERS {
+        if trimmed.starts_with(marker) {
+            return EomLikeness::Yes;
+        }
+        // A truncated read of this marker — wait rather than misclassify.
+        if marker.starts_with(trimmed) {
+            return if too_long_to_be_ambiguous {
+                EomLikeness::No
+            } else {
+                EomLikeness::Undecided
+            };
+        }
     }
-    // EOM delimiter anywhere in the buffer
+    // EOM delimiter anywhere in the buffer.
     if data.windows(6).any(|w| w == b"]]>]]>") {
-        return true;
+        return EomLikeness::Yes;
     }
-    false
+    EomLikeness::No
 }
 
 #[cfg(test)]
@@ -325,6 +370,45 @@ mod tests {
             matches!(err, FramingError::Mismatch { .. }),
             "expected FramingError::Mismatch, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn test_decode_waits_for_a_split_eom_prefix() {
+        // A transport read may end anywhere. `<?` alone must not be reported as
+        // a parse failure — once the rest arrives it is the framing mismatch.
+        let framer = ChunkedFramer::new();
+        for partial in [&b"<?"[..], b"<r", b"<!", b"<", b"  <?xm"] {
+            assert!(
+                matches!(framer.decode(partial), Ok(None)),
+                "expected NeedMore for {partial:?}, got {:?}",
+                framer.decode(partial)
+            );
+        }
+        let err = framer.decode(b"<?xml ").unwrap_err();
+        assert!(
+            matches!(err, FramingError::Mismatch { .. }),
+            "expected Mismatch once the prefix completes, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_eom_likeness_rejects_non_prefixes() {
+        assert_eq!(eom_likeness(b"<x"), EomLikeness::No);
+        assert_eq!(eom_likeness(b"garbage"), EomLikeness::No);
+        assert_eq!(eom_likeness(b"\x00\x01"), EomLikeness::No);
+        assert_eq!(eom_likeness(b"   "), EomLikeness::Undecided);
+        // Bounded: a whitespace flood must resolve rather than stay ambiguous
+        // while every retry rescans a growing buffer.
+        assert_eq!(eom_likeness(&[b' '; 64]), EomLikeness::No);
+        assert_eq!(eom_likeness(&[b'\n'; 17]), EomLikeness::No);
+        // ...but the cap must not blind the classifier to a marker or a
+        // delimiter sitting past it. Both are definite answers.
+        let mut padded = vec![b' '; 32];
+        padded.extend_from_slice(b"<?xml version=\"1.0\"?>");
+        assert_eq!(eom_likeness(&padded), EomLikeness::Yes);
+        let mut padded = vec![b' '; 32];
+        padded.extend_from_slice(b"garbage]]>]]>");
+        assert_eq!(eom_likeness(&padded), EomLikeness::Yes);
     }
 
     #[test]

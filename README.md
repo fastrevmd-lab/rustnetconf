@@ -548,6 +548,12 @@ let config = conn.get_config(Datastore::Running).await?;
 - **Subtree and XPath filters** — `SubtreeFilter` builds subtree filters; `XPathFilter` builds XPath ones (RFC 6241 §6.4) with namespace binding, gated on the device advertising `:xpath:1.0` so an unsupported filter fails loudly instead of silently returning the whole datastore
 - **Confirmed commit** — auto-rollback safety net (RFC 6241 §8.4)
 - **Event notifications** — `create-subscription`, inline notification demux, buffered drain/recv API (RFC 5277)
+- **Streaming replies** — `get_config_streaming` / `get_streaming` write the
+  reply into any `AsyncWrite` as it arrives, so peak memory is one read plus
+  one frame chunk instead of the whole response. Lets you fetch a config
+  larger than the read ceiling, which the buffered call cannot do at any
+  setting. The caller gets the raw `<rpc-reply>` — vendor unwrapping and
+  reply repair both need the complete document, so neither runs on a stream
 - **RPC timeout** — configurable per-session deadline prevents indefinite blocking on unresponsive devices
 - **XML fragment validation** — user-provided RPC content is validated before insertion to prevent XML injection
 - **CommitUnknown detection** — distinguishes "commit failed" from "maybe committed, connection lost"

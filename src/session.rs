@@ -26,7 +26,7 @@ use crate::error::{FramingError, NetconfError, ProtocolError, TransportError};
 use crate::facts::Facts;
 use crate::framing::chunked::ChunkedFramer;
 use crate::framing::eom::EomFramer;
-use crate::framing::Framer;
+use crate::framing::{FramePart, Framer, StreamDecoder};
 use crate::notification::{self, MessageKind, Notification};
 use crate::rpc;
 use crate::rpc::filter::XPathFilter;
@@ -103,6 +103,8 @@ pub struct Session {
     /// Set before a `<partial-lock>` is written and cleared only once a
     /// `lock-id` has been parsed from the reply. See [`Session::is_alive`].
     partial_lock_uncertain: bool,
+    /// Set while a streamed reply is partially drained. See `stream_rpc`.
+    stream_incomplete: bool,
     /// True if this session may have left uncommitted changes in the shared
     /// candidate datastore. Used to decide whether to send `<discard-changes/>`
     /// on close.
@@ -134,6 +136,7 @@ impl Session {
             rpc_timeout: None,
             max_read_buffer: MAX_READ_BUFFER,
             partial_lock_uncertain: false,
+            stream_incomplete: false,
             candidate_dirty: false,
         }
     }
@@ -384,7 +387,9 @@ impl Session {
     ///
     /// Fast in-memory check — does not send any RPC.
     pub fn is_alive(&self) -> bool {
-        self.state == SessionState::Established && !self.partial_lock_uncertain
+        self.state == SessionState::Established
+            && !self.partial_lock_uncertain
+            && !self.stream_incomplete
     }
 
     /// Probe the session by sending a lightweight RPC.
@@ -624,6 +629,11 @@ impl Session {
 
     /// Ensure the session is established before sending RPCs.
     fn ensure_established(&self) -> Result<(), NetconfError> {
+        // A partially-drained stream leaves a suffix of someone else's reply in
+        // the buffer; the next RPC would parse that as its own response.
+        if self.stream_incomplete {
+            return Err(ProtocolError::SessionExpired.into());
+        }
         match self.state {
             SessionState::Established => Ok(()),
             SessionState::Closed => Err(ProtocolError::SessionClosed.into()),
@@ -958,6 +968,391 @@ impl Session {
         .into())
     }
 
+    /// Stream a `<get-config>` reply into `sink` instead of buffering it.
+    ///
+    /// Peak memory becomes one transport read plus one frame chunk, rather than
+    /// the whole reply. That is the point: [`get_config`](Self::get_config)
+    /// accumulates the entire response before returning it, so fetching a large
+    /// configuration costs its size in resident memory even if the caller only
+    /// writes it to a file.
+    ///
+    /// # What the caller receives
+    ///
+    /// The raw `<rpc-reply>` document, verbatim. Deliberately *not* the unwrapped
+    /// `<data>` contents that `get_config` returns, because neither of the two
+    /// transformations that produce those can run on a stream:
+    ///
+    /// - `VendorProfile::unwrap_config` locates the wrapper with
+    ///   `rfind("</configuration>")`, which needs the whole string
+    /// - the reply-repair layer decides on a *closed* payload — the SRX345
+    ///   `<ok/>`-after-`<commit-results>` tolerance is a judgement about a
+    ///   complete document, and cannot be made retroactively
+    ///
+    /// So a caller streaming a reply parses the envelope themselves. That is the
+    /// honest trade for constant memory, and it is why this is a separate method
+    /// rather than a flag on the existing one.
+    ///
+    /// `<rpc-error>` replies are streamed too, not turned into `Err` — detecting
+    /// one requires parsing the envelope, which is exactly what this method does
+    /// not do. Check the document you receive.
+    pub async fn get_config_streaming<W>(
+        &mut self,
+        source: Datastore,
+        filter: Option<&str>,
+        sink: &mut W,
+    ) -> Result<usize, NetconfError>
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        if let Some(filter_xml) = filter {
+            rpc::validate_xml_fragment(filter_xml)?;
+        }
+        let msg_id = self.next_message_id();
+        let xml = operations::get_config_xml(&msg_id, source, filter);
+        self.stream_rpc(&xml, &msg_id, sink).await
+    }
+
+    /// Stream a `<get>` reply into `sink`. See
+    /// [`get_config_streaming`](Self::get_config_streaming) for what the caller
+    /// receives and why.
+    pub async fn get_streaming<W>(
+        &mut self,
+        filter: Option<&str>,
+        sink: &mut W,
+    ) -> Result<usize, NetconfError>
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        if let Some(filter_xml) = filter {
+            rpc::validate_xml_fragment(filter_xml)?;
+        }
+        let msg_id = self.next_message_id();
+        let xml = operations::get_xml(&msg_id, filter);
+        self.stream_rpc(&xml, &msg_id, sink).await
+    }
+
+    /// Send `xml` and write the framed reply to `sink` as it arrives.
+    ///
+    /// Returns the number of payload bytes written.
+    async fn stream_rpc<W>(
+        &mut self,
+        xml: &str,
+        message_id: &str,
+        sink: &mut W,
+    ) -> Result<usize, NetconfError>
+    where
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        use tokio::io::AsyncWriteExt;
+
+        // Checked before the keepalive probe. A device that does not answer RPCs
+        // on a subscribed session would otherwise hang on the probe, or have the
+        // session marked closed, instead of getting this immediate rejection.
+        //
+        // Streaming reads one frame off the wire and hands it straight to the
+        // caller — it cannot demultiplex. With a subscription active, an RFC
+        // 5277 notification can arrive before the reply, and this would return
+        // the notification as the result while the real reply stayed queued.
+        // `send_rpc_raw` classifies frames and buffers notifications; there is
+        // no way to do that while streaming, so refuse instead of racing.
+        if self.has_subscription {
+            return Err(ProtocolError::Xml(
+                "streaming replies is not supported while a notification subscription \
+                 is active: notifications and replies cannot be told apart without \
+                 buffering the frame"
+                    .to_string(),
+            )
+            .into());
+        }
+
+        // Refused while the candidate holds uncommitted edits.
+        //
+        // An interrupted stream poisons the session, and a poisoned session
+        // rejects `discard_changes` — while `close_session` swallows that
+        // failure and drops the transport. On a shared Junos candidate that
+        // leaves another operator's next lock staring at edits nobody owns.
+        // Streaming is a read; requiring a clean candidate for it costs callers
+        // nothing and keeps the cleanup path that #71 and #74 spent four
+        // revisions getting right.
+        if self.candidate_dirty {
+            return Err(ProtocolError::Xml(
+                "cannot stream a reply while the candidate is dirty: an interrupted \
+                 stream would block the discard that cleans it up"
+                    .to_string(),
+            )
+            .into());
+        }
+
+        self.keepalive_check().await?;
+        self.ensure_established()?;
+
+        let framed = self.framer.encode(xml);
+        self.transport.write_all(&framed).await?;
+
+        // Set before the first read and cleared only on a complete frame.
+        //
+        // Once any part has been drained, the buffer holds a *suffix* of this
+        // reply. If the future is cancelled or the sink errors there, the next
+        // RPC on this session parses that suffix as its own response and fails —
+        // and a pooled connection would be handed to someone else in that state.
+        // Nothing after an await runs when a future is dropped, so this has to
+        // be set first, exactly as the partial-lock path does.
+        self.stream_incomplete = true;
+
+        // One deadline for the whole reply, not one per read. A peer that drips
+        // a byte before each individual timeout expires would otherwise reset it
+        // forever and stream indefinitely under a configured `rpc_timeout`; the
+        // buffered path bounds the entire loop, so this does too.
+        let deadline = self.rpc_timeout.map(|t| tokio::time::Instant::now() + t);
+
+        // Chunk-granularity streaming needs state the `Framer` trait cannot
+        // hold, and without it the chunked path does not stream at all: this
+        // crate's own encoder emits one chunk per message, so an all-or-nothing
+        // chunk decoder buffers the entire reply and trips the ceiling before a
+        // byte reaches the sink.
+        let mut decoder = StreamDecoder::for_version(self.version == Some(NetconfVersion::V1_1));
+
+        let mut written = 0usize;
+        let mut temp = vec![0u8; READ_BUF_SIZE];
+        // Held back until the reply's message-id has been checked. A prior RPC
+        // that was cancelled or timed out can leave its reply queued, and
+        // emitting that to the sink would hand the caller stale XML while the
+        // requested reply stayed unread. `send_rpc_raw` discards mismatched
+        // frames; this does the same, it just has to peek first.
+        //
+        // Bounded: `message-id` is an attribute on the opening `<rpc-reply>`, so
+        // it is within the first few hundred bytes of any real reply. If it has
+        // not appeared by then the frame is not one we can verify, and is
+        // discarded rather than trusted.
+        const ID_PEEK_LIMIT: usize = 8192;
+        let mut prefix: Vec<u8> = Vec::new();
+        let mut verified = false;
+        let mut discarding = false;
+        // Same bound `send_rpc_raw` applies. Without it a peer that keeps
+        // sending frames for other message-ids holds this call open forever
+        // whenever no `rpc_timeout` is configured.
+        let mut stale_frames = 0usize;
+        let mut last_stale = String::new();
+        // Bytes at the front of `read_buffer` already handed to the decoder.
+        // Draining per part memmoves everything behind it each time, so a reply
+        // delivered as many small chunks would be quadratic; advance an offset
+        // and compact once per read instead.
+        let mut offset = 0usize;
+
+        loop {
+            loop {
+                match decoder.decode_part(&self.read_buffer[offset..])? {
+                    FramePart::Data { payload, consumed } => {
+                        offset += consumed;
+                        // A chunk header carries no payload of its own.
+                        if discarding || payload.is_empty() {
+                            continue;
+                        }
+                        if verified {
+                            sink.write_all(&payload).await.map_err(TransportError::Io)?;
+                            written += payload.len();
+                            continue;
+                        }
+                        prefix.extend_from_slice(&payload);
+                        match Self::reply_message_id(&prefix) {
+                            Some(found) if found == message_id => {
+                                verified = true;
+                                sink.write_all(&prefix).await.map_err(TransportError::Io)?;
+                                written += prefix.len();
+                                prefix.clear();
+                            }
+                            Some(other) => {
+                                // A stale reply. Swallow the rest of this frame
+                                // and keep waiting for ours.
+                                last_stale = other;
+                                discarding = true;
+                                prefix.clear();
+                            }
+                            None if prefix.len() > ID_PEEK_LIMIT => {
+                                discarding = true;
+                                prefix.clear();
+                            }
+                            None => {}
+                        }
+                    }
+                    FramePart::End { consumed } => {
+                        offset += consumed;
+                        if discarding || !verified {
+                            stale_frames += 1;
+                            if stale_frames > MAX_STALE_DRAIN {
+                                tracing::error!(
+                                    expected = %message_id,
+                                    actual = %last_stale,
+                                    "streaming: exceeded max drain attempts ({MAX_STALE_DRAIN})"
+                                );
+                                return Err(crate::error::RpcError::MessageIdMismatch {
+                                    expected: message_id.to_string(),
+                                    actual: last_stale,
+                                }
+                                .into());
+                            }
+                            // That frame was not ours. Reset and wait for the
+                            // next one; the buffer is back at a boundary.
+                            discarding = false;
+                            verified = false;
+                            prefix.clear();
+                            continue;
+                        }
+                        self.read_buffer.drain(..offset);
+                        // Cleared before the flush: the terminator is consumed,
+                        // so the session is at a valid message boundary and a
+                        // failing sink must not condemn an otherwise healthy
+                        // pooled connection.
+                        self.stream_incomplete = false;
+                        self.last_activity = Some(Instant::now());
+                        sink.flush().await.map_err(TransportError::Io)?;
+                        return Ok(written);
+                    }
+                    FramePart::NeedMore => break,
+                }
+            }
+
+            self.read_buffer.drain(..offset);
+            offset = 0;
+
+            if self.read_buffer.len() > self.max_read_buffer {
+                return Err(TransportError::Io(std::io::Error::new(
+                    std::io::ErrorKind::OutOfMemory,
+                    format!(
+                        "{} bytes held without completing a frame (ceiling {})",
+                        self.read_buffer.len(),
+                        self.max_read_buffer
+                    ),
+                ))
+                .into());
+            }
+
+            let n = match deadline {
+                Some(at) => tokio::time::timeout_at(at, self.transport.read(&mut temp))
+                    .await
+                    .map_err(|_| {
+                        crate::error::RpcError::Timeout(self.rpc_timeout.unwrap_or_default())
+                    })??,
+                None => self.transport.read(&mut temp).await?,
+            };
+            if n == 0 {
+                return Err(TransportError::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "connection closed mid-reply while streaming",
+                ))
+                .into());
+            }
+            self.read_buffer.extend_from_slice(&temp[..n]);
+        }
+    }
+
+    /// Extract `message-id` from the first element's opening tag, if it has
+    /// arrived yet.
+    ///
+    /// Byte-wise and bounded to that tag on purpose. Decoding the whole prefix
+    /// as UTF-8 fails whenever a read or chunk boundary lands mid-codepoint,
+    /// which would discard a perfectly valid reply for a reason that has nothing
+    /// to do with its contents. Restricting the search to the opening tag also
+    /// stops `message-id` being matched inside a leading comment or processing
+    /// instruction.
+    fn reply_message_id(prefix: &[u8]) -> Option<String> {
+        fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+            haystack.windows(needle.len()).position(|w| w == needle)
+        }
+        // First real element start, skipping any prolog. Each construct is
+        // skipped to its own terminator, not to the next `>`: a comment may
+        // legally contain one, and `<!-- > <rpc-reply message-id="1"> -->`
+        // would otherwise be mistaken for the root element.
+        let mut i = 0;
+        loop {
+            let lt = prefix[i..].iter().position(|&b| b == b'<')? + i;
+            match prefix.get(lt + 1) {
+                Some(b'!') if prefix[lt..].starts_with(b"<!--") => {
+                    i = find(&prefix[lt + 4..], b"-->")? + lt + 4 + 3;
+                }
+                Some(b'!') => {
+                    i = prefix[lt..].iter().position(|&b| b == b'>')? + lt + 1;
+                }
+                Some(b'?') => {
+                    i = find(&prefix[lt + 2..], b"?>")? + lt + 2 + 2;
+                }
+                Some(_) => {
+                    let gt = Self::tag_end(&prefix[lt..])? + lt;
+                    return Self::message_id_in_tag(&prefix[lt..=gt]);
+                }
+                // Tag has not arrived in full yet.
+                None => return None,
+            }
+        }
+    }
+
+    /// Offset of the `>` that closes an opening tag, ignoring any inside a
+    /// quoted attribute value.
+    fn tag_end(tag: &[u8]) -> Option<usize> {
+        let mut quote: Option<u8> = None;
+        for (i, &b) in tag.iter().enumerate() {
+            match quote {
+                Some(q) if b == q => quote = None,
+                Some(_) => {}
+                None if b == b'"' || b == b'\'' => quote = Some(b),
+                None if b == b'>' => return Some(i),
+                None => {}
+            }
+        }
+        None
+    }
+
+    /// Value of the unqualified `message-id` attribute within one opening tag.
+    ///
+    /// Attribute names are parsed and compared whole. A substring search would
+    /// let a stale reply carrying a qualified extension attribute such as
+    /// `evil:message-id="1"` ahead of its real `message-id="99"` masquerade as
+    /// message 1 — the caller would be handed the stale reply while its own
+    /// stayed queued.
+    fn message_id_in_tag(tag: &[u8]) -> Option<String> {
+        // Past `<` and the element name.
+        let mut i = 1;
+        while i < tag.len() && !tag[i].is_ascii_whitespace() && tag[i] != b'>' && tag[i] != b'/' {
+            i += 1;
+        }
+        loop {
+            while i < tag.len() && tag[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i >= tag.len() || tag[i] == b'>' || tag[i] == b'/' {
+                return None;
+            }
+            let name_start = i;
+            while i < tag.len() && !tag[i].is_ascii_whitespace() && tag[i] != b'=' && tag[i] != b'>'
+            {
+                i += 1;
+            }
+            let name = &tag[name_start..i];
+            while i < tag.len() && tag[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if tag.get(i) != Some(&b'=') {
+                return None;
+            }
+            i += 1;
+            while i < tag.len() && tag[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            let quote = *tag.get(i)?;
+            if quote != b'"' && quote != b'\'' {
+                return None;
+            }
+            i += 1;
+            let close = tag[i..].iter().position(|&b| b == quote)? + i;
+            if name == b"message-id" {
+                // The id itself is ASCII in practice, but decode defensively
+                // rather than assuming.
+                return std::str::from_utf8(&tag[i..close]).ok().map(str::to_string);
+            }
+            i = close + 1;
+        }
+    }
+
     /// Fetch configuration using an XPath filter (RFC 6241 §6.4).
     ///
     /// Returns [`ProtocolError::CapabilityMissing`] when the device did not
@@ -1188,6 +1583,9 @@ impl Session {
     /// Error when a previous partial lock or unlock left this session's lock
     /// state unknown.
     fn ensure_lock_state_known(&self) -> Result<(), NetconfError> {
+        if self.stream_incomplete {
+            return Err(ProtocolError::SessionExpired.into());
+        }
         if self.partial_lock_uncertain {
             return Err(ProtocolError::SessionExpired.into());
         }
@@ -3411,6 +3809,337 @@ mod tests {
         // so raising it for one fetch must be reversible.
         session.set_max_read_buffer(default);
         assert_eq!(session.max_read_buffer(), default);
+    }
+
+    #[tokio::test]
+    async fn streaming_get_config_writes_the_reply() {
+        let mut data = mock_device_hello();
+        data.extend_from_slice(&mock_data_reply(
+            "1",
+            "<system><host-name>r1</host-name></system>",
+        ));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let mut out: Vec<u8> = Vec::new();
+        let n = session
+            .get_config_streaming(Datastore::Running, None, &mut out)
+            .await
+            .expect("streaming get-config");
+
+        let text = String::from_utf8(out).expect("utf-8");
+        assert_eq!(n, text.len());
+        // The *raw envelope*, not the unwrapped payload — that is the contract.
+        assert!(text.contains("<rpc-reply"), "got {text}");
+        assert!(text.contains("<host-name>r1</host-name>"), "got {text}");
+    }
+
+    #[tokio::test]
+    async fn streaming_survives_a_reply_larger_than_the_ceiling() {
+        // The point of the feature: emitted bytes leave the buffer, so a reply
+        // far bigger than `max_read_buffer` streams fine where `get_config`
+        // would refuse it.
+        let big = "x".repeat(256 * 1024);
+        let mut data = mock_device_hello();
+        data.extend_from_slice(&mock_data_reply("1", &big));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        session.set_max_read_buffer(64 * 1024);
+
+        let mut out: Vec<u8> = Vec::new();
+        let n = session
+            .get_config_streaming(Datastore::Running, None, &mut out)
+            .await
+            .expect("a large reply must stream under a small ceiling");
+        assert!(n > 256 * 1024, "expected the whole payload, got {n}");
+    }
+
+    fn mock_device_hello_11() -> Vec<u8> {
+        let hello = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability>urn:ietf:params:netconf:base:1.0</capability>
+    <capability>urn:ietf:params:netconf:base:1.1</capability>
+  </capabilities>
+  <session-id>1</session-id>
+</hello>"#;
+        let mut buf = hello.as_bytes().to_vec();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    /// One chunk for the whole message — exactly what this crate's own encoder
+    /// emits, and the shape that must still stream.
+    fn single_chunk_reply(id: &str, payload: &str) -> Vec<u8> {
+        let msg = format!(
+            "<rpc-reply message-id=\"{id}\" xmlns=\"urn:ietf:params:xml:ns:netconf:base:1.0\"><data>{payload}</data></rpc-reply>"
+        );
+        let mut buf = format!("\n#{}\n", msg.len()).into_bytes();
+        buf.extend_from_slice(msg.as_bytes());
+        buf.extend_from_slice(b"\n##\n");
+        buf
+    }
+
+    #[tokio::test]
+    async fn streaming_survives_a_large_reply_over_chunked_framing() {
+        // The 1.1 half of the ceiling test above, and the one that actually
+        // matters: NETCONF 1.1 peers — including this crate — send one chunk
+        // per message, so a decoder that only emits whole chunks buffers the
+        // entire reply and trips the ceiling before writing a byte.
+        let big = "x".repeat(256 * 1024);
+        let mut data = mock_device_hello_11();
+        data.extend_from_slice(&single_chunk_reply("1", &big));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        assert_eq!(session.version(), Some(NetconfVersion::V1_1));
+        session.set_max_read_buffer(64 * 1024);
+
+        let mut out: Vec<u8> = Vec::new();
+        let n = session
+            .get_config_streaming(Datastore::Running, None, &mut out)
+            .await
+            .expect("a large single chunk must stream under a small ceiling");
+        assert!(n > 256 * 1024, "expected the whole payload, got {n}");
+        let text = String::from_utf8(out).expect("utf-8");
+        assert!(text.starts_with("<rpc-reply"), "envelope must be preserved");
+        assert!(
+            text.ends_with("</rpc-reply>"),
+            "got tail {:?}",
+            &text[text.len() - 32..]
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_ignores_a_qualified_message_id_attribute() {
+        // A stale reply carrying `evil:message-id="1"` ahead of its real
+        // `message-id="99"`. A substring search finds the decoy first and
+        // streams the wrong document while ours stays queued.
+        let mut data = mock_device_hello();
+        data.extend_from_slice(
+            b"<rpc-reply xmlns:evil=\"urn:x\" evil:message-id=\"1\" message-id=\"99\" \
+              xmlns=\"urn:ietf:params:xml:ns:netconf:base:1.0\"><data><stale/></data></rpc-reply>",
+        );
+        data.extend_from_slice(b"]]>]]>");
+        data.extend_from_slice(&mock_data_reply("1", "<real/>"));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let mut out: Vec<u8> = Vec::new();
+        session
+            .get_config_streaming(Datastore::Running, None, &mut out)
+            .await
+            .expect("streaming get-config");
+        let text = String::from_utf8(out).expect("utf-8");
+        assert!(text.contains("<real/>"), "got {text}");
+        assert!(!text.contains("stale"), "streamed the decoy reply: {text}");
+    }
+
+    #[tokio::test]
+    async fn streaming_is_not_fooled_by_a_message_id_in_a_comment() {
+        // `<!-- > ... -->` contains a `>`, so skipping the prolog to the next
+        // `>` leaves the scan inside the comment and reads the decoy id.
+        let mut data = mock_device_hello();
+        data.extend_from_slice(
+            b"<!-- > <rpc-reply message-id=\"1\"> --><rpc-reply message-id=\"99\" \
+              xmlns=\"urn:ietf:params:xml:ns:netconf:base:1.0\"><data><stale/></data></rpc-reply>",
+        );
+        data.extend_from_slice(b"]]>]]>");
+        data.extend_from_slice(&mock_data_reply("1", "<real/>"));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let mut out: Vec<u8> = Vec::new();
+        session
+            .get_config_streaming(Datastore::Running, None, &mut out)
+            .await
+            .expect("streaming get-config");
+        let text = String::from_utf8(out).expect("utf-8");
+        assert!(text.contains("<real/>"), "got {text}");
+        assert!(!text.contains("stale"), "streamed the decoy reply: {text}");
+    }
+
+    #[tokio::test]
+    async fn streaming_stops_draining_stale_frames_eventually() {
+        // No `rpc_timeout` here on purpose: without a drain bound, a peer that
+        // keeps answering some other message-id holds the call open forever.
+        let mut data = mock_device_hello();
+        for stale_id in 50..=50 + MAX_STALE_DRAIN {
+            data.extend_from_slice(&mock_data_reply(&stale_id.to_string(), "<stale/>"));
+        }
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let mut out: Vec<u8> = Vec::new();
+        let err = session
+            .get_config_streaming(Datastore::Running, None, &mut out)
+            .await
+            .expect_err("must give up rather than drain forever");
+        let err_str = format!("{err:?}");
+        assert!(
+            err_str.contains("MessageIdMismatch"),
+            "expected MessageIdMismatch, got: {err_str}"
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_reports_eof_mid_reply() {
+        // Hello, then a truncated frame: the stream must fail rather than
+        // silently returning a partial document.
+        let mut data = mock_device_hello();
+        data.extend_from_slice(b"<rpc-reply><data>partial");
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let mut out: Vec<u8> = Vec::new();
+        let err = session
+            .get_config_streaming(Datastore::Running, None, &mut out)
+            .await
+            .expect_err("truncated reply must be an error");
+        assert!(err.to_string().contains("mid-reply"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn streaming_skips_a_stale_reply_and_returns_ours() {
+        // A cancelled RPC can leave its reply queued. Streaming it would hand
+        // the caller someone else's XML and leave the real reply unread.
+        let mut data = mock_device_hello();
+        data.extend_from_slice(&mock_data_reply("99", "<stale/>")); // not ours
+        data.extend_from_slice(&mock_data_reply("1", "<ours/>")); // message-id 1
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let mut out: Vec<u8> = Vec::new();
+        session
+            .get_config_streaming(Datastore::Running, None, &mut out)
+            .await
+            .expect("streaming get-config");
+
+        let text = String::from_utf8(out).expect("utf-8");
+        assert!(text.contains("<ours/>"), "should return our reply: {text}");
+        assert!(
+            !text.contains("<stale/>"),
+            "must not emit the stale reply: {text}"
+        );
+    }
+
+    #[test]
+    fn reply_message_id_reads_the_attribute() {
+        let f = Session::reply_message_id;
+        assert_eq!(f(br#"<rpc-reply message-id="7">"#).as_deref(), Some("7"));
+        assert_eq!(
+            f(br#"<rpc-reply message-id = '12' >"#).as_deref(),
+            Some("12")
+        );
+        // Not enough bytes yet: keep waiting rather than guessing.
+        assert_eq!(f(br#"<rpc-reply message-"#), None);
+        assert_eq!(f(br#"<rpc-reply "#), None);
+    }
+
+    #[test]
+    fn reply_message_id_survives_a_split_codepoint() {
+        // A read or chunk boundary can land mid-codepoint. Decoding the whole
+        // prefix as UTF-8 would fail and discard a perfectly valid reply.
+        let mut buf = br#"<rpc-reply message-id="7"><data>caf"#.to_vec();
+        buf.push(0xC3); // first byte of a truncated two-byte codepoint
+        assert_eq!(
+            Session::reply_message_id(&buf).as_deref(),
+            Some("7"),
+            "a split codepoint after the opening tag must not hide the id"
+        );
+    }
+
+    #[test]
+    fn reply_message_id_ignores_prologs_and_comments() {
+        let f = Session::reply_message_id;
+        assert_eq!(
+            f(br#"<?xml version="1.0"?><rpc-reply message-id="5">"#).as_deref(),
+            Some("5")
+        );
+        // A decoy inside a comment must not be read as the id.
+        assert_eq!(
+            f(br#"<!-- message-id="99" --><rpc-reply message-id="5">"#).as_deref(),
+            Some("5")
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_is_refused_while_the_candidate_is_dirty() {
+        // An interrupted stream poisons the session, and a poisoned session
+        // cannot discard — which would strand edits on a shared candidate.
+        let transport = MockTransport::new(mock_junos_hello());
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        session.mark_candidate_dirty();
+
+        let mut out: Vec<u8> = Vec::new();
+        let err = session
+            .get_config_streaming(Datastore::Running, None, &mut out)
+            .await
+            .expect_err("must refuse with a dirty candidate");
+        assert!(err.to_string().contains("candidate is dirty"), "got {err}");
+        assert!(
+            session.candidate_dirty(),
+            "and the discard path must still be available"
+        );
+        assert!(session.is_alive(), "refusing must not poison the session");
+    }
+
+    #[tokio::test]
+    async fn streaming_is_refused_while_a_subscription_is_active() {
+        // Streaming cannot demultiplex: a notification arriving before the reply
+        // would be handed to the caller as the result.
+        let mut data = mock_device_hello_with_notification();
+        data.extend_from_slice(&mock_ok_reply("1"));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        session
+            .create_subscription(None, None, None, None)
+            .await
+            .expect("subscribe");
+
+        let mut out: Vec<u8> = Vec::new();
+        let err = session
+            .get_config_streaming(Datastore::Running, None, &mut out)
+            .await
+            .expect_err("must refuse while subscribed");
+        assert!(err.to_string().contains("subscription"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_stream_poisons_the_session() {
+        // Truncated reply: part of the frame is drained, then EOF. The buffer
+        // now holds a suffix, so the next RPC would misparse it — and a pooled
+        // connection must not be handed on in that state.
+        let mut data = mock_device_hello();
+        data.extend_from_slice(b"<rpc-reply><data>partial");
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        assert!(session.is_alive());
+
+        let mut out: Vec<u8> = Vec::new();
+        let _ = session
+            .get_config_streaming(Datastore::Running, None, &mut out)
+            .await
+            .expect_err("truncated reply");
+
+        assert!(
+            !session.is_alive(),
+            "a half-drained stream must poison the session"
+        );
+        assert!(
+            session.get(None).await.is_err(),
+            "and further RPCs must be refused rather than misparsing the suffix"
+        );
     }
 
     #[tokio::test]
