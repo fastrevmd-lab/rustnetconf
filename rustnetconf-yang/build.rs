@@ -9,7 +9,43 @@ use std::path::PathBuf;
 use yang2::context::{Context, ContextFlags};
 use yang2::schema::{DataValueType, SchemaNode, SchemaNodeKind};
 
+/// Warn that the ABI of a system libyang is not, and cannot cheaply be,
+/// verified here.
+///
+/// `libyang2-sys` 0.9.0 probes with a bare `probe("libyang")` and falls back to
+/// `-lyang`, neither of which constrains the version, while the bindings it
+/// ships target `LIBYANG_MAJOR_SOVERSION 3`. An ABI-2 libyang links cleanly and
+/// then hands this build script wrong struct offsets as it walks `Context` and
+/// `SchemaNode` — silent UB at codegen time rather than a link error.
+///
+/// Deliberately a warning and nothing more. Verifying this properly means
+/// knowing which file `-lyang` actually resolves to, which depends on `-L`
+/// ordering, symlink targets, platform naming (`.so.3` vs `.3.dylib`), and —
+/// because a build script is a *host* binary — on host rather than target
+/// pkg-config settings when cross-compiling. Earlier drafts of this check got
+/// each of those wrong in turn. libyang exposes no runtime soversion accessor
+/// through these bindings to settle it, so any check here is a guess, and a
+/// guess that reports "OK" is worse than no check: it manufactures confidence
+/// about memory-safety-relevant layout.
+///
+/// The honest contract is therefore: this path is opt-in, the ABI requirement
+/// is documented, and the build says out loud that it did not check.
+#[cfg(not(feature = "bundled"))]
+fn warn_system_libyang_abi_unverified() {
+    println!(
+        "cargo:warning=rustnetconf-yang: building against a system libyang; its ABI is NOT \
+         verified. libyang2-sys ships bindings for soname 3, and an soname-2 library will \
+         link successfully and then be misread during code generation. Confirm with \
+         `ls $(pkg-config --variable=libdir libyang)/libyang.so.*` that you have \
+         libyang.so.3 — note that `pkg-config --modversion libyang` reports the project \
+         version (2.2.8 for the release vendored here), not the soname."
+    );
+}
+
 fn main() {
+    #[cfg(not(feature = "bundled"))]
+    warn_system_libyang_abi_unverified();
+
     let yang_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("yang-models");
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let output_file = out_dir.join("yang_generated.rs");
