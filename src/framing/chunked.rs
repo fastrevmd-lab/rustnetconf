@@ -62,11 +62,16 @@ impl Framer for ChunkedFramer {
                 // Detect EOM-framed data arriving when chunked was negotiated.
                 // This is a known firmware bug on some devices (e.g., certain Junos versions)
                 // that advertise :base:1.1 but actually send EOM-framed responses.
-                if looks_like_eom_data(&buffer[pos..]) {
-                    return Err(FramingError::Mismatch {
-                        advertised: "1.1 (chunked)".to_string(),
-                        actual: "1.0 (EOM)".to_string(),
-                    });
+                match eom_likeness(&buffer[pos..]) {
+                    EomLikeness::Yes => {
+                        return Err(FramingError::Mismatch {
+                            advertised: "1.1 (chunked)".to_string(),
+                            actual: "1.0 (EOM)".to_string(),
+                        });
+                    }
+                    // Too little to tell a truncated `<?xml` from real garbage.
+                    EomLikeness::Undecided => return Ok(None),
+                    EomLikeness::No => {}
                 }
                 return Err(FramingError::Invalid(format!(
                     "expected chunk header at position {pos}, got {:?}",
@@ -141,25 +146,46 @@ impl Framer for ChunkedFramer {
 
 /// Heuristic: does this buffer look like EOM-framed data rather than chunked?
 /// Checks for XML start (`<?xml` or `<rpc`) or the EOM delimiter `]]>]]>`.
-pub(crate) fn looks_like_eom_data(data: &[u8]) -> bool {
-    if data.is_empty() {
-        return false;
-    }
-    // Skip leading whitespace
-    let trimmed = match data.iter().position(|&b| !b.is_ascii_whitespace()) {
-        Some(pos) => &data[pos..],
-        None => return false,
+/// Whether a buffer that is not a chunk header looks like EOM-framed data.
+///
+/// Three-valued on purpose. A transport read may split anywhere, so a buffer
+/// holding only `<?` or `<r` is not yet distinguishable from the `<?xml` /
+/// `<rpc` that identifies the known firmware bug. Answering `No` there would
+/// report a generic parse failure for what is actually a framing mismatch,
+/// and the caller keys its recovery off that distinction.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum EomLikeness {
+    /// A recognised EOM marker is present.
+    Yes,
+    /// Cannot be EOM-framed data.
+    No,
+    /// Could still become a marker once more bytes arrive.
+    Undecided,
+}
+
+pub(crate) fn eom_likeness(data: &[u8]) -> EomLikeness {
+    const MARKERS: [&[u8]; 3] = [b"<?xml", b"<rpc", b"<!--"];
+
+    // All whitespace (or empty): nothing to judge yet.
+    let Some(first) = data.iter().position(|&b| !b.is_ascii_whitespace()) else {
+        return EomLikeness::Undecided;
     };
-    // XML document or element start
-    if trimmed.starts_with(b"<?xml") || trimmed.starts_with(b"<rpc") || trimmed.starts_with(b"<!--")
-    {
-        return true;
+    let trimmed = &data[first..];
+
+    for marker in MARKERS {
+        if trimmed.starts_with(marker) {
+            return EomLikeness::Yes;
+        }
+        // A truncated read of this marker — wait rather than misclassify.
+        if marker.starts_with(trimmed) {
+            return EomLikeness::Undecided;
+        }
     }
-    // EOM delimiter anywhere in the buffer
+    // EOM delimiter anywhere in the buffer.
     if data.windows(6).any(|w| w == b"]]>]]>") {
-        return true;
+        return EomLikeness::Yes;
     }
-    false
+    EomLikeness::No
 }
 
 #[cfg(test)]
@@ -325,6 +351,33 @@ mod tests {
             matches!(err, FramingError::Mismatch { .. }),
             "expected FramingError::Mismatch, got: {err:?}"
         );
+    }
+
+    #[test]
+    fn test_decode_waits_for_a_split_eom_prefix() {
+        // A transport read may end anywhere. `<?` alone must not be reported as
+        // a parse failure — once the rest arrives it is the framing mismatch.
+        let framer = ChunkedFramer::new();
+        for partial in [&b"<?"[..], b"<r", b"<!", b"<", b"  <?xm"] {
+            assert!(
+                matches!(framer.decode(partial), Ok(None)),
+                "expected NeedMore for {partial:?}, got {:?}",
+                framer.decode(partial)
+            );
+        }
+        let err = framer.decode(b"<?xml ").unwrap_err();
+        assert!(
+            matches!(err, FramingError::Mismatch { .. }),
+            "expected Mismatch once the prefix completes, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_eom_likeness_rejects_non_prefixes() {
+        assert_eq!(eom_likeness(b"<x"), EomLikeness::No);
+        assert_eq!(eom_likeness(b"garbage"), EomLikeness::No);
+        assert_eq!(eom_likeness(b"\x00\x01"), EomLikeness::No);
+        assert_eq!(eom_likeness(b"   "), EomLikeness::Undecided);
     }
 
     #[test]

@@ -97,11 +97,17 @@ impl StreamDecoder {
             // advertises :base:1.1 and then sends EOM-framed replies; callers
             // key recovery and diagnostics off this typed variant, so the
             // streaming path must not flatten it to a generic parse failure.
-            if chunked::looks_like_eom_data(buffer) {
-                return Err(crate::error::FramingError::Mismatch {
-                    advertised: "1.1 (chunked)".to_string(),
-                    actual: "1.0 (EOM)".to_string(),
-                });
+            match chunked::eom_likeness(buffer) {
+                chunked::EomLikeness::Yes => {
+                    return Err(crate::error::FramingError::Mismatch {
+                        advertised: "1.1 (chunked)".to_string(),
+                        actual: "1.0 (EOM)".to_string(),
+                    });
+                }
+                // A read can split anywhere: `<?` is not yet distinguishable
+                // from `<?xml`. Wait rather than report the wrong error.
+                chunked::EomLikeness::Undecided => return Ok(FramePart::NeedMore),
+                chunked::EomLikeness::No => {}
             }
             return Err(crate::error::FramingError::Invalid(format!(
                 "expected chunk header, got {:?}",
@@ -330,6 +336,24 @@ mod incremental_tests {
         assert!(dec.decode_part(b"\n#99999999\nx").is_err());
         let huge = format!("\n#{}\nx", usize::MAX);
         assert!(dec.decode_part(huge.as_bytes()).is_err());
+    }
+
+    #[test]
+    fn chunked_waits_for_a_split_eom_prefix() {
+        // The streaming loop calls the decoder after every read, so it sees
+        // shorter buffers than the all-at-once path ever does.
+        let mut dec = StreamDecoder::for_version(true);
+        assert_eq!(
+            dec.decode_part(b"<?").expect("decode_part"),
+            FramePart::NeedMore
+        );
+        let err = dec
+            .decode_part(b"<?xml version=\"1.0\"?>")
+            .expect_err("the completed prefix is a framing mismatch");
+        assert!(
+            matches!(err, crate::error::FramingError::Mismatch { .. }),
+            "expected Mismatch, got: {err:?}"
+        );
     }
 
     #[test]
