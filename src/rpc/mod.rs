@@ -106,8 +106,17 @@ pub fn validate_xml_fragment(xml: &str) -> Result<(), ProtocolError> {
                 }
                 break;
             }
-            Ok(Event::Start(_)) => depth += 1,
-            Ok(Event::End(_)) => {
+            Ok(Event::Start(ref e)) => {
+                validate_name(e.name().as_ref())?;
+                validate_attributes(e)?;
+                depth += 1;
+            }
+            Ok(Event::Empty(ref e)) => {
+                validate_name(e.name().as_ref())?;
+                validate_attributes(e)?;
+            }
+            Ok(Event::End(ref e)) => {
+                validate_name(e.name().as_ref())?;
                 depth -= 1;
                 // Reaching zero before EOF means the fragment closed the
                 // synthetic root itself. `</_>x<_>` is balanced overall, so a
@@ -155,6 +164,14 @@ pub fn validate_xml_fragment(xml: &str) -> Result<(), ProtocolError> {
                         "XML fragment contains a character XML 1.0 cannot represent".to_string(),
                     ));
                 }
+                // XML 1.0 §2.4: a literal `]]>` may not appear in character
+                // data — it would close a CDATA section early — and must be
+                // written `]]&gt;`. quick-xml passes it through.
+                if decoded.contains("]]>") {
+                    return Err(ProtocolError::Xml(
+                        "XML fragment contains a literal `]]>` in text; write `]]&gt;`".to_string(),
+                    ));
+                }
             }
             Ok(Event::CData(ref c)) => {
                 let decoded = c.decode().map_err(|e| {
@@ -169,16 +186,274 @@ pub fn validate_xml_fragment(xml: &str) -> Result<(), ProtocolError> {
                     ));
                 }
             }
+            // An entity reference the fragment relies on must actually resolve,
+            // and to a character XML can represent. quick-xml streams these as
+            // their own events and does not check either, so `&cmp;` (a typo of
+            // `&amp;`) and `&#x4;` both pass through — and are then spliced into
+            // the RPC verbatim for the *device* to reject. A conforming parser
+            // refuses an undefined entity outright.
+            //
+            // Found by the `fragment_embeds_cleanly` fuzz target once its oracle
+            // stopped being quick-xml, which is permissive here in the same way.
+            // XML 1.0 §2.5: a comment's content may not contain `--`, and may
+            // not end with `-`. quick-xml accepts `<!-->` and `<---->`; a
+            // conforming parser rejects both.
+            Ok(Event::Comment(ref c)) => {
+                let body = std::str::from_utf8(c.as_ref()).map_err(|_| {
+                    ProtocolError::Xml("XML fragment has a non-UTF-8 comment".to_string())
+                })?;
+                if body.contains("--") || body.ends_with('-') {
+                    return Err(ProtocolError::Xml(
+                        "XML fragment has a malformed comment: `--` may not appear \
+                         inside one, nor `-` immediately before the close"
+                            .to_string(),
+                    ));
+                }
+                if !body
+                    .chars()
+                    .all(crate::rpc::reply::lexical::is_valid_xml_char)
+                {
+                    return Err(ProtocolError::Xml(
+                        "XML fragment has a comment containing a character XML 1.0 \
+                         cannot represent"
+                            .to_string(),
+                    ));
+                }
+            }
+            // A processing instruction's target must be a Name, and may not be
+            // `xml` in any case (XML 1.0 §2.6). quick-xml validates neither.
+            Ok(Event::PI(ref pi)) => {
+                let raw = pi.as_ref();
+                let target_end = raw
+                    .iter()
+                    .position(|b| b.is_ascii_whitespace())
+                    .unwrap_or(raw.len());
+                let target = &raw[..target_end];
+                // `Name`, not `NCName`. XML 1.0 §2.6 defines
+                // `PITarget ::= Name - (('X'|'x')('M'|'m')('L'|'l'))`, and
+                // `Name` permits a colon — the NCName constraint from
+                // Namespaces in XML applies to element and attribute names, not
+                // to PI targets. `<?a:b?>` is legal and roxmltree accepts it; an
+                // earlier revision rejected it, which was a regression — twice:
+                // first by requiring NCName, then by reusing `validate_name`,
+                // which enforces QName and so still refused `<?a:b:c?>`.
+                validate_pi_target(target)?;
+                if target.eq_ignore_ascii_case(b"xml") {
+                    return Err(ProtocolError::Xml(
+                        "XML fragment has a processing instruction targeting `xml`, \
+                         which is reserved"
+                            .to_string(),
+                    ));
+                }
+                let body = std::str::from_utf8(raw).map_err(|_| {
+                    ProtocolError::Xml(
+                        "XML fragment has a non-UTF-8 processing instruction".to_string(),
+                    )
+                })?;
+                if !body
+                    .chars()
+                    .all(crate::rpc::reply::lexical::is_valid_xml_char)
+                {
+                    return Err(ProtocolError::Xml(
+                        "XML fragment has a processing instruction containing a \
+                         character XML 1.0 cannot represent"
+                            .to_string(),
+                    ));
+                }
+            }
+            Ok(Event::GeneralRef(ref entity)) => {
+                match crate::xml_entity::resolve_entity_ref(entity) {
+                    Some(resolved) => {
+                        if !resolved
+                            .chars()
+                            .all(crate::rpc::reply::lexical::is_valid_xml_char)
+                        {
+                            return Err(ProtocolError::Xml(
+                                "XML fragment has a character reference outside the \
+                                 range XML 1.0 permits"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                    None => {
+                        let name = entity.decode().unwrap_or_default();
+                        let preview: String = name.chars().take(32).collect();
+                        return Err(ProtocolError::Xml(format!(
+                            "XML fragment references an undefined entity `&{preview};`; \
+                             only the five predefined entities and numeric character \
+                             references can be embedded"
+                        )));
+                    }
+                }
+            }
             Err(e) => {
                 return Err(ProtocolError::Xml(format!(
                     "XML fragment is not well-formed: {e}"
                 )));
             }
-            _ => {}
         }
         buf.clear();
     }
 
+    Ok(())
+}
+
+/// XML 1.0 (5th ed.) `NameStartChar`.
+///
+/// The literal production. Approximating it does not work: a conservative
+/// "reject the obvious delimiters" filter still accepted `<]nterfaces/>`, since
+/// `]` is a perfectly legal XML character that simply cannot start a name. The
+/// ranges are finite and cheap, so encode them rather than guess.
+fn is_name_start_char(c: char) -> bool {
+    matches!(c,
+        ':' | '_'
+        | 'A'..='Z' | 'a'..='z'
+        | '\u{C0}'..='\u{D6}' | '\u{D8}'..='\u{F6}' | '\u{F8}'..='\u{2FF}'
+        | '\u{370}'..='\u{37D}' | '\u{37F}'..='\u{1FFF}'
+        | '\u{200C}'..='\u{200D}' | '\u{2070}'..='\u{218F}'
+        | '\u{2C00}'..='\u{2FEF}' | '\u{3001}'..='\u{D7FF}'
+        | '\u{F900}'..='\u{FDCF}' | '\u{FDF0}'..='\u{FFFD}'
+        | '\u{10000}'..='\u{EFFFF}')
+}
+
+/// XML 1.0 (5th ed.) `NameChar` — `NameStartChar` plus the continuation set.
+fn is_name_char(c: char) -> bool {
+    is_name_start_char(c)
+        || matches!(c,
+            '-' | '.' | '0'..='9' | '\u{B7}'
+            | '\u{300}'..='\u{36F}' | '\u{203F}'..='\u{2040}')
+}
+
+/// The XML 1.0 `Name` production, colons permitted anywhere.
+///
+/// Distinct from element names, which must additionally be `QName`s. A
+/// processing-instruction target is only required to be a `Name`, so
+/// `<?a:b:c?>`, `<?:a?>` and `<?a:?>` are all legal and a conforming parser
+/// accepts them.
+fn validate_pi_target(raw: &[u8]) -> Result<(), ProtocolError> {
+    let name = std::str::from_utf8(raw).map_err(|_| {
+        ProtocolError::Xml("XML fragment has a non-UTF-8 processing-instruction target".to_string())
+    })?;
+    let mut chars = name.chars();
+    let ok = match chars.next() {
+        None => false,
+        Some(first) => is_name_start_char(first) && chars.all(is_name_char),
+    };
+    if !ok {
+        let preview: String = name.chars().take(32).collect();
+        return Err(ProtocolError::Xml(format!(
+            "XML fragment has an invalid processing-instruction target \
+             (first 32 chars: {preview:?})"
+        )));
+    }
+    Ok(())
+}
+
+/// An XML `NCName`: a `Name` with no colon.
+fn is_ncname(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => false,
+        Some(first) => {
+            first != ':' && is_name_start_char(first) && chars.all(|c| c != ':' && is_name_char(c))
+        }
+    }
+}
+
+/// Reject malformed attributes on a start tag.
+///
+/// The validator never looked at attributes, so `<a b/>` passed — quick-xml
+/// reports `ExpectedEq` for a valueless attribute, but only if something
+/// actually iterates them. A conforming parser rejects the document, and the
+/// fragment would have gone onto the wire for the device to reject instead.
+///
+/// A CR inside what looks like a name reaches the same place by a different
+/// route: quick-xml treats it as whitespace, so `<inte\rrfacE/>` becomes element
+/// `inte` with a valueless attribute `rfacE`. Both were fuzz findings.
+fn validate_attributes(tag: &quick_xml::events::BytesStart<'_>) -> Result<(), ProtocolError> {
+    // XML requires whitespace before every attribute. quick-xml's iterator
+    // happily yields both of `<a b="1"c="2"/>`, so the separator has to be
+    // checked against the raw bytes: after a closing quote, only whitespace or
+    // the end of the tag may follow.
+    let raw = tag.attributes_raw();
+    let mut quote: Option<u8> = None;
+    for (i, &byte) in raw.iter().enumerate() {
+        match quote {
+            Some(q) if byte == q => {
+                quote = None;
+                match raw.get(i + 1) {
+                    None => {}
+                    Some(&next) if next.is_ascii_whitespace() || next == b'/' => {}
+                    Some(_) => {
+                        return Err(ProtocolError::Xml(
+                            "XML fragment is missing whitespace between attributes".to_string(),
+                        ));
+                    }
+                }
+            }
+            Some(_) => {}
+            None if byte == b'"' || byte == b'\'' => quote = Some(byte),
+            None => {}
+        }
+    }
+
+    for attribute in tag.attributes().with_checks(true) {
+        let attribute = attribute.map_err(|e| {
+            ProtocolError::Xml(format!("XML fragment has an invalid attribute: {e}"))
+        })?;
+        validate_name(attribute.key.as_ref())?;
+        let value = std::str::from_utf8(attribute.value.as_ref()).map_err(|_| {
+            ProtocolError::Xml("XML fragment has a non-UTF-8 attribute value".to_string())
+        })?;
+        if !value
+            .chars()
+            .all(crate::rpc::reply::lexical::is_valid_xml_char)
+        {
+            return Err(ProtocolError::Xml(
+                "XML fragment has an attribute value containing a character XML 1.0 \
+                 cannot represent"
+                    .to_string(),
+            ));
+        }
+        // XML 1.0 §2.3 `AttValue`: a literal `<` may not appear in an attribute
+        // value, only `&lt;`. quick-xml passes it through.
+        if value.contains('<') {
+            return Err(ProtocolError::Xml(
+                "XML fragment has an attribute value containing a literal `<`; write \
+                 `&lt;`"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Reject element names that are not a well-formed XML `Name`.
+///
+/// quick-xml does not check this — `<\0\0ing/>` and `<]nterfaces/>` both parse
+/// happily — so a fragment could carry either straight into an RPC for the
+/// device to choke on. Found by the `fragment_embeds_cleanly` fuzz target, twice:
+/// first with control characters, then with a legal character in an illegal
+/// position, which is what prompted encoding the real production.
+fn validate_name(raw: &[u8]) -> Result<(), ProtocolError> {
+    let name = std::str::from_utf8(raw)
+        .map_err(|_| ProtocolError::Xml("XML fragment has a non-UTF-8 element name".to_string()))?;
+    // NETCONF is namespace-based throughout, so the relevant standard is
+    // QName, not the raw Name production. `:` is a legal NameStartChar, which
+    // makes `<:/>` a valid Name and an invalid QName — a namespace-aware parser
+    // rejects it. At most one colon, with a non-empty NCName either side.
+    let mut parts = name.split(':');
+    let bad = match (parts.next(), parts.next(), parts.next()) {
+        (Some(local), None, _) => !is_ncname(local),
+        (Some(prefix), Some(local), None) => !is_ncname(prefix) || !is_ncname(local),
+        _ => true,
+    };
+    if bad {
+        let preview: String = name.chars().take(32).collect();
+        return Err(ProtocolError::Xml(format!(
+            "XML fragment has an invalid element name (first 32 chars: {preview:?})"
+        )));
+    }
     Ok(())
 }
 
@@ -256,8 +531,10 @@ mod fragment_validation_tests {
     fn rejects_a_trailing_bare_left_angle_bracket() {
         // The fuzz finding: quick-xml reads `<</b>` as a start tag named `</b`,
         // so the fragment consumes the closing tag of whatever encloses it.
-        let err = validate_xml_fragment("<").expect_err("a bare < is unbalanced");
-        assert!(err.to_string().contains("balanced"), "got {err}");
+        // Rejected either as unbalanced or as an invalid element name — the
+        // stray `<` swallows the following `</_` into a tag name. Which rule
+        // fires first is an implementation detail; that it is refused is not.
+        assert!(validate_xml_fragment("<").is_err());
         assert!(validate_xml_fragment("\u{4}\n\n<").is_err());
         assert!(validate_xml_fragment("<a/>text<").is_err());
     }
@@ -278,6 +555,100 @@ mod fragment_validation_tests {
         assert!(validate_xml_fragment("<a><![CDATA[\u{1}]]></a>").is_err());
         // TAB/LF/CR are legal.
         validate_xml_fragment("<a>\t\n\r</a>").unwrap();
+    }
+
+    #[test]
+    fn rejects_undefined_entities() {
+        // `&cmp;` is a typo of `&amp;`. quick-xml streams it as an unresolvable
+        // reference; a conforming parser rejects the document outright.
+        let err = validate_xml_fragment("<a>&cmp;&lt;</a>").expect_err("undefined entity");
+        assert!(err.to_string().contains("undefined entity"), "got {err}");
+        // `&nbsp;` is an HTML5 name, undefined in XML without a DTD. This must
+        // hold regardless of whether some other crate in the graph enables
+        // quick-xml's `escape-html` feature.
+        assert!(validate_xml_fragment("<a>&nbsp;</a>").is_err());
+        // The five predefined ones and numeric refs are fine.
+        validate_xml_fragment("<a>&amp;&lt;&gt;&quot;&apos;</a>").unwrap();
+        validate_xml_fragment("<a>&#38;&#x26;</a>").unwrap();
+    }
+
+    #[test]
+    fn rejects_character_references_outside_the_xml_range() {
+        assert!(validate_xml_fragment("<a>&#x4;</a>").is_err());
+        assert!(validate_xml_fragment("<a>&#4;</a>").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_element_names() {
+        // quick-xml parses a NUL inside a tag name without complaint.
+        assert!(validate_xml_fragment("<\u{0}ing/>").is_err());
+        assert!(validate_xml_fragment("<a\u{10}b/>").is_err());
+        assert!(validate_xml_fragment("<a\u{fffe}/>").is_err());
+        // A legal XML character in an illegal position: `]` cannot start a name.
+        assert!(validate_xml_fragment("<]nterfaces/>").is_err());
+        // Valid Name, invalid QName: NETCONF is namespace-based.
+        assert!(validate_xml_fragment("<:/>").is_err());
+        assert!(validate_xml_fragment("<a:b:c/>").is_err());
+        assert!(validate_xml_fragment("<a:/>").is_err());
+        assert!(validate_xml_fragment("<:b/>").is_err());
+        assert!(validate_xml_fragment("<1abc/>").is_err());
+        // Ordinary names, including namespaced and hyphenated ones, still pass.
+        validate_xml_fragment("<nc:get-config/>").unwrap();
+        validate_xml_fragment("<host-name.0/>").unwrap();
+        validate_xml_fragment("<_x/>").unwrap();
+        validate_xml_fragment("<\u{e9}l\u{e9}ment/>").unwrap();
+    }
+
+    #[test]
+    fn rejects_a_literal_cdata_terminator_in_text() {
+        assert!(validate_xml_fragment("<a>]]></a>").is_err());
+        assert!(validate_xml_fragment("a*]]>>b").is_err());
+        validate_xml_fragment("<a>]]&gt;</a>").unwrap();
+        validate_xml_fragment("<a>]]</a>").unwrap();
+    }
+
+    #[test]
+    fn rejects_malformed_attributes() {
+        // Valueless attribute; quick-xml only reports it if you iterate.
+        assert!(validate_xml_fragment("<a b/>").is_err());
+        // A CR reaches the same place: name `inte`, valueless attr `rfacE`.
+        assert!(validate_xml_fragment("<inte\rrfacE/>").is_err());
+        // Adjacent attributes with no separator; quick-xml yields both happily.
+        assert!(validate_xml_fragment(r#"<a b="1"c="2"/>"#).is_err());
+        assert!(validate_xml_fragment(r#"<p:a/><i n="1"x="2"/>"#).is_err());
+        // Well-formed attributes still pass.
+        // A literal `<` in an attribute value is forbidden.
+        assert!(validate_xml_fragment(r#"<a b="x<y"/>"#).is_err());
+        validate_xml_fragment(r#"<a b="1" xmlns:n="urn:x"/>"#).unwrap();
+        validate_xml_fragment(r#"<a b="x&lt;y"/>"#).unwrap();
+    }
+
+    #[test]
+    fn rejects_malformed_processing_instructions() {
+        assert!(validate_xml_fragment("<?<a?>!").is_err());
+        assert!(validate_xml_fragment("<?1bad?>").is_err());
+        // `xml` is a reserved target in any case.
+        assert!(validate_xml_fragment("<?xml-stylesheet?>").is_ok());
+        assert!(validate_xml_fragment("<?XmL foo?>").is_err());
+        // The body is validated too, not just the target.
+        assert!(validate_xml_fragment("<?ok \u{10}?>").is_err());
+        // A colon IS allowed in a PI target: XML 1.0 defines PITarget as a
+        // Name, and the NCName rule applies to element/attribute names.
+        validate_xml_fragment("<?a:b?>").unwrap();
+        // PITarget is a Name, so colons may appear anywhere, unlike QName.
+        validate_xml_fragment("<?a:b:c?>").unwrap();
+        validate_xml_fragment("<?:a?>").unwrap();
+        validate_xml_fragment("<?a:?>").unwrap();
+    }
+
+    #[test]
+    fn rejects_malformed_comments() {
+        assert!(validate_xml_fragment("<!-->").is_err());
+        assert!(validate_xml_fragment("<---->").is_err());
+        assert!(validate_xml_fragment("<!-- a -- b -->").is_err());
+        assert!(validate_xml_fragment("<!--x--->").is_err()); // content `x-`
+                                                              // Ordinary comments still pass.
+        validate_xml_fragment("<!-- a comment --><a/>").unwrap();
     }
 
     #[test]

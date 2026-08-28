@@ -18,8 +18,12 @@ libfuzzer-sys = "0.4"
 [dependencies.rustnetconf]
 path = ".."
 
-[dependencies.quick-xml]
-version = "0.41"
+# An *independent* parser, deliberately not quick-xml. Using the same parser the
+# validator uses makes the oracle share its blind spots — quick-xml reports EOF
+# without error on unclosed elements, which is precisely how the trailing-`<`
+# bug slipped through in the first place.
+[dependencies.roxmltree]
+version = "0.20"
 
 [[bin]]
 name = "fragment_embeds_cleanly"

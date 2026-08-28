@@ -19,5 +19,12 @@ pub(crate) fn resolve_entity_ref(entity: &BytesRef<'_>) -> Option<String> {
         return Some(ch.to_string());
     }
     let name = entity.decode().ok()?;
-    quick_xml::escape::resolve_predefined_entity(&name).map(|s| s.to_string())
+    // `resolve_xml_entity`, not `resolve_predefined_entity`. The latter is
+    // feature-dispatched: with quick-xml's `escape-html` enabled it resolves
+    // HTML5 names instead, and Cargo unifies features across the whole graph —
+    // so any unrelated dependency turning that on would silently make this
+    // accept `&nbsp;`. A NETCONF RPC carries no DTD, so HTML5 entities are
+    // undefined there and the device would receive malformed XML. Validation
+    // semantics must not depend on what a downstream crate happens to enable.
+    quick_xml::escape::resolve_xml_entity(&name).map(|s| s.to_string())
 }
