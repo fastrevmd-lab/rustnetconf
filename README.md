@@ -613,7 +613,7 @@ match result {
 | `get` | §7.7 | Done |
 | `get-config` | §7.1 | Done |
 | `edit-config` | §7.2 | Done |
-| `lock` / `unlock` | §7.4-7.5 | Done |
+| `lock` / `unlock` | §7.5-7.6 | Done |
 | `close-session` | §7.8 | Done |
 | `kill-session` | §7.9 | Done |
 | `commit` | §8.4 | Done |
@@ -623,7 +623,9 @@ match result {
 
 ## Testing
 
-197 tests across the workspace:
+504 tests across the workspace, the count CI runs
+(`cargo test --workspace --all-features`) — 489 in unit and integration
+harnesses plus 15 doc-tests:
 - **Unit tests** — framing, RPC serialization, capability parsing, vendor profiles, diff engine, inventory parsing, IPv6 address parsing, XML fragment validation, capability normalization
 - **Mock transport tests** — session state machine, CommitUnknown detection, lock recovery
 - **Integration tests** — 32 tests against a live Juniper vSRX including full edit-config round trips, vendor auto-detection, connection pooling, and concurrent sessions
@@ -717,7 +719,7 @@ SKIP_INTEGRATION=1 cargo test             # Skip tests requiring a device
 - **RPC timeout** — Configurable via `.rpc_timeout()` to prevent indefinite blocking on unresponsive devices.
 - **CLI input validation** — Device names are validated to prevent path traversal; state files are written with `0600` permissions on Unix.
 - **Typed error hierarchy** — Structured error types (`ChannelClosed`, `SessionExpired`, `MessageIdMismatch`) enable precise error handling without string matching.
-- **No unsafe code** — The entire codebase uses safe Rust.
+- **No unsafe code, enforced across every target** — declared as `unsafe_code = "forbid"` in `[workspace.lints.rust]`, which each package opts into. This is deliberate rather than a crate-root `#![forbid(unsafe_code)]`: build scripts, examples and integration tests compile as separate crates, so an inner attribute would not reach them. Verified by injecting an `unsafe` block into `build.rs`, a test target and an example, each of which now fails to compile. The one place that previously needed `unsafe` was two tests setting `HOME` via `std::env::set_var`, which the 2024 edition makes unsafe; the tilde expansion they covered was split into a pure function taking the home directory as an argument.
 
 ### Known advisories
 
@@ -758,8 +760,10 @@ To report a security vulnerability, please open an issue on GitHub.
 | Crate | Version | Purpose |
 |-------|---------|---------|
 | `async-trait` | 0.1 | Async trait support |
-| `quick-xml` | 0.37 | XML parsing (NETCONF RPC encode/decode) |
-| `russh` | 0.60 | SSH transport (pure Rust, no libssh2) |
+| `aws-lc-rs` | 1 | SHA-256 fingerprints and HMAC for `known_hosts` |
+| `base64ct` | 1 | Constant-time base64 for key blobs |
+| `quick-xml` | 0.41 | XML parsing (NETCONF RPC encode/decode) |
+| `russh` | 0.62 | SSH transport (pure Rust, no libssh2) |
 | `thiserror` | 2 | Error derive macros |
 | `tokio` | 1 | Async runtime |
 | `tracing` | 0.1 | Structured logging/tracing |

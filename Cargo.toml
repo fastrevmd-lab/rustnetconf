@@ -2,6 +2,12 @@
 members = [".", "rustnetconf-yang", "rustnetconf-cli"]
 resolver = "2"
 
+# Declared here rather than as a crate-root attribute so it covers *every*
+# target in each package - build scripts, examples and integration tests are
+# separate crates, and `#![forbid(unsafe_code)]` in lib.rs does not reach them.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
 [package]
 name = "rustnetconf"
 version = "0.15.0"
@@ -35,3 +41,6 @@ webpki-roots = { version = "0.26", optional = true }
 tokio-test = "0.4"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tempfile = "3"
+
+[lints]
+workspace = true
