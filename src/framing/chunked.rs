@@ -165,20 +165,21 @@ pub(crate) enum EomLikeness {
 
 pub(crate) fn eom_likeness(data: &[u8]) -> EomLikeness {
     const MARKERS: [&[u8]; 3] = [b"<?xml", b"<rpc", b"<!--"];
-    /// The longest marker is five bytes, plus slack for leading whitespace.
-    /// Past this the buffer is always long enough to classify for certain.
-    /// Without the bound a peer that dribbles whitespace keeps the answer
-    /// Undecided forever, and because those bytes are never consumed every
-    /// retry rescans the whole retained buffer — quadratic, and it pins the
-    /// caller until the read ceiling instead of failing fast.
+    /// Bound on how long the answer may stay Undecided. The longest marker is
+    /// five bytes, plus slack for leading whitespace.
+    ///
+    /// Only the ambiguous answer needs bounding: Yes and No both make the
+    /// caller stop, so their scans run once. Undecided is retried after every
+    /// read without consuming anything, so leaving it unbounded lets a peer
+    /// dribble whitespace, rescan a growing buffer each time, and pin the
+    /// caller until the read ceiling.
     const MAX_AMBIGUOUS: usize = 16;
 
-    let decided_by_length = data.len() > MAX_AMBIGUOUS;
-    // Scanning is bounded to the window: past it the answer no longer depends
-    // on where the whitespace ends.
-    let window = &data[..data.len().min(MAX_AMBIGUOUS + 1)];
-    let Some(first) = window.iter().position(|&b| !b.is_ascii_whitespace()) else {
-        return if decided_by_length {
+    let too_long_to_be_ambiguous = data.len() > MAX_AMBIGUOUS;
+
+    // All whitespace: nothing to judge yet, and no marker to find.
+    let Some(first) = data.iter().position(|&b| !b.is_ascii_whitespace()) else {
+        return if too_long_to_be_ambiguous {
             EomLikeness::No
         } else {
             EomLikeness::Undecided
@@ -192,15 +193,14 @@ pub(crate) fn eom_likeness(data: &[u8]) -> EomLikeness {
         }
         // A truncated read of this marker — wait rather than misclassify.
         if marker.starts_with(trimmed) {
-            return if decided_by_length {
+            return if too_long_to_be_ambiguous {
                 EomLikeness::No
             } else {
                 EomLikeness::Undecided
             };
         }
     }
-    // EOM delimiter anywhere in the buffer. Only reached on a definite answer,
-    // so this scan cannot repeat across reads.
+    // EOM delimiter anywhere in the buffer.
     if data.windows(6).any(|w| w == b"]]>]]>") {
         return EomLikeness::Yes;
     }
@@ -401,6 +401,14 @@ mod tests {
         // while every retry rescans a growing buffer.
         assert_eq!(eom_likeness(&[b' '; 64]), EomLikeness::No);
         assert_eq!(eom_likeness(&[b'\n'; 17]), EomLikeness::No);
+        // ...but the cap must not blind the classifier to a marker or a
+        // delimiter sitting past it. Both are definite answers.
+        let mut padded = vec![b' '; 32];
+        padded.extend_from_slice(b"<?xml version=\"1.0\"?>");
+        assert_eq!(eom_likeness(&padded), EomLikeness::Yes);
+        let mut padded = vec![b' '; 32];
+        padded.extend_from_slice(b"garbage]]>]]>");
+        assert_eq!(eom_likeness(&padded), EomLikeness::Yes);
     }
 
     #[test]
