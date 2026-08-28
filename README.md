@@ -645,6 +645,54 @@ sudo dnf install cmake
 
 The core `rustnetconf` and `rustnetconf-cli` crates do not require `cmake`; `cargo test -p rustnetconf` works without it.
 
+`bundled` is a default-on feature of `rustnetconf-yang`, not a hard requirement.
+If you already have libyang2 installed system-wide, opt out and link it instead —
+this skips the source build entirely (~44 MB of build artifacts) and drops the
+`cmake` prerequisite:
+
+```bash
+cargo build -p rustnetconf-yang --no-default-features   # links system libyang
+```
+
+**This path needs a libyang providing `libyang.so.3`** — SONAME 3, not
+SONAME 2. The two are binary-incompatible.
+
+The reason matters: `libyang2-sys` probes for `libyang` with no version
+constraint and falls back to a bare `-lyang`, while the bindings it ships are
+generated against SONAME 3. An ABI-2 library would therefore link without
+complaint and then feed our `build.rs` wrong struct offsets while it walks
+libyang's C types — silent undefined behaviour during code generation rather
+than a build failure.
+
+**We do not verify this for you, and the build says so.** Checking it properly
+means knowing which file `-lyang` actually resolves to, which depends on `-L`
+ordering, symlink targets, platform library naming, and — because a build
+script is a host binary — on host rather than target settings when
+cross-compiling. libyang exposes no runtime soversion accessor through these
+bindings to settle it. A check that guessed and reported "OK" would be worse
+than none, so `build.rs` emits a warning stating the ABI was not verified and
+leaves the responsibility with you.
+
+Check the **soname**, not the package version:
+
+```bash
+ls $(pkg-config --variable=libdir libyang)/libyang.so.*   # want libyang.so.3
+```
+
+`pkg-config --modversion libyang` is *not* the right check. libyang carries a
+project version and a soversion that deliberately disagree — the release
+vendored here is `LIBYANG_VERSION 2.2.8` with `LIBYANG_MAJOR_SOVERSION 3`, and
+`libyang.pc` publishes the former. Gating on the package version rejects
+exactly the library you want.
+
+Without any system libyang on the linker path, the build fails with
+`unable to find library -lyang`. That and the explicit ABI error are both
+expected outcomes — install a libyang providing SONAME 3, or keep the default.
+
+Note that `yang2` is a **build-dependency**: it runs `build.rs` code generation
+and is not linked into anything that depends on `rustnetconf-yang`, so it never
+appears in a consumer's runtime dependency graph.
+
 ```bash
 cargo test --workspace                    # Run all tests (requires cmake)
 cargo test --test integration_vsrx        # Run vSRX integration tests only

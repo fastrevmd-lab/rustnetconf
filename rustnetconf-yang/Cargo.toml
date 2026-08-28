@@ -10,7 +10,12 @@ keywords = ["yang", "netconf", "network", "codegen"]
 categories = ["network-programming"]
 
 [features]
+default = ["bundled"]
 generated = []
+# Compile libyang2 from source. Costs ~44 MB of build artifacts and makes
+# `cmake` a hard prerequisite, so it is opt-out: build with
+# `--no-default-features` to link a system libyang2 via pkg-config instead.
+bundled = ["yang2/bundled"]
 
 [dependencies]
 rustnetconf = { version = "0.15", path = ".." }
@@ -22,4 +27,4 @@ thiserror = "2"
 serde_json = "1"
 
 [build-dependencies]
-yang2 = { version = "0.18", features = ["bundled"] }
+yang2 = "0.18"
