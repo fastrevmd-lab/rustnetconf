@@ -276,6 +276,14 @@ impl ClientBuilder {
         self
     }
 
+    /// The ceiling this builder will apply, if any.
+    ///
+    /// Exists so the reconnect-persistence property can be asserted without a
+    /// live device.
+    pub fn configured_max_read_buffer(&self) -> Option<usize> {
+        self.max_read_buffer
+    }
+
     /// Establish the SSH connection and perform the NETCONF hello exchange.
     pub async fn connect(self) -> Result<Client, NetconfError> {
         let username = self.username.ok_or_else(|| {
@@ -322,6 +330,7 @@ impl ClientBuilder {
         if let Some(max_bytes) = self.max_read_buffer {
             session.set_max_read_buffer(max_bytes);
         }
+        let max_read_buffer = self.max_read_buffer;
 
         // Set explicit vendor profile if provided (overrides auto-detection)
         if let Some(profile) = self.vendor_profile {
@@ -335,6 +344,7 @@ impl ClientBuilder {
         }
 
         Ok(Client {
+            max_read_buffer,
             session,
             transport_config: TransportConfig::Ssh(config),
             gather_facts: self.gather_facts,
@@ -358,6 +368,10 @@ pub struct Client {
     keepalive_interval: Option<Duration>,
     /// RPC timeout (None = wait forever).
     rpc_timeout: Option<Duration>,
+    /// Reapplied on reconnect, like the other session settings above. A
+    /// deliberately *lowered* ceiling is a memory-exhaustion defence, and
+    /// silently restoring the 100 MB default on reconnect would weaken it.
+    max_read_buffer: Option<usize>,
 }
 
 impl Client {
@@ -468,6 +482,7 @@ impl Client {
     #[cfg(feature = "tls")]
     pub fn connect_tls(config: TlsConfig) -> TlsClientBuilder {
         TlsClientBuilder {
+            max_read_buffer: None,
             tls_config: config,
             vendor_profile: None,
             gather_facts: true,
@@ -694,6 +709,13 @@ impl Client {
             session.set_rpc_timeout(self.rpc_timeout);
         }
 
+        // Carried across, like the settings above. Losing it would silently
+        // restore the 100 MB default — reverting a ceiling a caller lowered on
+        // purpose, not merely one they raised.
+        if let Some(max_bytes) = self.max_read_buffer {
+            session.set_max_read_buffer(max_bytes);
+        }
+
         session.establish().await?;
 
         if self.gather_facts {
@@ -750,6 +772,53 @@ impl Client {
     /// Fetch operational and configuration data using an XPath filter.
     pub async fn get_xpath(&mut self, filter: &XPathFilter) -> Result<String, NetconfError> {
         self.session.get_xpath(filter).await
+    }
+
+    /// Change the read-buffer ceiling on an already-connected client.
+    ///
+    /// [`ClientBuilder::max_read_buffer`] covers the case where you build the
+    /// client yourself. This covers the one where you did not: a connection
+    /// checked out of a [`DevicePool`](crate::pool::DevicePool) was built to the
+    /// pool's settings, and a caller that needs one unusually large
+    /// `<get-config>` would otherwise have to tear the connection down and
+    /// rebuild it just to raise a limit.
+    ///
+    /// Raise it for the fetch and lower it again afterwards — restoring it
+    /// *before* propagating any error, as the example does. An `?` placed
+    /// between the two leaves the raised ceiling in place for the rest of the
+    /// connection's life.
+    ///
+    /// On a pooled connection this is belt-and-braces: `PoolGuard` records the
+    /// ceiling at checkout and restores it on check-in, so an override cannot
+    /// outlive one borrower even if the task is cancelled mid-fetch and the
+    /// restoring statement never runs. Restore it yourself anyway — the
+    /// guarantee only applies to pooled use, and `Drop` is what makes it hold,
+    /// not the trailing statement. The ceiling exists
+    /// to stop a hostile or malfunctioning device exhausting memory, and a
+    /// pooled connection left with a raised limit keeps it for whoever checks it
+    /// out next.
+    ///
+    /// This is not a substitute for streaming (#76). The reply is still
+    /// accumulated whole — this only moves the point at which that is refused.
+    ///
+    /// ```no_run
+    /// # use rustnetconf::{Client, Datastore};
+    /// # async fn demo(client: &mut Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let previous = client.max_read_buffer();
+    /// client.set_max_read_buffer(512 * 1024 * 1024);
+    /// let result = client.get_config(Datastore::Running).await;
+    /// client.set_max_read_buffer(previous); // before `?`, not after
+    /// let cfg = result?;
+    /// # Ok(()) }
+    /// ```
+    pub fn set_max_read_buffer(&mut self, max_bytes: usize) {
+        self.max_read_buffer = Some(max_bytes);
+        self.session.set_max_read_buffer(max_bytes);
+    }
+
+    /// The current read-buffer ceiling in bytes.
+    pub fn max_read_buffer(&self) -> usize {
+        self.session.max_read_buffer()
     }
 
     /// Fetch configuration with an explicit `<with-defaults>` mode (RFC 6243).
@@ -971,6 +1040,7 @@ impl Client {
     pub(crate) fn from_session_for_test(session: Session) -> Self {
         Client {
             session,
+            max_read_buffer: None,
             transport_config: TransportConfig::Ssh(crate::transport::ssh::SshConfig {
                 host: "mock".to_string(),
                 port: 0,
@@ -1187,10 +1257,22 @@ pub struct TlsClientBuilder {
     gather_facts: bool,
     keepalive_interval: Option<Duration>,
     rpc_timeout: Option<Duration>,
+    max_read_buffer: Option<usize>,
 }
 
 #[cfg(feature = "tls")]
 impl TlsClientBuilder {
+    /// Set the maximum read buffer size in bytes.
+    ///
+    /// Mirrors [`ClientBuilder::max_read_buffer`]. The TLS builder previously
+    /// had no way to set this, so a TLS client was stuck with the 100 MB
+    /// default — an asymmetry with the SSH path rather than a deliberate
+    /// choice.
+    pub fn max_read_buffer(mut self, max_bytes: usize) -> Self {
+        self.max_read_buffer = Some(max_bytes);
+        self
+    }
+
     /// Set an explicit vendor profile, overriding auto-detection.
     pub fn vendor_profile(mut self, profile: Box<dyn VendorProfile>) -> Self {
         self.vendor_profile = Some(Arc::from(profile));
@@ -1236,6 +1318,14 @@ impl TlsClientBuilder {
             session.set_rpc_timeout(self.rpc_timeout);
         }
 
+        // Before `establish`, matching the SSH builder. Recording it for
+        // reconnect alone would leave the *initial* session on the 100 MB
+        // default — so a raised limit would not take effect until the first
+        // reconnect, and a lowered one would not be enforced until then either.
+        if let Some(max_bytes) = self.max_read_buffer {
+            session.set_max_read_buffer(max_bytes);
+        }
+
         if let Some(profile) = self.vendor_profile {
             session.set_vendor_profile_arc(profile);
         }
@@ -1248,6 +1338,7 @@ impl TlsClientBuilder {
 
         Ok(Client {
             session,
+            max_read_buffer: self.max_read_buffer,
             transport_config: TransportConfig::Tls(self.tls_config),
             gather_facts: self.gather_facts,
             keepalive_interval: self.keepalive_interval,
@@ -1659,6 +1750,20 @@ mod tests {
     }
 
     /// Test that candidate_dirty() reflects state correctly.
+    #[test]
+    fn a_configured_ceiling_is_recorded_for_reconnect() {
+        // The bug this guards is a *security* regression, not a capability one:
+        // `Client` reapplies keepalive and rpc_timeout on reconnect but never
+        // stored the ceiling, so a deliberately lowered cap silently returned to
+        // the 100 MB default on any reconnect.
+        let builder = Client::connect("127.0.0.1:830").max_read_buffer(4096);
+        assert_eq!(
+            builder.configured_max_read_buffer(),
+            Some(4096),
+            "the builder must carry the ceiling through to the Client"
+        );
+    }
+
     #[tokio::test]
     async fn client_candidate_dirty_reflects_state() {
         use crate::transport::mock::MockTransport;
