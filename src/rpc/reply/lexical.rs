@@ -296,7 +296,7 @@ pub(super) fn validate_xml_chars(value: &str, field: &'static str) -> Result<(),
     }
 }
 
-pub(super) fn decode_attribute(raw: &[u8], field: &'static str) -> Result<String, RpcError> {
+pub(crate) fn decode_attribute(raw: &[u8], field: &'static str) -> Result<String, RpcError> {
     validate_attribute_lexical(raw)?;
     let raw = str::from_utf8(raw).map_err(|_| parse_error(format!("invalid {field} encoding")))?;
     let normalized = normalize_literal_attribute_whitespace(raw);

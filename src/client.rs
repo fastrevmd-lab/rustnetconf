@@ -20,7 +20,7 @@ use crate::transport::ssh::{
 #[cfg(feature = "tls")]
 use crate::transport::tls::{TlsConfig, TlsTransport};
 use crate::transport::Transport;
-use crate::types::{ConfigLocation, CopySource, DeleteTarget, WithDefaults};
+use crate::types::{ConfigLocation, CopySource, DeleteTarget, PartialLock, WithDefaults};
 use crate::types::{
     Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,
     TestOption,
@@ -794,6 +794,32 @@ impl Client {
         self.session
             .copy_config_with_defaults(target, source, mode)
             .await
+    }
+
+    /// Lock only the subtrees named by XPath expressions (RFC 5717).
+    ///
+    /// ```no_run
+    /// # use rustnetconf::Client;
+    /// # async fn demo(client: &mut Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// let lock = client.partial_lock(
+    ///     &["/if:interfaces/if:interface[if:name='ge-0/0/0']".to_string()],
+    ///     &[("if".to_string(), "urn:ietf:params:xml:ns:yang:ietf-interfaces".to_string())],
+    /// ).await?;
+    /// // ... edit only that subtree ...
+    /// client.partial_unlock(lock.lock_id).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn partial_lock(
+        &mut self,
+        selects: &[String],
+        namespaces: &[(String, String)],
+    ) -> Result<PartialLock, NetconfError> {
+        self.session.partial_lock(selects, namespaces).await
+    }
+
+    /// Release a partial lock (RFC 5717).
+    pub async fn partial_unlock(&mut self, lock_id: u32) -> Result<(), NetconfError> {
+        self.session.partial_unlock(lock_id).await
     }
 
     /// The `<with-defaults>` modes this device advertises (empty if unsupported).

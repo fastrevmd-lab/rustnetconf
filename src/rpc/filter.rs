@@ -77,6 +77,103 @@ impl Default for SubtreeFilter {
     }
 }
 
+/// Validate and render a set of `xmlns:` declarations for one element.
+///
+/// Shared by the XPath filter and by RFC 5717 partial-lock, which both let a
+/// caller bind prefixes used in an XPath expression and therefore share every
+/// way of getting that wrong.
+///
+/// `envelope_prefix` is the element-name prefix the declarations will sit
+/// beside (`"nc:"` or `""`). Binding it is refused: an `xmlns:` declaration
+/// applies to the element it sits on *including that element's own name*, so
+/// rebinding the envelope prefix would silently move the element out of the
+/// NETCONF namespace.
+///
+/// `what` names the caller in error messages.
+pub(crate) fn render_namespace_bindings(
+    namespaces: &[(String, String)],
+    envelope_prefix: &str,
+    what: &str,
+) -> Result<String, NetconfError> {
+    let envelope = envelope_prefix.strip_suffix(':').unwrap_or(envelope_prefix);
+
+    // Emitting the same prefix twice produces duplicate attributes on one
+    // element, which is malformed XML - the server cannot execute the request at
+    // all. Callers combining bindings for several expressions hit this
+    // naturally, so an identical repeat is folded away; a prefix bound to two
+    // different URIs is a genuine ambiguity and is refused rather than silently
+    // resolved to whichever came first.
+    let mut seen: Vec<(&str, &str)> = Vec::new();
+    let mut deduped: Vec<(&String, &String)> = Vec::new();
+    for (p, uri) in namespaces {
+        match seen.iter().find(|(sp, _)| *sp == p.as_str()) {
+            Some((_, existing)) if *existing == uri.as_str() => continue,
+            Some((_, existing)) => {
+                return Err(xml_err(format!(
+                    "{what} binds the prefix `{p}` to two different URIs: `{existing}` and `{uri}`"
+                )));
+            }
+            None => {
+                seen.push((p.as_str(), uri.as_str()));
+                deduped.push((p, uri));
+            }
+        }
+    }
+
+    let mut xmlns = String::new();
+    for (p, uri) in deduped {
+        if !envelope.is_empty() && p == envelope {
+            return Err(xml_err(format!(
+                "{what} cannot bind the prefix `{p}`: it is the NETCONF envelope \
+                 prefix, and rebinding it would move the element out of the NETCONF \
+                 namespace"
+            )));
+        }
+        if !is_valid_ncname(p) {
+            return Err(xml_err(format!(
+                "{what} namespace prefix `{p}` is not a valid XML name"
+            )));
+        }
+        // Namespaces in XML §3 reserves these two prefixes.
+        if p == "xmlns" {
+            return Err(xml_err(
+                "the `xmlns` prefix is reserved and cannot be declared".to_string(),
+            ));
+        }
+        if p == "xml" && uri != XML_NAMESPACE_URI {
+            return Err(xml_err(format!(
+                "the `xml` prefix may only be bound to `{XML_NAMESPACE_URI}`"
+            )));
+        }
+        // The reciprocal rules: the reserved URIs are equally restricted, not
+        // just the reserved prefixes.
+        if p != "xml" && uri == XML_NAMESPACE_URI {
+            return Err(xml_err(format!(
+                "`{XML_NAMESPACE_URI}` may only be bound to the `xml` prefix, not `{p}`"
+            )));
+        }
+        if uri == XMLNS_NAMESPACE_URI {
+            return Err(xml_err(format!(
+                "`{XMLNS_NAMESPACE_URI}` is reserved and cannot be bound to any prefix, \
+                 including `{p}`"
+            )));
+        }
+        if uri.is_empty() {
+            return Err(xml_err(format!(
+                "{what} namespace prefix `{p}` cannot be bound to an empty URI"
+            )));
+        }
+        let uri_esc = escape_xml_attr_preserving_ws(uri).ok_or_else(|| {
+            xml_err(format!(
+                "namespace URI for prefix `{p}` contains a control character that XML 1.0 \
+                 cannot represent"
+            ))
+        })?;
+        xmlns.push_str(&format!(" xmlns:{}=\"{}\"", escape_xml_attr(p), uri_esc));
+    }
+    Ok(xmlns)
+}
+
 /// Builder for an XPath filter (RFC 6241 §6.4).
 ///
 /// An XPath filter is expressed as attributes on `<filter>` rather than as
@@ -163,58 +260,7 @@ impl XPathFilter {
     /// Also rejects prefixes that are not usable as XML names, which would
     /// produce malformed output rather than a wrong namespace.
     pub(crate) fn to_filter_element(&self, prefix: &str) -> Result<String, NetconfError> {
-        let envelope = prefix.strip_suffix(':').unwrap_or(prefix);
-        let mut xmlns = String::new();
-        for (p, uri) in &self.namespaces {
-            if !envelope.is_empty() && p == envelope {
-                return Err(xml_err(format!(
-                    "XPath filter cannot bind the prefix `{p}`: it is the NETCONF \
-                     envelope prefix, and rebinding it would move <{p}:filter> out \
-                     of the NETCONF namespace"
-                )));
-            }
-            if !is_valid_ncname(p) {
-                return Err(xml_err(format!(
-                    "XPath filter namespace prefix `{p}` is not a valid XML name"
-                )));
-            }
-            // Namespaces in XML §3 reserves these two prefixes.
-            if p == "xmlns" {
-                return Err(xml_err(
-                    "the `xmlns` prefix is reserved and cannot be declared".to_string(),
-                ));
-            }
-            if p == "xml" && uri != XML_NAMESPACE_URI {
-                return Err(xml_err(format!(
-                    "the `xml` prefix may only be bound to `{XML_NAMESPACE_URI}`"
-                )));
-            }
-            // The reciprocal rules: the reserved URIs are equally restricted,
-            // not just the reserved prefixes.
-            if p != "xml" && uri == XML_NAMESPACE_URI {
-                return Err(xml_err(format!(
-                    "`{XML_NAMESPACE_URI}` may only be bound to the `xml` prefix, not `{p}`"
-                )));
-            }
-            if uri == XMLNS_NAMESPACE_URI {
-                return Err(xml_err(format!(
-                    "`{XMLNS_NAMESPACE_URI}` is reserved and cannot be bound to any \
-                     prefix, including `{p}`"
-                )));
-            }
-            if uri.is_empty() {
-                return Err(xml_err(format!(
-                    "XPath filter namespace prefix `{p}` cannot be bound to an empty URI"
-                )));
-            }
-            let uri_esc = escape_xml_attr_preserving_ws(uri).ok_or_else(|| {
-                xml_err(format!(
-                    "namespace URI for prefix `{p}` contains a control character that \
-                     XML 1.0 cannot represent"
-                ))
-            })?;
-            xmlns.push_str(&format!(" xmlns:{}=\"{}\"", escape_xml_attr(p), uri_esc));
-        }
+        let xmlns = render_namespace_bindings(&self.namespaces, prefix, "XPath filter")?;
         let select = escape_xml_attr_preserving_ws(&self.select).ok_or_else(|| {
             xml_err(
                 "XPath select expression contains a control character that XML 1.0 \
