@@ -11,6 +11,27 @@
 //! RUSTNETCONF_TEST_VSRX_HOST=192.168.1.227:830 \
 //!     cargo test --test integration_vsrx
 //! ```
+//!
+//! ## Credentials
+//!
+//! The default user is `netconf`, which is what the lab vSRX actually defines.
+//! It was `srxoutpost` — a user that does not exist on that device, so the whole
+//! suite failed with `authentication failed` against a host that was otherwise
+//! reachable and correct. The confusing part is that `srxoutpost` *can* log in
+//! over plain SSH on some lab hosts but is not served the `netconf` subsystem,
+//! so the failure looked like a device or transport fault rather than a wrong
+//! username.
+//!
+//! The key must be one the device's `netconf` user authorises. If you get
+//! `authentication failed`, check with:
+//!
+//! ```sh
+//! ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -p 830 -s netconf@<host> netconf
+//! ```
+//!
+//! A NETCONF `<hello>` on stdout means the credentials work. Silence on stdout
+//! with a login banner on stderr means the user authenticates but has no
+//! netconf subsystem access, which is a different problem entirely.
 
 mod common;
 

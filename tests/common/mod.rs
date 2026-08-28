@@ -10,7 +10,7 @@
 //! | Env var | Required | Default | Notes |
 //! |---|---|---|---|
 //! | `RUSTNETCONF_TEST_VSRX_HOST` | yes | — | e.g. `192.168.1.227:830` |
-//! | `RUSTNETCONF_TEST_VSRX_USER` | no | `srxoutpost` | Junos username |
+//! | `RUSTNETCONF_TEST_VSRX_USER` | no | `netconf` | Junos username |
 //! | `RUSTNETCONF_TEST_VSRX_KEY` | no | `$HOME/.ssh/id_ed25519` | SSH private key path |
 //!
 //! ## Examples
@@ -48,7 +48,7 @@ impl VsrxTarget {
 pub fn vsrx_target() -> Option<VsrxTarget> {
     let host = std::env::var("RUSTNETCONF_TEST_VSRX_HOST").ok()?;
     let username =
-        std::env::var("RUSTNETCONF_TEST_VSRX_USER").unwrap_or_else(|_| "srxoutpost".to_string());
+        std::env::var("RUSTNETCONF_TEST_VSRX_USER").unwrap_or_else(|_| "netconf".to_string());
     let key_path = std::env::var("RUSTNETCONF_TEST_VSRX_KEY").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/home/mharman".to_string());
         format!("{home}/.ssh/id_ed25519")
