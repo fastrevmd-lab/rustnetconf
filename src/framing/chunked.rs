@@ -165,10 +165,24 @@ pub(crate) enum EomLikeness {
 
 pub(crate) fn eom_likeness(data: &[u8]) -> EomLikeness {
     const MARKERS: [&[u8]; 3] = [b"<?xml", b"<rpc", b"<!--"];
+    /// The longest marker is five bytes, plus slack for leading whitespace.
+    /// Past this the buffer is always long enough to classify for certain.
+    /// Without the bound a peer that dribbles whitespace keeps the answer
+    /// Undecided forever, and because those bytes are never consumed every
+    /// retry rescans the whole retained buffer — quadratic, and it pins the
+    /// caller until the read ceiling instead of failing fast.
+    const MAX_AMBIGUOUS: usize = 16;
 
-    // All whitespace (or empty): nothing to judge yet.
-    let Some(first) = data.iter().position(|&b| !b.is_ascii_whitespace()) else {
-        return EomLikeness::Undecided;
+    let decided_by_length = data.len() > MAX_AMBIGUOUS;
+    // Scanning is bounded to the window: past it the answer no longer depends
+    // on where the whitespace ends.
+    let window = &data[..data.len().min(MAX_AMBIGUOUS + 1)];
+    let Some(first) = window.iter().position(|&b| !b.is_ascii_whitespace()) else {
+        return if decided_by_length {
+            EomLikeness::No
+        } else {
+            EomLikeness::Undecided
+        };
     };
     let trimmed = &data[first..];
 
@@ -178,10 +192,15 @@ pub(crate) fn eom_likeness(data: &[u8]) -> EomLikeness {
         }
         // A truncated read of this marker — wait rather than misclassify.
         if marker.starts_with(trimmed) {
-            return EomLikeness::Undecided;
+            return if decided_by_length {
+                EomLikeness::No
+            } else {
+                EomLikeness::Undecided
+            };
         }
     }
-    // EOM delimiter anywhere in the buffer.
+    // EOM delimiter anywhere in the buffer. Only reached on a definite answer,
+    // so this scan cannot repeat across reads.
     if data.windows(6).any(|w| w == b"]]>]]>") {
         return EomLikeness::Yes;
     }
@@ -378,6 +397,10 @@ mod tests {
         assert_eq!(eom_likeness(b"garbage"), EomLikeness::No);
         assert_eq!(eom_likeness(b"\x00\x01"), EomLikeness::No);
         assert_eq!(eom_likeness(b"   "), EomLikeness::Undecided);
+        // Bounded: a whitespace flood must resolve rather than stay ambiguous
+        // while every retry rescans a growing buffer.
+        assert_eq!(eom_likeness(&[b' '; 64]), EomLikeness::No);
+        assert_eq!(eom_likeness(&[b'\n'; 17]), EomLikeness::No);
     }
 
     #[test]
