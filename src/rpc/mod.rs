@@ -62,6 +62,24 @@ pub fn validate_xml_fragment(xml: &str) -> Result<(), ProtocolError> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Eof) => break,
+            // A fragment is embedded inside an RPC we have already opened with
+            // its own declaration. An `<?xml ...?>` here would put a second
+            // declaration mid-document, which is malformed however well-formed
+            // the fragment looked on its own — and the synthetic `<_>` root
+            // above is exactly what hides that from the parser.
+            Ok(Event::Decl(_)) => {
+                return Err(ProtocolError::Xml(
+                    "XML fragment must not contain a document declaration; strip the                      leading `<?xml ...?>` before embedding it"
+                        .to_string(),
+                ));
+            }
+            // Likewise a DOCTYPE, which additionally carries the entity
+            // machinery behind XXE and entity-expansion attacks.
+            Ok(Event::DocType(_)) => {
+                return Err(ProtocolError::Xml(
+                    "XML fragment must not contain a DOCTYPE declaration".to_string(),
+                ));
+            }
             Err(e) => {
                 return Err(ProtocolError::Xml(format!(
                     "XML fragment is not well-formed: {e}"
@@ -126,5 +144,30 @@ mod xml_validate_tests {
             result.is_err(),
             "malformed attribute should fail validation"
         );
+    }
+}
+
+#[cfg(test)]
+mod fragment_validation_tests {
+    use super::validate_xml_fragment;
+
+    #[test]
+    fn rejects_document_declaration() {
+        let err = validate_xml_fragment("<?xml version=\"1.0\"?><system/>")
+            .expect_err("a declaration cannot be embedded");
+        assert!(err.to_string().contains("declaration"), "got {err}");
+    }
+
+    #[test]
+    fn rejects_doctype() {
+        assert!(validate_xml_fragment("<!DOCTYPE x><system/>").is_err());
+    }
+
+    #[test]
+    fn still_accepts_ordinary_fragments() {
+        validate_xml_fragment("<system><host-name>r1</host-name></system>").unwrap();
+        validate_xml_fragment("<a/><b/>").unwrap();
+        validate_xml_fragment("<!-- a comment --><a/>").unwrap();
+        validate_xml_fragment("").unwrap();
     }
 }

@@ -35,6 +35,8 @@ pub mod uri {
     pub const INTERLEAVE: &str = "urn:ietf:params:netconf:capability:interleave:1.0";
     /// XPath filter capability (RFC 6241 §8.9).
     pub const XPATH: &str = "urn:ietf:params:netconf:capability:xpath:1.0";
+    /// URL capability (RFC 6241 §8.8) — `<url>` as a config source or target.
+    pub const URL: &str = "urn:ietf:params:netconf:capability:url:1.0";
 }
 
 /// The negotiated NETCONF version for the session.

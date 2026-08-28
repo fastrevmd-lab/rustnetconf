@@ -20,6 +20,7 @@ use crate::transport::ssh::{
 #[cfg(feature = "tls")]
 use crate::transport::tls::{TlsConfig, TlsTransport};
 use crate::transport::Transport;
+use crate::types::{ConfigLocation, CopySource, DeleteTarget};
 use crate::types::{
     Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,
     TestOption,
@@ -749,6 +750,42 @@ impl Client {
     /// Fetch operational and configuration data using an XPath filter.
     pub async fn get_xpath(&mut self, filter: &XPathFilter) -> Result<String, NetconfError> {
         self.session.get_xpath(filter).await
+    }
+
+    /// Copy a configuration from one location to another (RFC 6241 §7.3).
+    ///
+    /// ```no_run
+    /// # use rustnetconf::{Client, Datastore};
+    /// # use rustnetconf::types::{ConfigLocation, CopySource};
+    /// # async fn demo(client: &mut Client) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Snapshot running into startup.
+    /// client.copy_config(
+    ///     &ConfigLocation::Datastore(Datastore::Startup),
+    ///     &CopySource::Datastore(Datastore::Running),
+    /// ).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn copy_config(
+        &mut self,
+        target: &ConfigLocation,
+        source: &CopySource,
+    ) -> Result<(), NetconfError> {
+        self.session.copy_config(target, source).await
+    }
+
+    /// Delete a configuration datastore or URL-backed config (RFC 6241 §7.4).
+    ///
+    /// [`DeleteTarget`] can only name `startup` or a URL — the two the RFC's
+    /// `config-target` choice permits for this operation.
+    pub async fn delete_config(&mut self, target: &DeleteTarget) -> Result<(), NetconfError> {
+        self.session.delete_config(target).await
+    }
+
+    /// Cancel an in-progress confirmed commit (RFC 6241 §8.4.4.1).
+    ///
+    /// Requires `:confirmed-commit:1.1`.
+    pub async fn cancel_commit(&mut self, persist_id: Option<&str>) -> Result<(), NetconfError> {
+        self.session.cancel_commit(persist_id).await
     }
 
     /// Start building an edit-config operation.
