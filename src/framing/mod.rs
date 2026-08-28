@@ -93,6 +93,16 @@ impl StreamDecoder {
             return Ok(FramePart::NeedMore);
         }
         if buffer[0] != b'\n' || buffer[1] != b'#' {
+            // Same classification the all-at-once path applies. Some firmware
+            // advertises :base:1.1 and then sends EOM-framed replies; callers
+            // key recovery and diagnostics off this typed variant, so the
+            // streaming path must not flatten it to a generic parse failure.
+            if chunked::looks_like_eom_data(buffer) {
+                return Err(crate::error::FramingError::Mismatch {
+                    advertised: "1.1 (chunked)".to_string(),
+                    actual: "1.0 (EOM)".to_string(),
+                });
+            }
             return Err(crate::error::FramingError::Invalid(format!(
                 "expected chunk header, got {:?}",
                 &buffer[..buffer.len().min(4)]
@@ -325,6 +335,13 @@ mod incremental_tests {
     #[test]
     fn chunked_still_detects_eom_framing_from_a_lying_device() {
         let mut dec = StreamDecoder::for_version(true);
-        assert!(dec.decode_part(b"<rpc-reply/>]]>]]>").is_err());
+        let err = dec
+            .decode_part(b"<?xml version=\"1.0\"?><rpc-reply><ok/></rpc-reply>]]>]]>")
+            .expect_err("EOM data under chunked framing must fail");
+        // The variant, not merely an error: callers switch on it.
+        assert!(
+            matches!(err, crate::error::FramingError::Mismatch { .. }),
+            "expected FramingError::Mismatch, got: {err:?}"
+        );
     }
 }

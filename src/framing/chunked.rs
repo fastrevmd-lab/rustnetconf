@@ -141,7 +141,7 @@ impl Framer for ChunkedFramer {
 
 /// Heuristic: does this buffer look like EOM-framed data rather than chunked?
 /// Checks for XML start (`<?xml` or `<rpc`) or the EOM delimiter `]]>]]>`.
-fn looks_like_eom_data(data: &[u8]) -> bool {
+pub(crate) fn looks_like_eom_data(data: &[u8]) -> bool {
     if data.is_empty() {
         return false;
     }
