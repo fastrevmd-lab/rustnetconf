@@ -282,7 +282,7 @@ audit (RNC-SEC-001..006 + CI hardening). Merged via PR #27.
 | RFC 6242 | NETCONF over SSH | ✅ supported |
 | RFC 7589 | NETCONF over TLS | ✅ supported (feature flag `tls`) — **needs physical SRX or non-vSRX for TLS test** |
 | RFC 5277 | Event Notifications | ✅ supported — tested on Junos 24.4 vSRX (subscription + capability; interleave limited by device) |
-| RFC 5717 | Partial Lock RPC | 💡 planned |
+| RFC 5717 | Partial Lock RPC | ✅ supported — gated on `:partial-lock:1.0` |
 | RFC 8071 | NETCONF Call Home | 💡 planned |
 | RFC 6243 | With-defaults Capability | ✅ supported — mode gated on the device's `basic-mode`/`also-supported` list |
 | RFC 6022 | YANG Module for NETCONF Monitoring | 💡 planned |
@@ -552,6 +552,7 @@ let config = conn.get_config(Datastore::Running).await?;
 - **XML fragment validation** — user-provided RPC content is validated before insertion to prevent XML injection
 - **CommitUnknown detection** — distinguishes "commit failed" from "maybe committed, connection lost"
 - **Stale lock recovery** — `lock_or_kill_stale()` kills crashed sessions holding locks
+- **Partial locking (RFC 5717)** — lock only the subtrees an XPath names, **in `running`**. RFC 5717 does not cover `candidate` or `startup`, so this is not a substitute for the candidate lock the `netconf apply` flow takes. An indeterminate result poisons the session so a pooled connection is never recycled holding a lock it cannot release; a definitive rejection such as `lock-denied` does not, since a failed partial lock is atomic
 - **Framing mismatch detection** — catches firmware bugs where devices send wrong framing
 - **IPv6 support** — connect to devices using bracket notation (`[::1]:830`) or bare IPv6 addresses
 
@@ -623,6 +624,7 @@ match result {
 | `commit` | §8.4 | Done |
 | `confirmed-commit` | §8.4 | Done |
 | `cancel-commit` | §8.4.4.1 | Done |
+| `partial-lock` / `partial-unlock` | RFC 5717 | Done |
 | `validate` | §8.6 | Done |
 | `discard-changes` | §8.3 | Done |
 

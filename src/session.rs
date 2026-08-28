@@ -36,7 +36,7 @@ use crate::rpc::RpcReply;
 use crate::transport::Transport;
 use crate::types::{
     ConfigLocation, CopySource, Datastore, DefaultOperation, DeleteTarget, ErrorOption, LoadAction,
-    LoadFormat, OpenConfigurationMode, TestOption, WithDefaults,
+    LoadFormat, OpenConfigurationMode, PartialLock, TestOption, WithDefaults,
 };
 use crate::vendor::{self, CloseSequence, VendorProfile};
 
@@ -100,6 +100,9 @@ pub struct Session {
     /// Maximum number of bytes that may accumulate in `read_buffer` before
     /// the read is aborted. Defaults to [`MAX_READ_BUFFER`].
     max_read_buffer: usize,
+    /// Set before a `<partial-lock>` is written and cleared only once a
+    /// `lock-id` has been parsed from the reply. See [`Session::is_alive`].
+    partial_lock_uncertain: bool,
     /// True if this session may have left uncommitted changes in the shared
     /// candidate datastore. Used to decide whether to send `<discard-changes/>`
     /// on close.
@@ -130,6 +133,7 @@ impl Session {
             has_subscription: false,
             rpc_timeout: None,
             max_read_buffer: MAX_READ_BUFFER,
+            partial_lock_uncertain: false,
             candidate_dirty: false,
         }
     }
@@ -368,7 +372,7 @@ impl Session {
     ///
     /// Fast in-memory check — does not send any RPC.
     pub fn is_alive(&self) -> bool {
-        self.state == SessionState::Established
+        self.state == SessionState::Established && !self.partial_lock_uncertain
     }
 
     /// Probe the session by sending a lightweight RPC.
@@ -1044,6 +1048,137 @@ impl Session {
         let msg_id = self.next_message_id();
         let xml = operations::lock_xml(&msg_id, target);
         self.send_rpc(&xml, &msg_id).await?;
+        Ok(())
+    }
+
+    /// Lock only the subtrees named by XPath expressions, **in `running`**
+    /// (RFC 5717).
+    ///
+    /// # Scope
+    ///
+    /// This applies to the running datastore and nothing else. RFC 5717 §1:
+    /// *"Partial locking only affects configuration data and only the running
+    /// datastore. The candidate or the start-up datastore are not affected"*,
+    /// and *"The candidate datastore cannot be locked using the
+    /// `<partial-lock>` operation."*
+    ///
+    /// So this is **not** a narrower substitute for a candidate lock, and it
+    /// does not help the candidate-based `netconf apply` flow — that path edits,
+    /// validates and commits `candidate`, and still needs its full `<lock>`.
+    /// Dropping that lock because a partial lock is held would leave concurrent
+    /// candidate edits unprotected. Partial locking is for writable-running
+    /// workflows, where it lets edits to unrelated subtrees proceed
+    /// concurrently instead of serializing on one datastore-wide lock.
+    ///
+    /// Prefixes used in the expressions must be bound via `namespaces`; the
+    /// declarations are emitted on `<partial-lock>` where the expressions can
+    /// see them, and are validated exactly as the XPath filter's are.
+    ///
+    /// Returns the server-assigned [`PartialLock`]. Its `locked_nodes` are
+    /// worth checking rather than assuming: an expression may match several
+    /// nodes or none.
+    pub async fn partial_lock(
+        &mut self,
+        selects: &[String],
+        namespaces: &[(String, String)],
+    ) -> Result<PartialLock, NetconfError> {
+        self.require_capability(crate::capability::uri::PARTIAL_LOCK, "partial-lock")?;
+        // Refuse outright rather than retry. If an earlier partial-lock or
+        // -unlock left this set, the server may still hold a lock this session
+        // cannot name; a second attempt that succeeded would clear the flag and
+        // report health while that first lock is still outstanding, and the pool
+        // would then recycle the connection. The flag is only cleared by a
+        // definitive outcome of the request that set it, or by reconnecting.
+        self.ensure_lock_state_known()?;
+        let msg_id = self.next_message_id();
+        let xml = operations::partial_lock_xml(&msg_id, selects, namespaces)?;
+
+        // Set *before* the write, and cleared only once a lock-id is in hand.
+        //
+        // Every way this can fail after the bytes leave - an RPC timeout, the
+        // future being cancelled, an `<ok/>` with no id, an unparseable reply -
+        // may leave the server holding a lock this session cannot name, and so
+        // cannot release. Marking first is what makes that survive
+        // cancellation: nothing after an await runs if the future is dropped.
+        //
+        // `is_alive` reports false while this is set, so a pooled connection is
+        // discarded on check-in rather than recycled still holding the lock.
+        self.partial_lock_uncertain = true;
+
+        let reply = match self.send_rpc(&xml, &msg_id).await {
+            Ok(reply) => reply,
+            Err(e) => {
+                // A parsed `<rpc-error>` is definitive: RFC 5717 makes a failed
+                // partial lock atomic, so `lock-denied` or `no-matches` means no
+                // lock was retained and the session is perfectly healthy. Only
+                // the genuinely unknown outcomes — timeouts, cancellation, a
+                // reply we could not parse — leave the flag set. Otherwise
+                // routine lock contention would throw away good pooled
+                // connections.
+                if matches!(e, NetconfError::Rpc(crate::error::RpcError::ServerError(_))) {
+                    self.partial_lock_uncertain = false;
+                }
+                return Err(e);
+            }
+        };
+        let result = match reply {
+            RpcReply::Data(data) | RpcReply::DataWithWarnings(data, _) => {
+                operations::parse_partial_lock_reply(&data)
+            }
+            // An `<ok/>` means the server accepted the lock but told us nothing
+            // about it. Without the lock-id it cannot be released, so this is an
+            // error rather than a silent success.
+            RpcReply::Ok | RpcReply::OkWithWarnings(_) => Err(ProtocolError::Xml(
+                "<partial-lock> returned <ok/> with no <lock-id>; the lock could not \
+                     be released"
+                    .to_string(),
+            )
+            .into()),
+        };
+        if result.is_ok() {
+            self.partial_lock_uncertain = false;
+        }
+        result
+    }
+
+    /// Release a partial lock (RFC 5717).
+    pub async fn partial_unlock(&mut self, lock_id: u32) -> Result<(), NetconfError> {
+        self.require_capability(crate::capability::uri::PARTIAL_LOCK, "partial-unlock")?;
+        self.ensure_lock_state_known()?;
+        let msg_id = self.next_message_id();
+        let xml = operations::partial_unlock_xml(&msg_id, lock_id);
+
+        // The release is as indeterminate as the acquire. If this times out or
+        // is cancelled after the write, the lock may still be held — and the
+        // caller is about to drop the only copy of `lock_id`. Poisoning before
+        // the write means `PoolGuard` discards the connection instead of
+        // returning a session that silently holds a lock nobody can name.
+        self.partial_lock_uncertain = true;
+
+        match self.send_rpc(&xml, &msg_id).await {
+            Ok(_) => {
+                self.partial_lock_uncertain = false;
+                Ok(())
+            }
+            Err(e) => {
+                // Deliberately asymmetric with `partial_lock`. There, a parsed
+                // rejection proves *no* lock was taken, so the session is clean.
+                // Here the inference inverts: the server processed the release
+                // and refused it, which means the lock is still held. Clearing
+                // the flag would let `PoolGuard` recycle a session that still
+                // owns a lock nobody is going to release, blocking other writers
+                // until it ages out. Stay poisoned regardless of the error kind.
+                Err(e)
+            }
+        }
+    }
+
+    /// Error when a previous partial lock or unlock left this session's lock
+    /// state unknown.
+    fn ensure_lock_state_known(&self) -> Result<(), NetconfError> {
+        if self.partial_lock_uncertain {
+            return Err(ProtocolError::SessionExpired.into());
+        }
         Ok(())
     }
 
@@ -3209,6 +3344,260 @@ mod tests {
             .expect_err("report-all is not advertised");
         assert!(err.to_string().contains("report-all"), "got {err}");
         assert_eq!(written.lock().unwrap().len(), before, "nothing sent");
+    }
+
+    fn mock_partial_lock_hello() -> Vec<u8> {
+        let hello = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability>urn:ietf:params:netconf:base:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:partial-lock:1.0</capability>
+  </capabilities>
+  <session-id>1</session-id>
+</hello>"#;
+        let mut buf = hello.as_bytes().to_vec();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    #[tokio::test]
+    async fn partial_lock_accepts_a_namespace_omitting_device() {
+        // The common shape: the envelope declares the base namespace as the
+        // default and the device omits RFC 5717's on its output elements, so
+        // <lock-id> inherits the base one. Rejecting that would error out after
+        // the server granted the lock, stranding it.
+        let hello = br#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"><capabilities><capability>urn:ietf:params:netconf:base:1.0</capability><capability>urn:ietf:params:netconf:capability:partial-lock:1.0</capability></capabilities><session-id>1</session-id></hello>]]>]]>"#;
+        let reply = br#"<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="1"><data><lock-id>7</lock-id></data></rpc-reply>]]>]]>"#;
+        let mut data = hello.to_vec();
+        data.extend_from_slice(reply);
+
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let lock = session
+            .partial_lock(&["/x".to_string()], &[])
+            .await
+            .expect("a namespace-omitting device must still yield its lock-id");
+        assert_eq!(lock.lock_id, 7);
+    }
+
+    #[tokio::test]
+    async fn partial_lock_requires_the_capability() {
+        let transport = MockTransport::new(mock_device_hello());
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let before = written.lock().unwrap().len();
+        let err = session
+            .partial_lock(&["/x".to_string()], &[])
+            .await
+            .expect_err("partial-lock is not advertised");
+        assert!(err.to_string().contains("partial-lock"), "got {err}");
+        assert_eq!(written.lock().unwrap().len(), before, "nothing sent");
+    }
+
+    #[tokio::test]
+    async fn partial_lock_returns_the_lock_id() {
+        let mut data = mock_partial_lock_hello();
+        data.extend_from_slice(&mock_data_reply(
+            "1",
+            r#"<lock-id xmlns="urn:ietf:params:xml:ns:netconf:partial-lock:1.0">127</lock-id><locked-node xmlns="urn:ietf:params:xml:ns:netconf:partial-lock:1.0">/interfaces</locked-node>"#,
+        ));
+        let transport = MockTransport::new(data);
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let lock = session
+            .partial_lock(
+                &["/if:interfaces".to_string()],
+                &[(
+                    "if".to_string(),
+                    "urn:ietf:params:xml:ns:yang:ietf-interfaces".to_string(),
+                )],
+            )
+            .await
+            .expect("partial-lock");
+        assert_eq!(lock.lock_id, 127);
+        assert_eq!(lock.locked_nodes.len(), 1);
+        assert_eq!(lock.locked_nodes[0].path, "/interfaces");
+
+        let sent = String::from_utf8_lossy(&written.lock().unwrap()).to_string();
+        assert!(
+            sent.contains("<select>/if:interfaces</select>"),
+            "sent: {sent}"
+        );
+        assert!(sent.contains("xmlns:if="), "sent: {sent}");
+    }
+
+    #[tokio::test]
+    async fn partial_lock_ok_without_lock_id_is_an_error() {
+        // An <ok/> means the server took a lock we can never release.
+        let mut data = mock_partial_lock_hello();
+        data.extend_from_slice(&mock_ok_reply("1"));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let err = session
+            .partial_lock(&["/x".to_string()], &[])
+            .await
+            .expect_err("<ok/> carries no lock-id");
+        assert!(err.to_string().contains("lock-id"), "got {err}");
+    }
+
+    #[tokio::test]
+    async fn indeterminate_partial_lock_poisons_the_session() {
+        // <ok/> with no lock-id: the server may hold a lock we cannot name.
+        // The session must not go back into a pool still holding it.
+        let mut data = mock_partial_lock_hello();
+        data.extend_from_slice(&mock_ok_reply("1"));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        assert!(session.is_alive());
+
+        let _ = session
+            .partial_lock(&["/x".to_string()], &[])
+            .await
+            .expect_err("<ok/> carries no lock-id");
+
+        assert!(
+            !session.is_alive(),
+            "an indeterminate partial-lock must poison the session so the pool \
+             discards it rather than recycling an unreleasable lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn lock_denied_does_not_poison_the_session() {
+        // Routine contention. RFC 5717 makes a failed partial lock atomic, so a
+        // parsed <rpc-error> definitively means no lock is held and the session
+        // is healthy - poisoning here would throw away good pooled connections
+        // every time two operators collide.
+        let mut data = mock_partial_lock_hello();
+        data.extend_from_slice(&mock_lock_denied_reply("1", 42));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let err = session
+            .partial_lock(&["/x".to_string()], &[])
+            .await
+            .expect_err("lock is held elsewhere");
+        assert!(err.to_string().contains("LockDenied"), "got {err}");
+        assert!(
+            session.is_alive(),
+            "a definitive rejection must leave the session usable"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_poisoned_session_refuses_further_lock_operations() {
+        // A retry that succeeded would clear the flag and report health while
+        // the *first* request's lock is still outstanding and unnameable.
+        let mut data = mock_partial_lock_hello();
+        data.extend_from_slice(&mock_ok_reply("1")); // <ok/>: no lock-id
+        data.extend_from_slice(&mock_data_reply(
+            "2",
+            r#"<lock-id xmlns="urn:ietf:params:xml:ns:netconf:partial-lock:1.0">5</lock-id>"#,
+        ));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let _ = session
+            .partial_lock(&["/x".to_string()], &[])
+            .await
+            .expect_err("<ok/> carries no lock-id");
+        assert!(!session.is_alive());
+
+        // Even though a good reply is queued, the retry must be refused.
+        assert!(
+            session
+                .partial_lock(&["/y".to_string()], &[])
+                .await
+                .is_err(),
+            "a poisoned session must not accept another partial-lock"
+        );
+        assert!(
+            session.partial_unlock(5).await.is_err(),
+            "nor an unlock, which would look like it resolved the uncertainty"
+        );
+        assert!(!session.is_alive(), "still poisoned");
+    }
+
+    #[tokio::test]
+    async fn rejected_partial_unlock_keeps_the_session_poisoned() {
+        // Inverse of the acquire case: a refused release means the lock is
+        // still held, so the session must not go back into the pool.
+        let mut data = mock_partial_lock_hello();
+        data.extend_from_slice(&mock_commit_error_reply("1"));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let _ = session
+            .partial_unlock(5)
+            .await
+            .expect_err("server refused the release");
+        assert!(
+            !session.is_alive(),
+            "a refused unlock leaves the lock held; the session must not be recycled"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_partial_unlock_leaves_the_session_usable() {
+        let mut data = mock_partial_lock_hello();
+        data.extend_from_slice(&mock_ok_reply("1"));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session.partial_unlock(9).await.expect("partial-unlock");
+        assert!(
+            session.is_alive(),
+            "a clean unlock must leave the session reusable"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_partial_lock_leaves_the_session_usable() {
+        let mut data = mock_partial_lock_hello();
+        data.extend_from_slice(&mock_data_reply(
+            "1",
+            r#"<lock-id xmlns="urn:ietf:params:xml:ns:netconf:partial-lock:1.0">3</lock-id>"#,
+        ));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session
+            .partial_lock(&["/x".to_string()], &[])
+            .await
+            .expect("partial-lock");
+        assert!(
+            session.is_alive(),
+            "a clean lock must not poison the session"
+        );
+    }
+
+    #[tokio::test]
+    async fn partial_unlock_sends_the_lock_id() {
+        let mut data = mock_partial_lock_hello();
+        data.extend_from_slice(&mock_ok_reply("1"));
+        let transport = MockTransport::new(data);
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session.partial_unlock(127).await.expect("partial-unlock");
+        let sent = String::from_utf8_lossy(&written.lock().unwrap()).to_string();
+        assert!(sent.contains("<lock-id>127</lock-id>"), "sent: {sent}");
     }
 
     #[tokio::test]

@@ -37,6 +37,8 @@ pub mod uri {
     pub const XPATH: &str = "urn:ietf:params:netconf:capability:xpath:1.0";
     /// URL capability (RFC 6241 §8.8) — `<url>` as a config source or target.
     pub const URL: &str = "urn:ietf:params:netconf:capability:url:1.0";
+    /// Partial lock capability (RFC 5717).
+    pub const PARTIAL_LOCK: &str = "urn:ietf:params:netconf:capability:partial-lock:1.0";
     /// With-defaults capability (RFC 6243).
     pub const WITH_DEFAULTS: &str = "urn:ietf:params:netconf:capability:with-defaults:1.0";
 }

@@ -34,6 +34,46 @@ pub enum ConfigLocation {
     Url(String),
 }
 
+/// One instance-identifier the server reported locking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockedNode {
+    /// The instance-identifier, verbatim.
+    pub path: String,
+    /// The prefix bindings in scope for [`path`](Self::path).
+    ///
+    /// An XPath prefix means nothing without its binding, and RFC 5717 does not
+    /// require the server to reuse the prefixes from the request — it may return
+    /// `/x:interfaces` for a request written as `/if:interfaces`. Returning the
+    /// path alone would hand back a string that cannot be resolved.
+    ///
+    /// Only declarations visible inside the reply payload are captured. A server
+    /// that declares them further up, on `<rpc-reply>`, puts them outside what
+    /// this layer receives, so this can be empty even for a prefixed path.
+    pub namespaces: Vec<(String, String)>,
+}
+
+/// The result of a successful `<partial-lock>` (RFC 5717).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PartialLock {
+    /// Server-assigned identifier, required by `<partial-unlock>`.
+    pub lock_id: u32,
+    /// The instance-identifiers the server actually locked.
+    ///
+    /// Worth checking rather than assuming: RFC 5717 has the server report what
+    /// it locked, which need not be one node per `<select>` — an expression may
+    /// match several nodes.
+    ///
+    /// **An empty list means the server reported locking nothing.** RFC 5717
+    /// requires at least one `<locked-node>` in a successful reply, and answers
+    /// an all-empty match with `operation-failed` / `no-matches` instead, so
+    /// this shape indicates a non-conforming device. It is surfaced rather than
+    /// turned into an error on purpose: the lock *was* granted and the
+    /// `lock_id` is the only way to release it, and refusing the reply would
+    /// discard that id and strand the lock on the device with no way to recover
+    /// it. Treat an empty list as "extent unknown, release it".
+    pub locked_nodes: Vec<LockedNode>,
+}
+
 /// `<with-defaults>` retrieval mode (RFC 6243).
 ///
 /// Without this, what a device reports for a leaf sitting at its YANG default

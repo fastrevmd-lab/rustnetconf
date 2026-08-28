@@ -6,9 +6,11 @@
 //! All RPCs use a prefixed namespace (`nc:`) instead of a default namespace
 //! to avoid `xmlns=""` on child elements, which Junos 24.4 rejects.
 
-use crate::error::NetconfError;
+use crate::error::{NetconfError, ProtocolError};
 use crate::rpc::filter::XPathFilter;
-use crate::types::{ConfigLocation, CopySource, DeleteTarget, WithDefaults};
+use crate::types::{
+    ConfigLocation, CopySource, DeleteTarget, LockedNode, PartialLock, WithDefaults,
+};
 use crate::types::{
     Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,
     TestOption,
@@ -465,6 +467,328 @@ pub fn cancel_commit_xml(
     ))
 }
 
+/// RFC 5717's namespace for partial locking.
+const PARTIAL_LOCK_NS: &str = "urn:ietf:params:xml:ns:netconf:partial-lock:1.0";
+
+/// The base NETCONF XML namespace, which a reply's envelope normally declares
+/// as the default. A device that omits RFC 5717's namespace on its output
+/// elements leaves them inheriting this one.
+///
+/// There is exactly one. NETCONF 1.1 changed the capability URI
+/// (`urn:ietf:params:netconf:base:1.1`) and the framing, but RFC 6241 keeps the
+/// protocol XML namespace at `:base:1.0`; a `…xml:ns:netconf:base:1.1` does not
+/// exist, and accepting it would let a foreign element be read as the lock id.
+const BASE_XML_NS: &str = "urn:ietf:params:xml:ns:netconf:base:1.0";
+
+/// Generate a `<partial-lock>` RPC request (RFC 5717 §2.4.1).
+///
+/// Each `select` is an XPath expression naming a subtree to lock. Prefixes used
+/// in those expressions must be bound via `namespaces`; the declarations land on
+/// `<partial-lock>` itself, where the expressions can see them.
+///
+/// The expressions are element *text* here, unlike the XPath filter's `select`
+/// attribute, so they use the text escaper.
+pub fn partial_lock_xml(
+    message_id: &str,
+    selects: &[String],
+    namespaces: &[(String, String)],
+) -> Result<String, NetconfError> {
+    if selects.is_empty() {
+        return Err(NetconfError::Protocol(ProtocolError::InvalidValue(
+            "<partial-lock> requires at least one <select> expression".to_string(),
+        )));
+    }
+    // The element is unprefixed (it carries PARTIAL_LOCK_NS as its default
+    // namespace), so there is no envelope prefix a binding could shadow.
+    let xmlns = crate::rpc::filter::render_namespace_bindings(namespaces, "", "partial-lock")?;
+
+    let mut body = String::new();
+    for select in selects {
+        let escaped = escape_xml_text_exact(select).ok_or_else(|| {
+            NetconfError::Protocol(ProtocolError::Xml(
+                "partial-lock select expression contains a character XML 1.0 cannot \
+                 represent"
+                    .to_string(),
+            ))
+        })?;
+        body.push_str(&format!("\n    <select>{escaped}</select>"));
+    }
+
+    let safe_id = escape_xml_attr(message_id);
+    Ok(format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <partial-lock xmlns="{PARTIAL_LOCK_NS}"{xmlns}>{body}
+  </partial-lock>
+</rpc>"#
+    ))
+}
+
+/// Parse a `<partial-lock>` reply payload into a [`PartialLock`].
+///
+/// Deliberately crate-private. It runs on a payload `parse_rpc_reply` has
+/// already validated — undeclared prefixes rejected, entity references
+/// resolved, lexical checks applied. Exposed on its own it would accept input
+/// that validation would have caught: `<lock-id>7&bogus;</lock-id>` reads as 7
+/// once the unresolvable reference is dropped, and `<v:lock-id>` with an
+/// undeclared `v` looks unqualified and so passes the namespace check.
+pub(crate) fn parse_partial_lock_reply(payload: &str) -> Result<PartialLock, NetconfError> {
+    use quick_xml::events::Event;
+    use quick_xml::Reader;
+
+    let wrapped = format!("<_>{payload}</_>");
+    let mut reader = Reader::from_str(&wrapped);
+    reader.config_mut().check_end_names = true;
+
+    let mut lock_id: Option<u32> = None;
+    let mut locked_nodes: Vec<LockedNode> = Vec::new();
+    let mut current: Option<&'static str> = None;
+    // Namespace declarations in scope, as a stack: a `<locked-node>` resolves
+    // its prefixes against whatever is declared on it or on an enclosing
+    // element of the payload.
+    let mut scopes: Vec<Vec<(Option<String>, String)>> = Vec::new();
+    // Accumulated across Text and GeneralRef: this quick-xml streams entity
+    // references as their own events, so a loop reading only Text silently
+    // truncates any value containing one (see `crate::xml_entity`). A locked
+    // node path with an escaped `&` would otherwise come back cut in half.
+    let mut text_buf = String::new();
+    let mut buf = Vec::new();
+
+    /// Namespace declarations on one start tag: `(Some(prefix), uri)` for a
+    /// prefixed binding, `(None, uri)` for the default `xmlns`.
+    ///
+    /// Values go through the reply parser's own `decode_attribute`, which
+    /// unescapes and validates them. Reading `attr.value` raw would store
+    /// `urn:x?a=1&amp;b=2` instead of the actual URI, leaving the binding wrong
+    /// and the prefixed path unresolvable.
+    fn bindings_of(
+        e: &quick_xml::events::BytesStart<'_>,
+    ) -> Result<Vec<(Option<String>, String)>, NetconfError> {
+        let mut out = Vec::new();
+        for attr in e.attributes().with_checks(true) {
+            // `with_checks(true)` reports duplicate attributes and other
+            // malformedness. Swallowing that would let this public helper
+            // return a lock from a document no conforming parser would accept.
+            let attr = attr.map_err(|e| {
+                NetconfError::Protocol(ProtocolError::Xml(format!(
+                    "partial-lock reply has an invalid attribute: {e}"
+                )))
+            })?;
+            let key = attr.key.as_ref();
+            let prefix = if key == b"xmlns" {
+                None
+            } else if let Some(p) = key.strip_prefix(b"xmlns:") {
+                match std::str::from_utf8(p) {
+                    Ok(p) => Some(p.to_string()),
+                    Err(_) => continue,
+                }
+            } else {
+                continue;
+            };
+            let value = crate::rpc::reply::lexical::decode_attribute(
+                attr.value.as_ref(),
+                "namespace declaration value",
+            )
+            .map_err(|e| NetconfError::Protocol(ProtocolError::Xml(e.to_string())))?;
+            out.push((prefix, value));
+        }
+        Ok(out)
+    }
+
+    /// Resolve an element's namespace against the declarations in scope.
+    fn resolve_ns(raw_name: &[u8], scopes: &[Vec<(Option<String>, String)>]) -> Option<String> {
+        let prefix = raw_name
+            .iter()
+            .position(|b| *b == b':')
+            .and_then(|i| std::str::from_utf8(&raw_name[..i]).ok())
+            .map(|s| s.to_string());
+        // `xml` is bound implicitly and never appears in a declaration, so it
+        // must be resolved here; otherwise <xml:lock-id> looks unqualified and
+        // would be wrongly accepted.
+        if prefix.as_deref() == Some("xml") {
+            return Some("http://www.w3.org/XML/1998/namespace".to_string());
+        }
+
+        for scope in scopes.iter().rev() {
+            for (p, uri) in scope {
+                if p.as_deref() == prefix.as_deref() {
+                    // `xmlns=""` is an *undeclaration* (Namespaces in XML §6.2):
+                    // the element is in NO namespace, not in one whose URI is
+                    // empty. Returning Some("") would reject a valid unqualified
+                    // <lock-id> — the costly direction, since the server has
+                    // already granted the lock and the caller would be unable to
+                    // release it.
+                    return if uri.is_empty() {
+                        None
+                    } else {
+                        Some(uri.clone())
+                    };
+                }
+            }
+        }
+        None
+    }
+
+    loop {
+        match reader.read_event_into(&mut buf) {
+            Ok(Event::Start(_)) if current.is_some() => {
+                return Err(NetconfError::Protocol(ProtocolError::Xml(
+                    "partial-lock reply has a nested element inside a scalar field".to_string(),
+                )));
+            }
+            Ok(Event::Start(e)) => {
+                scopes.push(bindings_of(&e)?);
+                // Match on the *expanded* name. Matching the local name alone
+                // would accept a `<v:lock-id>` from an unrelated namespace and
+                // hand back a foreign id as a successful lock. An unqualified
+                // element is accepted as well: RFC 5717 puts these in its own
+                // namespace, but servers that omit it are common enough that
+                // refusing them outright would be less useful than the risk it
+                // removes.
+                let ns = resolve_ns(e.name().as_ref(), &scopes);
+                let in_scope = match ns.as_deref() {
+                    Some(PARTIAL_LOCK_NS) => true,
+                    // No namespace, or the base namespace inherited from the
+                    // reply envelope. Devices that omit RFC 5717's namespace on
+                    // their output elements are common, and their `<lock-id>`
+                    // arrives carrying whatever `<rpc-reply>` declared as the
+                    // default. Rejecting that would error out *after* the server
+                    // granted the lock, leaving the caller unable to release it
+                    // — much worse than the risk of accepting a stray element.
+                    None => true,
+                    Some(BASE_XML_NS) => true,
+                    // A genuinely foreign namespace (a vendor extension, say) is
+                    // still not RFC 5717 output.
+                    Some(_) => false,
+                };
+                current = if in_scope {
+                    match e.local_name().as_ref() {
+                        b"lock-id" => Some("lock-id"),
+                        b"locked-node" => Some("locked-node"),
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                text_buf.clear();
+            }
+            Ok(Event::Empty(_)) if current.is_some() => {
+                // `<lock-id>1<meta/>2</lock-id>` is well-formed but not valid
+                // here. Ignoring the child would leave `current` set and
+                // concatenate the surrounding text into "12" — a lock id the
+                // device never sent.
+                return Err(NetconfError::Protocol(ProtocolError::Xml(
+                    "partial-lock reply has a nested element inside a scalar field".to_string(),
+                )));
+            }
+            Ok(Event::Empty(_)) => {}
+            Ok(Event::Text(ref text)) if current.is_some() => {
+                let decoded = text.decode().map_err(|e| {
+                    NetconfError::Protocol(ProtocolError::Xml(format!(
+                        "partial-lock reply text is not decodable: {e}"
+                    )))
+                })?;
+                text_buf.push_str(&decoded);
+            }
+            Ok(Event::CData(ref cdata)) if current.is_some() => {
+                let decoded = cdata.decode().map_err(|e| {
+                    NetconfError::Protocol(ProtocolError::Xml(format!(
+                        "partial-lock reply CDATA is not decodable: {e}"
+                    )))
+                })?;
+                text_buf.push_str(&decoded);
+            }
+            Ok(Event::GeneralRef(ref entity)) if current.is_some() => {
+                if let Some(resolved) = crate::xml_entity::resolve_entity_ref(entity) {
+                    text_buf.push_str(&resolved);
+                }
+            }
+            Ok(Event::End(_)) => {
+                let text = text_buf.trim().to_string();
+                match current {
+                    Some("lock-id") if !text.is_empty() => {
+                        // RFC 5717 permits exactly one. Taking the last would
+                        // pick arbitrarily between them, and `partial_unlock`
+                        // would then release a lock we do not hold while the
+                        // real one stays held.
+                        if lock_id.is_some() {
+                            return Err(NetconfError::Protocol(ProtocolError::Xml(
+                                "partial-lock reply carried more than one <lock-id>".to_string(),
+                            )));
+                        }
+                        lock_id = Some(text.parse::<u32>().map_err(|_| {
+                            // Bounded: the value is device-controlled and the
+                            // reply cap is 100 MB, so formatting it whole would
+                            // duplicate an arbitrarily large allocation into an
+                            // error string and a log line.
+                            let preview: String = text.chars().take(32).collect();
+                            NetconfError::Protocol(ProtocolError::Xml(format!(
+                                "<lock-id> is not a u32 (first 32 chars: {preview:?})"
+                            )))
+                        })?);
+                    }
+                    Some("locked-node") if !text.is_empty() => {
+                        // Innermost binding wins for a repeated prefix. Only
+                        // prefixed bindings are useful to a caller resolving the
+                        // path, so the default xmlns is not reported.
+                        let mut namespaces: Vec<(String, String)> = Vec::new();
+                        for scope in scopes.iter() {
+                            for (p, uri) in scope {
+                                let Some(p) = p else { continue };
+                                match namespaces.iter_mut().find(|(np, _)| np == p) {
+                                    Some(entry) => entry.1 = uri.clone(),
+                                    None => namespaces.push((p.clone(), uri.clone())),
+                                }
+                            }
+                        }
+                        locked_nodes.push(LockedNode {
+                            path: text,
+                            namespaces,
+                        });
+                    }
+                    _ => {}
+                }
+                current = None;
+                text_buf.clear();
+                scopes.pop();
+            }
+            Ok(Event::Eof) => break,
+            Err(e) => {
+                return Err(NetconfError::Protocol(ProtocolError::Xml(format!(
+                    "partial-lock reply is not well-formed: {e}"
+                ))));
+            }
+            _ => {}
+        }
+        buf.clear();
+    }
+
+    let lock_id = lock_id.ok_or_else(|| {
+        NetconfError::Protocol(ProtocolError::Xml(
+            "<partial-lock> reply carried no <lock-id>; the lock cannot be released \
+             without it"
+                .to_string(),
+        ))
+    })?;
+    Ok(PartialLock {
+        lock_id,
+        locked_nodes,
+    })
+}
+
+/// Generate a `<partial-unlock>` RPC request (RFC 5717 §2.4.2).
+pub fn partial_unlock_xml(message_id: &str, lock_id: u32) -> String {
+    let safe_id = escape_xml_attr(message_id);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<rpc xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <partial-unlock xmlns="{PARTIAL_LOCK_NS}">
+    <lock-id>{lock_id}</lock-id>
+  </partial-unlock>
+</rpc>"#
+    )
+}
+
 /// Generate a `<commit>` RPC request.
 pub fn commit_xml(message_id: &str) -> String {
     let safe_id = escape_xml_attr(message_id);
@@ -870,6 +1194,238 @@ mod tests {
             &CopySource::Datastore(Datastore::Running),
         );
         assert!(!xml.contains("with-defaults"), "got {xml}");
+    }
+
+    #[test]
+    fn test_partial_lock_emits_selects_and_namespaces() {
+        let xml = partial_lock_xml(
+            "1",
+            &["/if:interfaces/if:interface[if:name='ge-0/0/0']".to_string()],
+            &[(
+                "if".to_string(),
+                "urn:ietf:params:xml:ns:yang:ietf-interfaces".to_string(),
+            )],
+        )
+        .unwrap();
+        assert!(
+            xml.contains(
+                r#"<partial-lock xmlns="urn:ietf:params:xml:ns:netconf:partial-lock:1.0""#
+            ),
+            "got {xml}"
+        );
+        assert!(
+            xml.contains(r#"xmlns:if="urn:ietf:params:xml:ns:yang:ietf-interfaces""#),
+            "got {xml}"
+        );
+        assert!(xml.contains("<select>/if:interfaces"), "got {xml}");
+    }
+
+    #[test]
+    fn test_partial_lock_escapes_select_as_text() {
+        // element text, not an attribute - so &, < and > matter and quotes do not
+        let xml =
+            partial_lock_xml("2", &["/x[a='1' and b<'2' and c='&']".to_string()], &[]).unwrap();
+        assert!(xml.contains("&lt;"), "got {xml}");
+        assert!(xml.contains("&amp;"), "got {xml}");
+    }
+
+    #[test]
+    fn test_partial_lock_requires_at_least_one_select() {
+        let err = partial_lock_xml("3", &[], &[]).unwrap_err();
+        assert!(err.to_string().contains("at least one"), "got {err}");
+    }
+
+    #[test]
+    fn test_partial_lock_rejects_bad_namespace_bindings() {
+        // shared validation with the XPath filter
+        assert!(partial_lock_xml(
+            "4",
+            &["/x".to_string()],
+            &[("xmlns".into(), "urn:x".into())]
+        )
+        .is_err());
+        assert!(partial_lock_xml(
+            "4",
+            &["/x".to_string()],
+            &[("a\u{b2}".into(), "urn:x".into())]
+        )
+        .is_err());
+        assert!(partial_lock_xml("4", &["/x".to_string()], &[("a".into(), "".into())]).is_err());
+    }
+
+    #[test]
+    fn test_partial_unlock_carries_the_lock_id() {
+        let xml = partial_unlock_xml("5", 127);
+        assert!(xml.contains("<lock-id>127</lock-id>"), "got {xml}");
+        assert!(
+            xml.contains(
+                r#"<partial-unlock xmlns="urn:ietf:params:xml:ns:netconf:partial-lock:1.0">"#
+            ),
+            "got {xml}"
+        );
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply() {
+        let reply = r#"<lock-id xmlns="urn:ietf:params:xml:ns:netconf:partial-lock:1.0">127</lock-id>
+<locked-node xmlns="urn:ietf:params:xml:ns:netconf:partial-lock:1.0">/interfaces/interface[name='eth0']</locked-node>"#;
+        let got = parse_partial_lock_reply(reply).unwrap();
+        assert_eq!(got.lock_id, 127);
+        assert_eq!(got.locked_nodes.len(), 1);
+        assert!(got.locked_nodes[0].path.contains("eth0"));
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply_stitches_entities() {
+        // Entities stream as their own events; a naive loop truncates here.
+        let reply = r#"<lock-id>7</lock-id><locked-node>/a[n='x&amp;y']</locked-node>"#;
+        let got = parse_partial_lock_reply(reply).unwrap();
+        assert_eq!(got.lock_id, 7);
+        assert_eq!(
+            got.locked_nodes[0].path, "/a[n='x&y']",
+            "entity must be stitched back, not dropped"
+        );
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply_captures_prefix_bindings() {
+        // The server may use its own prefixes; the path is unusable without them.
+        let reply = r#"<lock-id>9</lock-id><locked-node xmlns:x="urn:example:if">/x:interfaces</locked-node>"#;
+        let got = parse_partial_lock_reply(reply).unwrap();
+        assert_eq!(got.locked_nodes[0].path, "/x:interfaces");
+        assert_eq!(
+            got.locked_nodes[0].namespaces,
+            vec![("x".to_string(), "urn:example:if".to_string())]
+        );
+    }
+
+    #[test]
+    fn test_partial_lock_folds_identical_duplicate_prefixes() {
+        // Combining bindings for several selects naturally repeats them; a
+        // duplicate xmlns attribute would be malformed XML.
+        let xml = partial_lock_xml(
+            "6",
+            &["/a:x".to_string(), "/a:y".to_string()],
+            &[
+                ("a".to_string(), "urn:a".to_string()),
+                ("a".to_string(), "urn:a".to_string()),
+            ],
+        )
+        .unwrap();
+        assert_eq!(xml.matches("xmlns:a=").count(), 1, "duplicate xmlns: {xml}");
+    }
+
+    #[test]
+    fn test_partial_lock_rejects_conflicting_prefix_bindings() {
+        let err = partial_lock_xml(
+            "7",
+            &["/a:x".to_string()],
+            &[
+                ("a".to_string(), "urn:one".to_string()),
+                ("a".to_string(), "urn:two".to_string()),
+            ],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("two different URIs"), "got {err}");
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply_unescapes_namespace_uris() {
+        let reply = r#"<lock-id>3</lock-id><locked-node xmlns:x="urn:example?a=1&amp;b=2">/x:i</locked-node>"#;
+        let got = parse_partial_lock_reply(reply).unwrap();
+        assert_eq!(
+            got.locked_nodes[0].namespaces,
+            vec![("x".to_string(), "urn:example?a=1&b=2".to_string())],
+            "the stored URI must be the real one, not the escaped source"
+        );
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply_ignores_foreign_namespaces() {
+        // A <v:lock-id> from an unrelated namespace is not RFC 5717 output;
+        // accepting it would return someone else's id as our lock.
+        let reply = r#"<v:lock-id xmlns:v="urn:vendor:private">999</v:lock-id>"#;
+        let err = parse_partial_lock_reply(reply).unwrap_err();
+        assert!(err.to_string().contains("lock-id"), "got {err}");
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply_accepts_the_rfc_namespace_prefixed() {
+        let reply = r#"<pl:lock-id xmlns:pl="urn:ietf:params:xml:ns:netconf:partial-lock:1.0">5</pl:lock-id>"#;
+        assert_eq!(parse_partial_lock_reply(reply).unwrap().lock_id, 5);
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply_accepts_undeclared_default_namespace() {
+        // xmlns="" is an undeclaration: the element is in NO namespace, the
+        // accepted unqualified form. Rejecting it would error out after the
+        // server had already granted the lock.
+        let reply = r#"<lock-id xmlns="">7</lock-id>"#;
+        assert_eq!(parse_partial_lock_reply(reply).unwrap().lock_id, 7);
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply_rejects_the_implicit_xml_prefix() {
+        assert!(parse_partial_lock_reply("<xml:lock-id>7</xml:lock-id>").is_err());
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply_default_namespace_scopes_correctly() {
+        let ok = r#"<x xmlns="urn:ietf:params:xml:ns:netconf:partial-lock:1.0"><lock-id>4</lock-id></x>"#;
+        assert_eq!(parse_partial_lock_reply(ok).unwrap().lock_id, 4);
+        let foreign = r#"<x xmlns="urn:vendor:private"><lock-id>4</lock-id></x>"#;
+        assert!(parse_partial_lock_reply(foreign).is_err());
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply_accepts_inherited_base_namespace() {
+        let reply =
+            r#"<x xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"><lock-id>7</lock-id></x>"#;
+        assert_eq!(parse_partial_lock_reply(reply).unwrap().lock_id, 7);
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply_rejects_malformed_attributes() {
+        // Duplicate xmlns:x is not well-formed; returning a lock from it would
+        // accept a document no conforming parser would.
+        let reply = r#"<lock-id xmlns:x="urn:a" xmlns:x="urn:b">7</lock-id>"#;
+        assert!(parse_partial_lock_reply(reply).is_err());
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply_rejects_duplicate_lock_ids() {
+        let reply = "<lock-id>1</lock-id><lock-id>2</lock-id>";
+        let err = parse_partial_lock_reply(reply).unwrap_err();
+        assert!(err.to_string().contains("more than one"), "got {err}");
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply_rejects_mixed_content() {
+        // Well-formed but schema-invalid; concatenating would invent id 12.
+        assert!(parse_partial_lock_reply("<lock-id>1<meta/>2</lock-id>").is_err());
+        assert!(parse_partial_lock_reply("<lock-id>1<m>x</m>2</lock-id>").is_err());
+        assert!(parse_partial_lock_reply("<locked-node>/a<m/>/b</locked-node>").is_err());
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply_rejects_the_invented_base_1_1_namespace() {
+        // ...xml:ns:netconf:base:1.1 is not a real namespace; NETCONF 1.1 keeps
+        // the protocol namespace at :base:1.0.
+        let reply =
+            r#"<x xmlns="urn:ietf:params:xml:ns:netconf:base:1.1"><lock-id>9</lock-id></x>"#;
+        assert!(parse_partial_lock_reply(reply).is_err());
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply_accepts_cdata() {
+        let reply = "<lock-id><![CDATA[7]]></lock-id>";
+        assert_eq!(parse_partial_lock_reply(reply).unwrap().lock_id, 7);
+    }
+
+    #[test]
+    fn test_parse_partial_lock_reply_without_lock_id_is_an_error() {
+        let err = parse_partial_lock_reply("<locked-node>/a</locked-node>").unwrap_err();
+        assert!(err.to_string().contains("lock-id"), "got {err}");
     }
 
     #[test]
