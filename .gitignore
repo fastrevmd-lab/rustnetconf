@@ -2,3 +2,11 @@
 /.serena/
 .claude/worktrees/
 .worktrees/
+
+# cargo-fuzz working state. `fuzz/seeds/` is the curated corpus and IS tracked;
+# `corpus/` is whatever libFuzzer accumulates and `artifacts/` is crash inputs,
+# both machine-generated and reproducible from the seeds.
+/fuzz/corpus/
+/fuzz/artifacts/
+/fuzz/coverage/
+/fuzz/target/

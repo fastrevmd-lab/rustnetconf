@@ -1,0 +1,40 @@
+[package]
+name = "rustnetconf-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+# Its own workspace root on purpose: this crate needs nightly and a sanitizer,
+# and joining the parent workspace would make `cargo test --workspace` and CI
+# depend on both.
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.rustnetconf]
+path = ".."
+
+# An *independent* parser, deliberately not quick-xml. Using the same parser the
+# validator uses makes the oracle share its blind spots — quick-xml reports EOF
+# without error on unclosed elements, which is precisely how the trailing-`<`
+# bug slipped through in the first place.
+[dependencies.roxmltree]
+version = "0.20"
+
+[[bin]]
+name = "fragment_embeds_cleanly"
+path = "fuzz_targets/fragment_embeds_cleanly.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "reply_parser_is_total"
+path = "fuzz_targets/reply_parser_is_total.rs"
+test = false
+doc = false
+bench = false

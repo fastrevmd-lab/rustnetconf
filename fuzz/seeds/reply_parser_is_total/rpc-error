@@ -1,0 +1,1 @@
+<rpc-reply message-id="1"><rpc-error><error-type>protocol</error-type><error-tag>lock-denied</error-tag><error-severity>error</error-severity></rpc-error></rpc-reply>
