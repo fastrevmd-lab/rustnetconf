@@ -33,6 +33,8 @@ pub mod uri {
     pub const NOTIFICATION: &str = "urn:ietf:params:netconf:capability:notification:1.0";
     /// Interleave capability — allows RPCs during an active notification subscription.
     pub const INTERLEAVE: &str = "urn:ietf:params:netconf:capability:interleave:1.0";
+    /// XPath filter capability (RFC 6241 §8.9).
+    pub const XPATH: &str = "urn:ietf:params:netconf:capability:xpath:1.0";
 }
 
 /// The negotiated NETCONF version for the session.

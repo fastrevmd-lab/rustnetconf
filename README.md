@@ -544,6 +544,7 @@ let config = conn.get_config(Datastore::Running).await?;
 - **SSH bastion support** — `ProxyJump` (multi-hop), `ProxyCommand` (shell-escaped), and OpenSSH `~/.ssh/config` alias resolution
 - **NETCONF 1.0 + 1.1** — EOM and chunked framing with auto-negotiation
 - **All core RPCs** — get, get-config, edit-config, lock/unlock, commit, validate, close/kill-session, discard-changes
+- **Subtree and XPath filters** — `SubtreeFilter` builds subtree filters; `XPathFilter` builds XPath ones (RFC 6241 §6.4) with namespace binding, gated on the device advertising `:xpath:1.0` so an unsupported filter fails loudly instead of silently returning the whole datastore
 - **Confirmed commit** — auto-rollback safety net (RFC 6241 §8.4)
 - **Event notifications** — `create-subscription`, inline notification demux, buffered drain/recv API (RFC 5277)
 - **RPC timeout** — configurable per-session deadline prevents indefinite blocking on unresponsive devices

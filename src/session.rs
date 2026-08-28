@@ -29,6 +29,7 @@ use crate::framing::eom::EomFramer;
 use crate::framing::Framer;
 use crate::notification::{self, MessageKind, Notification};
 use crate::rpc;
+use crate::rpc::filter::XPathFilter;
 use crate::rpc::operations::{self, EditConfigParams};
 use crate::rpc::RpcErrorInfo;
 use crate::rpc::RpcReply;
@@ -846,6 +847,53 @@ impl Session {
     ///
     /// `filter`, when provided, must be a well-formed XML subtree filter
     /// fragment. It is validated before sending; a `ProtocolError::Xml` is
+    /// Fetch configuration using an XPath filter (RFC 6241 §6.4).
+    ///
+    /// Returns [`ProtocolError::CapabilityMissing`] when the device did not
+    /// advertise `:xpath:1.0` in its `<hello>`. Failing here rather than on the
+    /// wire is deliberate: a device without XPath support answers an XPath
+    /// filter with an `operation-not-supported` rpc-error at best, and at worst
+    /// ignores the filter and returns the entire datastore — which looks like
+    /// success and is the more dangerous outcome.
+    pub async fn get_config_xpath(
+        &mut self,
+        source: Datastore,
+        filter: &XPathFilter,
+    ) -> Result<String, NetconfError> {
+        self.require_xpath()?;
+        let msg_id = self.next_message_id();
+        let xml = operations::get_config_xpath_xml(&msg_id, source, filter)?;
+        match self.send_rpc(&xml, &msg_id).await? {
+            RpcReply::Data(data) | RpcReply::DataWithWarnings(data, _) => {
+                Ok(self.vendor_profile.unwrap_config(&data))
+            }
+            RpcReply::Ok | RpcReply::OkWithWarnings(_) => Ok(String::new()),
+        }
+    }
+
+    /// Fetch operational and configuration data using an XPath filter.
+    ///
+    /// Same capability gate as [`Session::get_config_xpath`].
+    pub async fn get_xpath(&mut self, filter: &XPathFilter) -> Result<String, NetconfError> {
+        self.require_xpath()?;
+        let msg_id = self.next_message_id();
+        let xml = operations::get_xpath_xml(&msg_id, filter)?;
+        match self.send_rpc(&xml, &msg_id).await? {
+            RpcReply::Data(data) | RpcReply::DataWithWarnings(data, _) => Ok(data),
+            RpcReply::Ok | RpcReply::OkWithWarnings(_) => Ok(String::new()),
+        }
+    }
+
+    /// Error unless the peer advertised `:xpath:1.0`.
+    fn require_xpath(&self) -> Result<(), NetconfError> {
+        if self.supports(capability::uri::XPATH) {
+            return Ok(());
+        }
+        Err(NetconfError::Protocol(ProtocolError::CapabilityMissing(
+            capability::uri::XPATH.to_string(),
+        )))
+    }
+
     /// returned if it is malformed.
     pub async fn get(&mut self, filter: Option<&str>) -> Result<String, NetconfError> {
         if let Some(filter_xml) = filter {
@@ -2396,6 +2444,89 @@ mod tests {
         assert_eq!(
             discard_count, 1,
             "explicit discard_changes followed by close should produce exactly 1 discard"
+        );
+    }
+
+    /// An `<rpc-reply>` carrying a `<data>` payload.
+    fn mock_data_reply(message_id: &str, payload: &str) -> Vec<u8> {
+        let reply = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<rpc-reply xmlns="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{message_id}">
+  <data>{payload}</data>
+</rpc-reply>"#
+        );
+        let mut buf = reply.into_bytes();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    /// A hello that advertises `:xpath:1.0`, unlike `mock_junos_hello`.
+    fn mock_xpath_hello() -> Vec<u8> {
+        let hello = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability>urn:ietf:params:netconf:base:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:xpath:1.0</capability>
+  </capabilities>
+  <session-id>1</session-id>
+</hello>"#;
+        let mut buf = hello.as_bytes().to_vec();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    #[tokio::test]
+    async fn xpath_without_capability_is_refused_before_sending() {
+        // mock_junos_hello does not advertise :xpath:1.0.
+        let transport = MockTransport::new(mock_junos_hello());
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let before = written.lock().unwrap().len();
+        let err = session
+            .get_xpath(&XPathFilter::new("/x"))
+            .await
+            .expect_err("should refuse without :xpath:1.0");
+
+        assert!(
+            matches!(
+                err,
+                NetconfError::Protocol(ProtocolError::CapabilityMissing(ref uri))
+                    if uri == capability::uri::XPATH
+            ),
+            "unexpected error: {err:?}"
+        );
+        // The point of the gate: nothing reached the wire. A device lacking
+        // XPath may ignore the filter and return the whole datastore, which
+        // would look like success.
+        assert_eq!(
+            written.lock().unwrap().len(),
+            before,
+            "no bytes should have been written"
+        );
+    }
+
+    #[tokio::test]
+    async fn xpath_with_capability_sends_an_xpath_filter() {
+        let mut data = mock_xpath_hello();
+        data.extend_from_slice(&mock_data_reply("1", "<interfaces/>"));
+
+        let transport = MockTransport::new(data);
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let filter = XPathFilter::new("/if:interfaces")
+            .namespace("if", "urn:ietf:params:xml:ns:yang:ietf-interfaces");
+        session.get_xpath(&filter).await.expect("get_xpath failed");
+
+        let sent = String::from_utf8_lossy(&written.lock().unwrap()).to_string();
+        assert!(sent.contains(r#"type="xpath""#), "sent: {sent}");
+        assert!(sent.contains(r#"select="/if:interfaces""#), "sent: {sent}");
+        assert!(
+            sent.contains(r#"xmlns:if="urn:ietf:params:xml:ns:yang:ietf-interfaces""#),
+            "sent: {sent}"
         );
     }
 

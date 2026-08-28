@@ -1,5 +1,5 @@
 mod capture;
-mod lexical;
+pub(crate) mod lexical;
 mod parser;
 mod repair;
 
