@@ -1,6 +1,6 @@
 [package]
 name = "rustnetconf-yang"
-version = "0.1.6"
+version = "0.2.0"
 edition = "2021"
 authors = ["fastrevmd-lab"]
 description = "YANG model code generation for rustnetconf — compile-time config validation"
@@ -18,7 +18,7 @@ generated = []
 bundled = ["yang2/bundled"]
 
 [dependencies]
-rustnetconf = { version = "0.15", path = ".." }
+rustnetconf = { version = "0.16", path = ".." }
 serde = { version = "1", features = ["derive"] }
 quick-xml = "0.41"
 thiserror = "2"

@@ -24,9 +24,9 @@ Async NETCONF client library, YANG code generation, vendor profiles, connection 
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.15.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.15.0)** (smaller error types — one breaking change).
-> On crates.io: `rustnetconf` 0.15.0 · `rustnetconf-cli` 0.3.6 · `rustnetconf-yang` 0.1.6.
-> See [What's New in v0.15.0](#whats-new-in-v0150) below.
+> **Latest release — [v0.16.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.16.0)** (four new RFCs, streaming reads, XML hardening; one source break — a new `ProtocolError` variant).
+> On crates.io: `rustnetconf` 0.16.0 · `rustnetconf-cli` 0.3.7 · `rustnetconf-yang` 0.2.0.
+> See [What's New in v0.16.0](#whats-new-in-v0160) below.
 
 ## Workspace
 
@@ -47,6 +47,56 @@ SSH is present as a *transport for NETCONF*, not as a general-purpose capability
 - Remote shell or command execution
 
 Consumers that need those should use a dedicated SSH crate alongside this one. A native SCP1 client was briefly added and then reverted before it was ever released (#52, reverted by #53) for exactly this reason; issues #47 and #51 were closed as not planned on the same grounds. The round trip is visible in `git log` between v0.13.2 and the next release — it was a deliberate reversal, not an accident.
+
+## What's New in v0.16.0
+
+Feature release. Nothing was removed from the public API and no existing item changed shape. `rustnetconf-yang` takes a minor bump to 0.2.0 because #81 gave it a real feature flag; `rustnetconf-cli` (0.3.7) has no source changes and bumps only to carry the new `rustnetconf = "0.16"` requirement.
+
+**One source-level break.** `ProtocolError` gains an `InvalidValue` variant, and the enum is not `#[non_exhaustive]`, so downstream code matching it exhaustively needs a new arm or a wildcard:
+
+```rust
+match err {
+    ProtocolError::CapabilityMissing { .. } => ...,
+    // ...
+    _ => ...,  // add this, or an explicit InvalidValue arm
+}
+```
+
+Nothing else in the crate is affected — every other new enum (`WithDefaults`, `DeleteTarget`, `CopySource`, `ConfigLocation`) is new, not an addition to an existing one. No public error enum is `#[non_exhaustive]` today, so variant additions will keep landing as breaks until that changes.
+
+### Protocol coverage
+
+Four gaps closed, each one an operation the module docs already implied existed.
+
+- **`copy-config`, `delete-config`, `cancel-commit`** (#71). RFC 6241 §7.3, §7.4 and §8.4. `delete_config` takes a `DeleteTarget`, not a `Datastore`, because the `ietf-netconf` YANG module's `config-target` choice contains only `startup` and `url` — neither `running` nor `candidate` is a legal target, and a type that cannot express them is better than a runtime rejection.
+
+- **XPath filters** (#72). `XPathFilter` with namespace bindings, for `get` and `get-config`. The module documentation had promised this for several releases; it now exists.
+
+- **`with-defaults`** (#74), RFC 6243. `get_config_with_defaults`, `get_with_defaults`, `copy_config_with_defaults`, covering all four retrieval modes.
+
+- **Partial lock** (#73), RFC 5717. `partial_lock` / `partial_unlock`. If a partial-lock reply is lost, the session is marked unhealthy rather than assumed unlocked — a lock whose state is unknown is not a lock you may act on, and a pooled connection must not carry that ambiguity to the next caller.
+
+### Reading large replies
+
+- **Streaming reads** (#76). `get_config_streaming`, `get_streaming` and `stream_rpc` write the raw reply envelope to an `AsyncWrite` as frames arrive, so peak memory is one frame rather than the whole document. A cancelled future or a failing sink poisons the session instead of leaving a partial reply in the buffer for the next RPC — or for whoever the pool hands the connection to next.
+
+- **The read-buffer ceiling is adjustable** (#92). `set_max_read_buffer` on `Client` and `Session`, and on `TlsClientBuilder`. It survives `reconnect()` and is restored when a pooled connection is returned, so a raised ceiling is a property of the client rather than of one connection that happens to still be open.
+
+### XML correctness
+
+- **Fuzzing found fourteen escapes from the outbound validator** (#80). `validate_xml_fragment` is a hand-written conformance layer over quick-xml, which is deliberately permissive. Differential fuzzing against a conforming parser found fourteen fragments it accepted that are not well-formed XML — including one where the validation mechanism was itself the escape: `</_>x<_>` balanced against the synthetic root the validator wraps the fragment in. All fourteen are fixed, and the fuzz targets ship in `fuzz/`.
+
+- **Strict validation is available, opt-in** (#89, #93). The `strict-validation` feature validates by attempting a conforming parse instead of by enumerating rules. Off by default: it costs one small pure-Rust dependency (142 → 143 crates), and that is the caller's trade to make. Three residual cases the rule list still accepts are documented on #89.
+
+### Supply chain and build
+
+- **The stale `RUSTSEC-2023-0071` suppression is gone** (#78). `rsa` had already left the dependency graph — russh 0.62 gates it behind a non-default feature — so the suppression was a loaded gun: it would have silently covered a genuine future `rsa` advisory.
+
+- **`chacha20` moved off a yanked version.** The lockfile pinned 0.10.0, which the registry has since yanked; it now resolves to 0.10.2. Transitive via russh (`rand`, `ssh-cipher`), and not a published advisory — `cargo audit` reports it as a warning, not a vulnerability — but a release should not ship a lockfile pinning a yanked crypto crate.
+
+- **`libyang2` bundling is now opt-out** (#81). `rustnetconf-yang` built libyang2 from source unconditionally, costing ~44 MB of build artifacts and making `cmake` a hard prerequisite. `default = ["bundled"]` keeps that behaviour; `--no-default-features` links a system libyang2 via pkg-config instead.
+
+- **`unsafe_code = "forbid"` is enforced workspace-wide** (#79). The README claimed no unsafe code; a crate-root `#![forbid(unsafe_code)]` does not reach build scripts, examples or integration tests, which are separate crates. It is now a `[workspace.lints]` entry, so the claim is enforced everywhere it was being made.
 
 ## What's New in v0.15.0
 
