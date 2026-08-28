@@ -543,7 +543,7 @@ let config = conn.get_config(Datastore::Running).await?;
 - **SSH + TLS transports** — SSH (RFC 6242) by default, TLS (RFC 7589) via `tls` feature flag
 - **SSH bastion support** — `ProxyJump` (multi-hop), `ProxyCommand` (shell-escaped), and OpenSSH `~/.ssh/config` alias resolution
 - **NETCONF 1.0 + 1.1** — EOM and chunked framing with auto-negotiation
-- **All core RPCs** — get, get-config, edit-config, lock/unlock, commit, validate, close/kill-session, discard-changes
+- **All core RPCs** — get, get-config, edit-config, copy-config, delete-config, lock/unlock, commit, confirmed-commit, cancel-commit, validate, close/kill-session, discard-changes
 - **Subtree and XPath filters** — `SubtreeFilter` builds subtree filters; `XPathFilter` builds XPath ones (RFC 6241 §6.4) with namespace binding, gated on the device advertising `:xpath:1.0` so an unsupported filter fails loudly instead of silently returning the whole datastore
 - **Confirmed commit** — auto-rollback safety net (RFC 6241 §8.4)
 - **Event notifications** — `create-subscription`, inline notification demux, buffered drain/recv API (RFC 5277)
@@ -614,11 +614,14 @@ match result {
 | `get` | §7.7 | Done |
 | `get-config` | §7.1 | Done |
 | `edit-config` | §7.2 | Done |
+| `copy-config` | §7.3 | Done |
+| `delete-config` | §7.4 | Done (startup / url) |
 | `lock` / `unlock` | §7.5-7.6 | Done |
 | `close-session` | §7.8 | Done |
 | `kill-session` | §7.9 | Done |
 | `commit` | §8.4 | Done |
 | `confirmed-commit` | §8.4 | Done |
+| `cancel-commit` | §8.4.4.1 | Done |
 | `validate` | §8.6 | Done |
 | `discard-changes` | §8.3 | Done |
 

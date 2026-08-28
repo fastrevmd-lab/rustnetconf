@@ -35,8 +35,8 @@ use crate::rpc::RpcErrorInfo;
 use crate::rpc::RpcReply;
 use crate::transport::Transport;
 use crate::types::{
-    Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,
-    TestOption,
+    ConfigLocation, CopySource, Datastore, DefaultOperation, DeleteTarget, ErrorOption, LoadAction,
+    LoadFormat, OpenConfigurationMode, TestOption,
 };
 use crate::vendor::{self, CloseSequence, VendorProfile};
 
@@ -987,6 +987,207 @@ impl Session {
         let xml = operations::validate_xml(&msg_id, source);
         self.send_rpc(&xml, &msg_id).await?;
         Ok(())
+    }
+
+    /// Copy a configuration from one location to another (RFC 6241 §7.3).
+    ///
+    /// Either side may be a datastore or a URL; the URL form requires the
+    /// device to advertise `:url`, which is checked before sending.
+    pub async fn copy_config(
+        &mut self,
+        target: &ConfigLocation,
+        source: &CopySource,
+    ) -> Result<(), NetconfError> {
+        // RFC 6241 §7.3: "If the <source> and <target> parameters identify the
+        // same URL or configuration datastore, an error MUST be returned with
+        // an error-tag containing 'invalid-value'." Caught here so the
+        // candidate is never marked dirty for a request that cannot succeed.
+        let same = match (target, source) {
+            (ConfigLocation::Datastore(t), CopySource::Datastore(s)) => t == s,
+            (ConfigLocation::Url(t), CopySource::Url(s)) => t == s,
+            _ => false,
+        };
+        if same {
+            return Err(ProtocolError::InvalidValue(format!(
+                "<copy-config> source and target are both `{target}` (RFC 6241 §7.3)"
+            ))
+            .into());
+        }
+
+        match target {
+            ConfigLocation::Url(url) => self.require_url_scheme(url)?,
+            ConfigLocation::Datastore(ds) => self.require_datastore(*ds, true)?,
+        }
+        // Inline config is vendor-wrapped exactly as `edit_config` wraps its
+        // payload — on Junos a bare `<system>...</system>` needs the
+        // `<configuration>` wrapper or the device misreads it.
+        let wrapped_source;
+        let source = match source {
+            CopySource::Url(url) => {
+                self.require_url_scheme(url)?;
+                source
+            }
+            CopySource::Config(cfg) => {
+                rpc::validate_xml_fragment(cfg)?;
+                wrapped_source = CopySource::Config(self.vendor_profile.wrap_config(cfg));
+                &wrapped_source
+            }
+            CopySource::Datastore(ds) => {
+                self.require_datastore(*ds, false)?;
+                source
+            }
+        };
+        // Preflight must complete before the flag is set, and the flag must be
+        // set before the write — the ordering `dispatch_candidate_change`
+        // documents. Too early and a call that never reaches the wire (an
+        // unestablished session, a failed keepalive) still marks the candidate
+        // dirty, and a later Junos `close_session` would discard a shared
+        // candidate nobody touched. Too late and a copy the device applied but
+        // whose reply was lost goes unrecorded, so the discard is skipped.
+        self.keepalive_check().await?;
+        self.ensure_established()?;
+
+        let msg_id = self.next_message_id();
+        let xml = operations::copy_config_xml(&msg_id, target, source);
+        if matches!(target, ConfigLocation::Datastore(Datastore::Candidate)) {
+            self.candidate_dirty = true;
+        }
+        // send_rpc_raw, not send_rpc: the latter runs its own keepalive probe,
+        // which would land *after* the flag is set. A probe that fails or is
+        // cancelled there would leave the candidate marked dirty with nothing
+        // written. Same reason `dispatch_candidate_change` bypasses it.
+        self.send_rpc_raw(&xml, &msg_id, false).await?;
+
+        // A successful copy between running and candidate — in either
+        // direction — synchronizes the two, so the candidate holds nothing
+        // uncommitted and needs no discard on close. candidate -> running is
+        // the same synchronization `commit` performs, and `commit` clears the
+        // flag for exactly this reason. Leaving it set would make a later Junos
+        // `close_session` send `<discard-changes/>` and destroy edits another
+        // session had since made to the shared candidate.
+        //
+        // The pre-write marking above still stands for the uncertain case: if
+        // the reply is lost we do not know the copy landed, and assuming dirty
+        // is the safe side of that.
+        let synchronized = matches!(
+            (target, source),
+            (
+                ConfigLocation::Datastore(Datastore::Candidate),
+                CopySource::Datastore(Datastore::Running)
+            ) | (
+                ConfigLocation::Datastore(Datastore::Running),
+                CopySource::Datastore(Datastore::Candidate)
+            )
+        );
+        if synchronized {
+            self.candidate_dirty = false;
+        }
+        Ok(())
+    }
+
+    /// Delete a configuration datastore or URL-backed config (RFC 6241 §7.4).
+    ///
+    /// [`DeleteTarget`] can only name `startup` or a URL, which is what the
+    /// RFC's `config-target` choice permits here — `running` and `candidate`
+    /// are not expressible rather than rejected at runtime.
+    pub async fn delete_config(&mut self, target: &DeleteTarget) -> Result<(), NetconfError> {
+        match target {
+            DeleteTarget::Url(url) => self.require_url_scheme(url)?,
+            DeleteTarget::Startup => {
+                self.require_capability(crate::capability::uri::STARTUP, "delete-config startup")?
+            }
+        }
+        let msg_id = self.next_message_id();
+        let xml = operations::delete_config_xml(&msg_id, target);
+        self.send_rpc(&xml, &msg_id).await?;
+        Ok(())
+    }
+
+    /// Cancel an in-progress confirmed commit (RFC 6241 §8.4.4.1).
+    ///
+    /// Requires `:confirmed-commit:1.1` — `cancel-commit` does not exist in the
+    /// 1.0 capability, where the only way out is to let the timer expire.
+    ///
+    /// `persist_id` cancels a commit issued with a `<persist>` token, which may
+    /// have come from another session.
+    pub async fn cancel_commit(&mut self, persist_id: Option<&str>) -> Result<(), NetconfError> {
+        self.require_capability(
+            crate::capability::uri::CONFIRMED_COMMIT_1_1,
+            "cancel-commit",
+        )?;
+        let msg_id = self.next_message_id();
+        let xml = operations::cancel_commit_xml(&msg_id, persist_id)?;
+        self.send_rpc(&xml, &msg_id).await?;
+        Ok(())
+    }
+
+    /// Require the capability a datastore needs, per its `if-feature` in
+    /// RFC 6241's YANG module.
+    ///
+    /// `running` needs nothing to read but `:writable-running` to write, which
+    /// is why the direction is a parameter rather than inferred.
+    fn require_datastore(&self, ds: Datastore, as_target: bool) -> Result<(), NetconfError> {
+        match (ds, as_target) {
+            (Datastore::Candidate, _) => {
+                self.require_capability(crate::capability::uri::CANDIDATE, "candidate datastore")
+            }
+            (Datastore::Startup, _) => {
+                self.require_capability(crate::capability::uri::STARTUP, "startup datastore")
+            }
+            (Datastore::Running, true) => self.require_capability(
+                crate::capability::uri::WRITABLE_RUNNING,
+                "writable running datastore",
+            ),
+            (Datastore::Running, false) => Ok(()),
+        }
+    }
+
+    /// Require `:url`, and that the device lists this URL's scheme.
+    ///
+    /// The capability carries its supported schemes as a query parameter —
+    /// `...:url:1.0?scheme=http,ftp,file` — so checking only the base URI would
+    /// accept a `file://` path against a device advertising `scheme=https`.
+    /// A device that advertises `:url` with no `scheme` parameter names no
+    /// schemes at all, so nothing is accepted for it rather than everything.
+    fn require_url_scheme(&self, url: &str) -> Result<(), NetconfError> {
+        self.require_capability(crate::capability::uri::URL, "url config location")?;
+
+        let Some(scheme) = url.split_once(':').map(|(s, _)| s) else {
+            return Err(ProtocolError::Xml(format!("`{url}` has no URL scheme")).into());
+        };
+        let scheme = scheme.to_ascii_lowercase();
+
+        let advertised: Vec<String> = self
+            .capabilities()
+            .map(|caps| caps.all_uris().iter().cloned().collect())
+            .unwrap_or_default();
+        let supported: Vec<String> = advertised
+            .iter()
+            .filter(|uri| uri.starts_with(crate::capability::uri::URL))
+            .filter_map(|uri| uri.split_once("scheme="))
+            .flat_map(|(_, list)| {
+                list.split('&')
+                    .next()
+                    .unwrap_or("")
+                    .split(',')
+                    .map(|s| s.trim().to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        if supported.contains(&scheme) {
+            return Ok(());
+        }
+        Err(ProtocolError::CapabilityMissing(format!(
+            "device does not advertise URL scheme `{scheme}` (advertised: {})",
+            if supported.is_empty() {
+                "none".to_string()
+            } else {
+                supported.join(", ")
+            }
+        ))
+        .into())
     }
 
     /// Discard uncommitted candidate configuration changes.
@@ -2473,6 +2674,348 @@ mod tests {
         let mut buf = hello.as_bytes().to_vec();
         buf.extend_from_slice(b"]]>]]>");
         buf
+    }
+
+    #[test]
+    fn delete_target_cannot_name_running_or_candidate() {
+        // Compile-time property, asserted as documentation: RFC 6241's
+        // config-target choice for delete-config has only startup and url, so
+        // DeleteTarget has exactly two variants and the illegal targets are
+        // unrepresentable rather than rejected at runtime.
+        let targets = [
+            DeleteTarget::Startup,
+            DeleteTarget::Url("file:///tmp/x".to_string()),
+        ];
+        assert_eq!(targets.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn delete_config_allows_startup() {
+        let mut data = mock_startup_hello();
+        data.extend_from_slice(&mock_ok_reply("1"));
+        let transport = MockTransport::new(data);
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session
+            .delete_config(&DeleteTarget::Startup)
+            .await
+            .expect("deleting startup is legal");
+        let sent = String::from_utf8_lossy(&written.lock().unwrap()).to_string();
+        assert!(sent.contains("<nc:delete-config>"), "sent: {sent}");
+        assert!(sent.contains("<nc:startup/>"), "sent: {sent}");
+    }
+
+    #[tokio::test]
+    async fn url_location_requires_the_url_capability() {
+        // mock_device_hello does not advertise :url.
+        let transport = MockTransport::new(mock_device_hello());
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let before = written.lock().unwrap().len();
+        let err = session
+            .copy_config(
+                &ConfigLocation::Url("file:///tmp/backup.xml".to_string()),
+                &CopySource::Datastore(Datastore::Running),
+            )
+            .await
+            .expect_err("url without :url capability must be refused");
+        assert!(err.to_string().contains("url"), "got {err}");
+        assert_eq!(written.lock().unwrap().len(), before, "nothing sent");
+    }
+
+    /// A hello advertising `:candidate` and `:writable-running`.
+    fn mock_writable_running_hello() -> Vec<u8> {
+        let hello = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability>urn:ietf:params:netconf:base:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:candidate:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:writable-running:1.0</capability>
+  </capabilities>
+  <session-id>1</session-id>
+</hello>"#;
+        let mut buf = hello.as_bytes().to_vec();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    /// A hello advertising `:startup`.
+    fn mock_startup_hello() -> Vec<u8> {
+        let hello = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability>urn:ietf:params:netconf:base:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:startup:1.0</capability>
+  </capabilities>
+  <session-id>1</session-id>
+</hello>"#;
+        let mut buf = hello.as_bytes().to_vec();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    /// A hello advertising `:url` with an explicit scheme list.
+    fn mock_url_hello(schemes: &str) -> Vec<u8> {
+        let hello = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability>urn:ietf:params:netconf:base:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:url:1.0?scheme={schemes}</capability>
+  </capabilities>
+  <session-id>1</session-id>
+</hello>"#
+        );
+        let mut buf = hello.into_bytes();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    #[tokio::test]
+    async fn url_scheme_must_be_advertised() {
+        // Device offers https only; a file:// URL must not slip through on the
+        // strength of the bare :url capability.
+        let transport = MockTransport::new(mock_url_hello("https"));
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let before = written.lock().unwrap().len();
+        let err = session
+            .delete_config(&DeleteTarget::Url("file:///tmp/x.xml".to_string()))
+            .await
+            .expect_err("file scheme is not advertised");
+        assert!(err.to_string().contains("file"), "got {err}");
+        assert_eq!(written.lock().unwrap().len(), before, "nothing sent");
+    }
+
+    #[tokio::test]
+    async fn advertised_url_scheme_is_accepted() {
+        let mut data = mock_url_hello("http,file,ftp");
+        data.extend_from_slice(&mock_ok_reply("1"));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session
+            .delete_config(&DeleteTarget::Url("FILE:///tmp/x.xml".to_string()))
+            .await
+            .expect("scheme matching is case-insensitive");
+    }
+
+    #[tokio::test]
+    async fn copy_config_preflight_failure_leaves_candidate_clean() {
+        // No establish(), so no capabilities and no wire. Whichever preflight
+        // check trips first, nothing is written — and the candidate must not be
+        // marked dirty, or a later Junos close would send <discard-changes/>
+        // against a shared candidate nobody touched.
+        let transport = MockTransport::new(Vec::new());
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        assert!(!session.candidate_dirty());
+
+        session
+            .copy_config(
+                &ConfigLocation::Datastore(Datastore::Candidate),
+                &CopySource::Config("<system/>".to_string()),
+            )
+            .await
+            .expect_err("preflight must refuse");
+
+        assert!(
+            written.lock().unwrap().is_empty(),
+            "nothing should have been written"
+        );
+        assert!(
+            !session.candidate_dirty(),
+            "preflight failure must not leave the candidate marked dirty"
+        );
+    }
+
+    #[tokio::test]
+    async fn running_to_candidate_copy_leaves_candidate_clean() {
+        // The two datastores are synchronized afterwards, so there is nothing
+        // uncommitted to discard. Leaving the flag set would make a later Junos
+        // close erase edits another session made to the shared candidate.
+        let mut data = mock_junos_hello();
+        data.extend_from_slice(&mock_ok_reply("1"));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session
+            .copy_config(
+                &ConfigLocation::Datastore(Datastore::Candidate),
+                &CopySource::Datastore(Datastore::Running),
+            )
+            .await
+            .expect("running -> candidate copy");
+        assert!(
+            !session.candidate_dirty(),
+            "a running->candidate copy synchronizes them; nothing to discard"
+        );
+    }
+
+    #[tokio::test]
+    async fn candidate_to_running_copy_leaves_candidate_clean() {
+        // The same synchronization `commit` performs, so the same bookkeeping.
+        let mut data = mock_writable_running_hello();
+        data.extend_from_slice(&mock_ok_reply("1"));
+        data.extend_from_slice(&mock_ok_reply("2"));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session.mark_candidate_dirty();
+        session
+            .copy_config(
+                &ConfigLocation::Datastore(Datastore::Running),
+                &CopySource::Datastore(Datastore::Candidate),
+            )
+            .await
+            .expect("candidate -> running copy");
+        assert!(
+            !session.candidate_dirty(),
+            "candidate -> running synchronizes them; nothing left to discard"
+        );
+    }
+
+    #[tokio::test]
+    async fn identical_source_and_target_is_refused_before_marking_dirty() {
+        // RFC 6241 §7.3 requires the server to answer invalid-value. Catching
+        // it locally also stops the candidate being marked dirty for a request
+        // that cannot succeed - which would make a later Junos close discard
+        // another session's edits.
+        let transport = MockTransport::new(mock_junos_hello());
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let before = written.lock().unwrap().len();
+        let err = session
+            .copy_config(
+                &ConfigLocation::Datastore(Datastore::Candidate),
+                &CopySource::Datastore(Datastore::Candidate),
+            )
+            .await
+            .expect_err("identical source and target must be refused");
+        assert!(err.to_string().contains("invalid value"), "got {err}");
+        assert!(
+            !session.candidate_dirty(),
+            "a refused copy must not mark the candidate dirty"
+        );
+        assert_eq!(written.lock().unwrap().len(), before, "nothing sent");
+    }
+
+    #[tokio::test]
+    async fn inline_copy_into_candidate_stays_dirty_and_is_vendor_wrapped() {
+        let mut data = mock_junos_hello();
+        data.extend_from_slice(&mock_ok_reply("1"));
+        let transport = MockTransport::new(data);
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session
+            .copy_config(
+                &ConfigLocation::Datastore(Datastore::Candidate),
+                &CopySource::Config("<system><host-name>r1</host-name></system>".to_string()),
+            )
+            .await
+            .expect("inline copy");
+
+        let sent = String::from_utf8_lossy(&written.lock().unwrap()).to_string();
+        assert!(
+            sent.contains("<configuration><system>"),
+            "Junos needs the <configuration> wrapper: {sent}"
+        );
+        assert!(
+            session.candidate_dirty(),
+            "candidate now differs from running"
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_copy_source_rejects_a_document_declaration() {
+        let transport = MockTransport::new(mock_junos_hello());
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let before = written.lock().unwrap().len();
+        let err = session
+            .copy_config(
+                &ConfigLocation::Datastore(Datastore::Candidate),
+                &CopySource::Config("<?xml version=\"1.0\"?><system/>".to_string()),
+            )
+            .await
+            .expect_err("a second declaration mid-document is malformed");
+        assert!(err.to_string().contains("declaration"), "got {err}");
+        assert_eq!(written.lock().unwrap().len(), before, "nothing sent");
+    }
+
+    #[tokio::test]
+    async fn copy_config_gates_candidate_on_the_capability() {
+        // mock_device_hello advertises :candidate; a startup target does not
+        // exist there, so the startup gate must fire locally.
+        let transport = MockTransport::new(mock_device_hello());
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let before = written.lock().unwrap().len();
+        let err = session
+            .copy_config(
+                &ConfigLocation::Datastore(Datastore::Startup),
+                &CopySource::Datastore(Datastore::Running),
+            )
+            .await
+            .expect_err("startup is not advertised");
+        assert!(err.to_string().contains("startup"), "got {err}");
+        assert_eq!(written.lock().unwrap().len(), before, "nothing sent");
+    }
+
+    #[tokio::test]
+    async fn copy_config_marks_candidate_dirty_before_writing() {
+        // The reply never arrives. The flag must already be set, or a Junos
+        // close would skip the discard and leave the shared candidate replaced.
+        let transport = MockTransport::new(mock_device_hello());
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        assert!(!session.candidate_dirty());
+
+        let _ = session
+            .copy_config(
+                &ConfigLocation::Datastore(Datastore::Candidate),
+                &CopySource::Config("<system/>".to_string()),
+            )
+            .await;
+
+        assert!(
+            session.candidate_dirty(),
+            "candidate must be marked dirty even when the reply is lost"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_commit_requires_confirmed_commit_1_1() {
+        // mock_device_hello_with_confirmed_commit advertises 1.0 only.
+        let transport = MockTransport::new(mock_device_hello_with_confirmed_commit());
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let before = written.lock().unwrap().len();
+        let err = session
+            .cancel_commit(None)
+            .await
+            .expect_err("cancel-commit needs :confirmed-commit:1.1");
+        assert!(err.to_string().contains("cancel-commit"), "got {err}");
+        assert_eq!(written.lock().unwrap().len(), before, "nothing sent");
     }
 
     #[tokio::test]

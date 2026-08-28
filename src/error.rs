@@ -213,6 +213,11 @@ pub enum ProtocolError {
     /// XML parsing error during protocol message handling.
     #[error("XML error: {0}")]
     Xml(String),
+
+    /// A request the RFC requires the server to reject with `invalid-value`,
+    /// caught locally instead of being sent.
+    #[error("invalid value: {0}")]
+    InvalidValue(String),
 }
 
 #[cfg(test)]

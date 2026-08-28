@@ -22,6 +22,113 @@ pub enum Datastore {
     Startup,
 }
 
+/// Where a `<copy-config>` or `<delete-config>` reads from or writes to.
+///
+/// RFC 6241 lets these operations name either a datastore or a URL. The URL
+/// form needs the `:url` capability, which the session checks before sending.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ConfigLocation {
+    /// A NETCONF datastore.
+    Datastore(Datastore),
+    /// A URL, valid only if the device advertises `:url` and lists the scheme.
+    Url(String),
+}
+
+/// The `<target>` of a `<delete-config>` (RFC 6241 §7.4).
+///
+/// Narrower than [`ConfigLocation`] on purpose. The `config-target` choice in
+/// RFC 6241's `ietf-netconf` YANG module offers exactly two leaves for this
+/// operation:
+///
+/// ```text
+/// rpc delete-config {
+///   input { container target { choice config-target {
+///     mandatory true;
+///     leaf startup { if-feature startup; type empty; }
+///     leaf url     { if-feature url;     type inet:uri; }
+/// } } } }
+/// ```
+///
+/// Neither `running` nor `candidate` appears — the prose in §7.4 mentions only
+/// running, but the module is the normative list. Modelling it as its own type
+/// means a conforming server never has to reject what we send, and no runtime
+/// check is needed to enforce it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum DeleteTarget {
+    /// The startup datastore (requires `:startup`).
+    Startup,
+    /// A URL-backed configuration (requires `:url` and the scheme).
+    Url(String),
+}
+
+impl fmt::Display for DeleteTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DeleteTarget::Startup => f.write_str("startup"),
+            DeleteTarget::Url(url) => write!(f, "url({url})"),
+        }
+    }
+}
+
+/// The `<source>` of a `<copy-config>` (RFC 6241 §7.3).
+///
+/// Wider than [`ConfigLocation`] because the RFC also allows a complete
+/// configuration inline: *"the configuration datastore to use as the source of
+/// the `<copy-config>` operation, or the `<config>` element containing the
+/// complete configuration to copy."* Targets have no such form, so they stay
+/// [`ConfigLocation`] and the inline case cannot be expressed where it would be
+/// invalid.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum CopySource {
+    /// A NETCONF datastore.
+    Datastore(Datastore),
+    /// A URL, valid only if the device advertises `:url` and the scheme.
+    Url(String),
+    /// A complete configuration, inline. Replaces the target outright — this
+    /// is `copy-config`, not `edit-config`, so there is no merge semantics.
+    Config(String),
+}
+
+impl From<Datastore> for CopySource {
+    fn from(ds: Datastore) -> Self {
+        CopySource::Datastore(ds)
+    }
+}
+
+impl From<ConfigLocation> for CopySource {
+    fn from(loc: ConfigLocation) -> Self {
+        match loc {
+            ConfigLocation::Datastore(ds) => CopySource::Datastore(ds),
+            ConfigLocation::Url(u) => CopySource::Url(u),
+        }
+    }
+}
+
+impl fmt::Display for CopySource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CopySource::Datastore(ds) => f.write_str(ds.as_xml_tag()),
+            CopySource::Url(url) => write!(f, "url({url})"),
+            CopySource::Config(_) => f.write_str("inline-config"),
+        }
+    }
+}
+
+impl From<Datastore> for ConfigLocation {
+    fn from(ds: Datastore) -> Self {
+        ConfigLocation::Datastore(ds)
+    }
+}
+
+impl fmt::Display for ConfigLocation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigLocation::Datastore(ds) => f.write_str(ds.as_xml_tag()),
+            ConfigLocation::Url(url) => write!(f, "url({url})"),
+        }
+    }
+}
+
 impl Datastore {
     /// Returns the XML tag name for this datastore.
     pub fn as_xml_tag(&self) -> &'static str {

@@ -8,6 +8,7 @@
 
 use crate::error::NetconfError;
 use crate::rpc::filter::XPathFilter;
+use crate::types::{ConfigLocation, CopySource, DeleteTarget};
 use crate::types::{
     Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,
     TestOption,
@@ -27,6 +28,31 @@ pub(crate) fn escape_xml_text(value: &str) -> String {
         }
     }
     escaped
+}
+
+/// Escape for XML text content, preserving carriage returns exactly.
+///
+/// [`escape_xml_text`] is right for content we generate, but not for opaque
+/// tokens we must round-trip byte-for-byte. XML 1.0 §2.11 applies *line-ending
+/// normalization* to text content: a literal CR is turned into LF (and CRLF
+/// into a single LF) before the application sees it. A `persist-id` minted by
+/// another session and echoed back through a literal CR would come back
+/// altered and no longer match, so cancellation would silently fail.
+///
+/// Returns `None` for characters XML 1.0 cannot represent at all.
+pub(crate) fn escape_xml_text_exact(value: &str) -> Option<String> {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '\r' => escaped.push_str("&#13;"),
+            c if !crate::rpc::reply::lexical::is_valid_xml_char(c) => return None,
+            c => escaped.push(c),
+        }
+    }
+    Some(escaped)
 }
 
 /// Escape for an XML attribute value, preserving significant whitespace.
@@ -262,6 +288,100 @@ pub fn discard_changes_xml(message_id: &str) -> String {
   <nc:discard-changes/>
 </nc:rpc>"#,
     )
+}
+
+/// Render a `<source>`/`<target>` body for a [`ConfigLocation`].
+///
+/// URLs are text content, so they use the text escaper; a datastore renders as
+/// an empty element named for the datastore.
+fn location_body(location: &ConfigLocation, indent: &str) -> String {
+    match location {
+        ConfigLocation::Datastore(ds) => format!("{indent}<nc:{}/>", ds.as_xml_tag()),
+        ConfigLocation::Url(url) => {
+            format!("{indent}<nc:url>{}</nc:url>", escape_xml_text(url))
+        }
+    }
+}
+
+/// Render a `<source>` body for a [`CopySource`].
+///
+/// The inline form is inserted verbatim and must have been validated by the
+/// caller — same contract as `edit-config`'s config payload.
+fn copy_source_body(source: &CopySource, indent: &str) -> String {
+    match source {
+        CopySource::Datastore(ds) => format!("{indent}<nc:{}/>", ds.as_xml_tag()),
+        CopySource::Url(url) => format!("{indent}<nc:url>{}</nc:url>", escape_xml_text(url)),
+        CopySource::Config(cfg) => format!("{indent}<nc:config>{cfg}</nc:config>"),
+    }
+}
+
+/// Generate a `<copy-config>` RPC request (RFC 6241 §7.3).
+pub fn copy_config_xml(message_id: &str, target: &ConfigLocation, source: &CopySource) -> String {
+    let safe_id = escape_xml_attr(message_id);
+    let target_body = location_body(target, "      ");
+    let source_body = copy_source_body(source, "      ");
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:copy-config>
+    <nc:target>
+{target_body}
+    </nc:target>
+    <nc:source>
+{source_body}
+    </nc:source>
+  </nc:copy-config>
+</nc:rpc>"#
+    )
+}
+
+/// Generate a `<delete-config>` RPC request (RFC 6241 §7.4).
+pub fn delete_config_xml(message_id: &str, target: &DeleteTarget) -> String {
+    let safe_id = escape_xml_attr(message_id);
+    let target_body = match target {
+        DeleteTarget::Startup => "      <nc:startup/>".to_string(),
+        DeleteTarget::Url(url) => {
+            format!("      <nc:url>{}</nc:url>", escape_xml_text(url))
+        }
+    };
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:delete-config>
+    <nc:target>
+{target_body}
+    </nc:target>
+  </nc:delete-config>
+</nc:rpc>"#
+    )
+}
+
+/// Generate a `<cancel-commit>` RPC request (RFC 6241 §8.4.4.1).
+///
+/// `persist_id` cancels a confirmed commit that was issued with a `<persist>`
+/// token, possibly from a different session.
+pub fn cancel_commit_xml(
+    message_id: &str,
+    persist_id: Option<&str>,
+) -> Result<String, NetconfError> {
+    let safe_id = escape_xml_attr(message_id);
+    let body = match persist_id {
+        Some(id) => {
+            let escaped = escape_xml_text_exact(id).ok_or_else(|| {
+                NetconfError::Protocol(crate::error::ProtocolError::Xml(
+                    "persist-id contains a character XML 1.0 cannot represent".to_string(),
+                ))
+            })?;
+            format!("\n    <nc:persist-id>{escaped}</nc:persist-id>\n  ")
+        }
+        None => String::new(),
+    };
+    Ok(format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:cancel-commit>{body}</nc:cancel-commit>
+</nc:rpc>"#
+    ))
 }
 
 /// Generate a `<commit>` RPC request.
@@ -545,6 +665,105 @@ mod tests {
         assert!(xml.contains("<nc:running/>"));
         assert!(xml.contains("<nc:get-config>"));
         assert!(!xml.contains("<nc:filter"));
+    }
+
+    #[test]
+    fn test_copy_config_datastore_to_datastore() {
+        let xml = copy_config_xml(
+            "1",
+            &ConfigLocation::Datastore(Datastore::Startup),
+            &CopySource::Datastore(Datastore::Running),
+        );
+        assert!(xml.contains("<nc:copy-config>"), "got {xml}");
+        // Order matters: RFC 6241 puts <target> before <source>.
+        let t = xml.find("<nc:target>").expect("target");
+        let src = xml.find("<nc:source>").expect("source");
+        assert!(t < src, "target must precede source: {xml}");
+        assert!(xml.contains("<nc:startup/>"), "got {xml}");
+        assert!(xml.contains("<nc:running/>"), "got {xml}");
+    }
+
+    #[test]
+    fn test_copy_config_url_is_text_escaped() {
+        let xml = copy_config_xml(
+            "2",
+            &ConfigLocation::Url("file:///tmp/a&b<c".to_string()),
+            &CopySource::Datastore(Datastore::Running),
+        );
+        assert!(xml.contains("<nc:url>"), "got {xml}");
+        assert!(xml.contains("file:///tmp/a&amp;b&lt;c"), "got {xml}");
+        assert!(!xml.contains("a&b<c"), "unescaped url: {xml}");
+    }
+
+    #[test]
+    fn test_copy_config_inline_config_source() {
+        let xml = copy_config_xml(
+            "9",
+            &ConfigLocation::Datastore(Datastore::Candidate),
+            &CopySource::Config("<system><host-name>r1</host-name></system>".to_string()),
+        );
+        assert!(xml.contains("<nc:config>"), "got {xml}");
+        assert!(xml.contains("<host-name>r1</host-name>"), "got {xml}");
+        assert!(!xml.contains("<nc:url>"), "got {xml}");
+    }
+
+    #[test]
+    fn test_delete_config_url_is_text_escaped() {
+        let xml = delete_config_xml("10", &DeleteTarget::Url("file:///t/a&b".to_string()));
+        assert!(
+            xml.contains("<nc:url>file:///t/a&amp;b</nc:url>"),
+            "got {xml}"
+        );
+    }
+
+    #[test]
+    fn test_delete_config_targets_only() {
+        let xml = delete_config_xml("3", &DeleteTarget::Startup);
+        assert!(xml.contains("<nc:delete-config>"), "got {xml}");
+        assert!(xml.contains("<nc:startup/>"), "got {xml}");
+        assert!(
+            !xml.contains("<nc:source>"),
+            "delete takes no source: {xml}"
+        );
+    }
+
+    #[test]
+    fn test_cancel_commit_without_persist_id() {
+        let xml = cancel_commit_xml("4", None).unwrap();
+        assert!(
+            xml.contains("<nc:cancel-commit></nc:cancel-commit>"),
+            "got {xml}"
+        );
+        assert!(!xml.contains("persist-id"), "got {xml}");
+    }
+
+    #[test]
+    fn test_cancel_commit_with_persist_id_escapes_it() {
+        let xml = cancel_commit_xml("5", Some("token&<1")).unwrap();
+        assert!(
+            xml.contains("<nc:persist-id>token&amp;&lt;1</nc:persist-id>"),
+            "got {xml}"
+        );
+    }
+
+    #[test]
+    fn test_cancel_commit_persist_id_preserves_cr() {
+        // XML 1.0 line-ending normalization turns a literal CR in text content
+        // into LF, which would corrupt an opaque token minted elsewhere.
+        let xml = cancel_commit_xml("6", Some("a\rb")).unwrap();
+        assert!(xml.contains("&#13;"), "got {xml}");
+        let body = xml
+            .split_once("<nc:persist-id>")
+            .and_then(|(_, r)| r.split_once("</nc:persist-id>"))
+            .map(|(v, _)| v)
+            .expect("persist-id present");
+        assert!(!body.contains('\r'), "raw CR survives: {body:?}");
+    }
+
+    #[test]
+    fn test_cancel_commit_rejects_invalid_xml_chars() {
+        assert!(cancel_commit_xml("7", Some("a\u{1}b")).is_err());
+        assert!(cancel_commit_xml("7", Some("a\u{fffe}b")).is_err());
     }
 
     #[test]

@@ -58,8 +58,8 @@ pub use notification::Notification;
 pub use rpc::RpcErrorInfo;
 pub use ssh_config::{ResolvedHost, SshConfigError, SshConfigFile};
 pub use types::{
-    Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,
-    TestOption,
+    ConfigLocation, CopySource, Datastore, DefaultOperation, DeleteTarget, ErrorOption, LoadAction,
+    LoadFormat, OpenConfigurationMode, TestOption,
 };
 
 #[cfg(feature = "tls")]
