@@ -160,6 +160,18 @@ impl Session {
     /// If the device sends more data than this without completing a framed
     /// message, the read is aborted to prevent memory exhaustion.
     /// Defaults to 100 MB.
+    /// The current read-buffer ceiling in bytes.
+    pub fn max_read_buffer(&self) -> usize {
+        self.max_read_buffer
+    }
+
+    /// Set the read-buffer ceiling.
+    ///
+    /// This bounds bytes accumulated *without completing a framed message*, not
+    /// total reply size directly — though for one large reply those amount to
+    /// the same thing, since the framer yields nothing until the whole message
+    /// is present. A reply already buffered in full is decoded regardless of the
+    /// ceiling, so lowering it does not retroactively reject data in hand.
     pub fn set_max_read_buffer(&mut self, max_bytes: usize) {
         self.max_read_buffer = max_bytes;
     }
@@ -3381,6 +3393,24 @@ mod tests {
             .await
             .expect("a namespace-omitting device must still yield its lock-id");
         assert_eq!(lock.lock_id, 7);
+    }
+
+    #[tokio::test]
+    async fn read_limit_is_adjustable_on_a_live_session() {
+        let transport = MockTransport::new(mock_device_hello());
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let default = session.max_read_buffer();
+        assert_eq!(default, MAX_READ_BUFFER);
+
+        session.set_max_read_buffer(512 * 1024 * 1024);
+        assert_eq!(session.max_read_buffer(), 512 * 1024 * 1024);
+
+        // And back down again: the ceiling exists to bound a hostile device,
+        // so raising it for one fetch must be reversible.
+        session.set_max_read_buffer(default);
+        assert_eq!(session.max_read_buffer(), default);
     }
 
     #[tokio::test]

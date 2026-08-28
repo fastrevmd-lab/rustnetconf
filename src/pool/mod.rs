@@ -158,6 +158,7 @@ impl DevicePool {
                 while let Some(client) = pool.pop() {
                     if client.session_alive() {
                         return Ok(PoolGuard {
+                            checkout_max_read_buffer: client.max_read_buffer(),
                             client: Some(client),
                             device_name: device_name.to_string(),
                             connections: Arc::clone(&self.connections),
@@ -176,6 +177,7 @@ impl DevicePool {
         let client = connect_device(config).await?;
 
         Ok(PoolGuard {
+            checkout_max_read_buffer: client.max_read_buffer(),
             client: Some(client),
             device_name: device_name.to_string(),
             connections: Arc::clone(&self.connections),
@@ -203,6 +205,16 @@ pub struct PoolGuard<'a> {
     client: Option<Client>,
     device_name: String,
     connections: Arc<Mutex<HashMap<String, Vec<Client>>>>,
+    /// The read-buffer ceiling this connection had when it was checked out.
+    ///
+    /// Restored on check-in so a borrower's temporary override cannot outlive
+    /// their turn with the connection. `Client::set_max_read_buffer` documents
+    /// raising the ceiling for one large fetch and lowering it again, but that
+    /// restore is an ordinary statement — task cancellation at the intervening
+    /// `.await` skips it, and the next borrower would inherit a weakened
+    /// memory-exhaustion defence. `Drop` runs on cancellation; a trailing
+    /// statement does not.
+    checkout_max_read_buffer: usize,
     _permit: SemaphorePermit<'a>,
 }
 
@@ -240,7 +252,10 @@ impl<'a> DerefMut for PoolGuard<'a> {
 
 impl<'a> Drop for PoolGuard<'a> {
     fn drop(&mut self) {
-        if let Some(client) = self.client.take() {
+        if let Some(mut client) = self.client.take() {
+            // Undo any override the borrower left behind, cancelled or not.
+            client.set_max_read_buffer(self.checkout_max_read_buffer);
+
             if !client.session_alive() {
                 tracing::warn!(
                     device = %self.device_name,
