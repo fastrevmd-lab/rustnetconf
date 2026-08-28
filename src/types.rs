@@ -34,6 +34,43 @@ pub enum ConfigLocation {
     Url(String),
 }
 
+/// `<with-defaults>` retrieval mode (RFC 6243).
+///
+/// Without this, what a device reports for a leaf sitting at its YANG default
+/// is a per-vendor choice, which makes a diff unreliable: an absent leaf and a
+/// defaulted leaf are indistinguishable, so a plan shows phantom changes on
+/// devices that report defaults and misses them on devices that do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WithDefaults {
+    /// Report every node, including those at their default.
+    ReportAll,
+    /// As `ReportAll`, but tag defaulted nodes with `wd:default="true"`.
+    ReportAllTagged,
+    /// Omit nodes that are at their default.
+    Trim,
+    /// Report only nodes explicitly set, plus those the server considers set.
+    Explicit,
+}
+
+impl WithDefaults {
+    /// The mode's wire token, as it appears both in `<with-defaults>` and in
+    /// the capability's `basic-mode` / `also-supported` parameters.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            WithDefaults::ReportAll => "report-all",
+            WithDefaults::ReportAllTagged => "report-all-tagged",
+            WithDefaults::Trim => "trim",
+            WithDefaults::Explicit => "explicit",
+        }
+    }
+}
+
+impl fmt::Display for WithDefaults {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// The `<target>` of a `<delete-config>` (RFC 6241 §7.4).
 ///
 /// Narrower than [`ConfigLocation`] on purpose. The `config-target` choice in

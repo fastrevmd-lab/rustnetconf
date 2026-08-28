@@ -36,7 +36,7 @@ use crate::rpc::RpcReply;
 use crate::transport::Transport;
 use crate::types::{
     ConfigLocation, CopySource, Datastore, DefaultOperation, DeleteTarget, ErrorOption, LoadAction,
-    LoadFormat, OpenConfigurationMode, TestOption,
+    LoadFormat, OpenConfigurationMode, TestOption, WithDefaults,
 };
 use crate::vendor::{self, CloseSequence, VendorProfile};
 
@@ -847,6 +847,101 @@ impl Session {
     ///
     /// `filter`, when provided, must be a well-formed XML subtree filter
     /// fragment. It is validated before sending; a `ProtocolError::Xml` is
+    /// Fetch configuration with an explicit `<with-defaults>` mode (RFC 6243).
+    ///
+    /// Note on shape: for [`WithDefaults::ReportAllTagged`] the vendor wrapper
+    /// is **not** stripped, because the `wd:` prefix carrying the default
+    /// markers is bound on it. Every other mode is unwrapped as usual.
+    ///
+    /// Errors with [`ProtocolError::CapabilityMissing`] when the device does
+    /// not advertise the mode. The check uses the capability's own
+    /// `basic-mode`/`also-supported` list rather than just the capability URI:
+    /// a device supporting only `explicit` would otherwise be sent `trim` and
+    /// answer with data in a different shape than the caller asked for.
+    pub async fn get_config_with_defaults(
+        &mut self,
+        source: Datastore,
+        filter: Option<&str>,
+        mode: WithDefaults,
+    ) -> Result<String, NetconfError> {
+        self.require_with_defaults(mode)?;
+        if let Some(filter_xml) = filter {
+            rpc::validate_xml_fragment(filter_xml)?;
+        }
+        let msg_id = self.next_message_id();
+        let xml = operations::get_config_with_defaults_xml(&msg_id, source, filter, mode);
+        match self.send_rpc(&xml, &msg_id).await? {
+            RpcReply::Data(data) | RpcReply::DataWithWarnings(data, _) => {
+                // `report-all-tagged` is returned unwrapped-from-nothing: the
+                // vendor unwrap is skipped for it alone.
+                //
+                // Junos `unwrap_config` strips the `<configuration>` wrapper by
+                // string surgery, taking its `xmlns` declarations with it. In
+                // this mode the reply's entire point is the `wd:default="true"`
+                // markers, and `wd` is bound on that wrapper — stripping it
+                // hands back attributes whose prefix resolves to nothing.
+                //
+                // Skipping the unwrap only here, rather than teaching
+                // `unwrap_config` to keep namespaced wrappers, is deliberate.
+                // The CLI diffs a desired config it unwraps itself against a
+                // running config the vendor profile unwrapped
+                // (`plan.rs` strip-then-diff), so a retained wrapper on the
+                // device side would make every top-level element differ and
+                // produce false add/remove entries.
+                if matches!(mode, WithDefaults::ReportAllTagged) {
+                    Ok(data)
+                } else {
+                    Ok(self.vendor_profile.unwrap_config(&data))
+                }
+            }
+            RpcReply::Ok | RpcReply::OkWithWarnings(_) => Ok(String::new()),
+        }
+    }
+
+    /// Fetch operational and configuration data with a `<with-defaults>` mode.
+    pub async fn get_with_defaults(
+        &mut self,
+        filter: Option<&str>,
+        mode: WithDefaults,
+    ) -> Result<String, NetconfError> {
+        self.require_with_defaults(mode)?;
+        if let Some(filter_xml) = filter {
+            rpc::validate_xml_fragment(filter_xml)?;
+        }
+        let msg_id = self.next_message_id();
+        let xml = operations::get_with_defaults_xml(&msg_id, filter, mode);
+        match self.send_rpc(&xml, &msg_id).await? {
+            RpcReply::Data(data) | RpcReply::DataWithWarnings(data, _) => Ok(data),
+            RpcReply::Ok | RpcReply::OkWithWarnings(_) => Ok(String::new()),
+        }
+    }
+
+    /// The `<with-defaults>` modes this device advertises.
+    ///
+    /// Empty when the device does not support RFC 6243 at all.
+    pub fn with_defaults_modes(&self) -> Vec<String> {
+        self.capabilities()
+            .map(|caps| caps.with_defaults_modes())
+            .unwrap_or_default()
+    }
+
+    /// Error unless the device advertises this specific with-defaults mode.
+    fn require_with_defaults(&self, mode: WithDefaults) -> Result<(), NetconfError> {
+        let modes = self.with_defaults_modes();
+        if modes.iter().any(|m| m == mode.as_str()) {
+            return Ok(());
+        }
+        Err(ProtocolError::CapabilityMissing(format!(
+            "with-defaults mode `{mode}` is not advertised (supported: {})",
+            if modes.is_empty() {
+                "none".to_string()
+            } else {
+                modes.join(", ")
+            }
+        ))
+        .into())
+    }
+
     /// Fetch configuration using an XPath filter (RFC 6241 §6.4).
     ///
     /// Returns [`ProtocolError::CapabilityMissing`] when the device did not
@@ -998,6 +1093,31 @@ impl Session {
         target: &ConfigLocation,
         source: &CopySource,
     ) -> Result<(), NetconfError> {
+        self.copy_config_inner(target, source, None).await
+    }
+
+    /// `copy-config` with an RFC 6243 `<with-defaults>` mode.
+    ///
+    /// RFC 6243 augments `copy-config` as well as the retrieval operations, so
+    /// a caller materializing or trimming defaults during a datastore copy can
+    /// say so. Gated on the advertised mode list exactly as the `get` variants
+    /// are.
+    pub async fn copy_config_with_defaults(
+        &mut self,
+        target: &ConfigLocation,
+        source: &CopySource,
+        mode: WithDefaults,
+    ) -> Result<(), NetconfError> {
+        self.require_with_defaults(mode)?;
+        self.copy_config_inner(target, source, Some(mode)).await
+    }
+
+    async fn copy_config_inner(
+        &mut self,
+        target: &ConfigLocation,
+        source: &CopySource,
+        mode: Option<WithDefaults>,
+    ) -> Result<(), NetconfError> {
         // RFC 6241 §7.3: "If the <source> and <target> parameters identify the
         // same URL or configuration datastore, an error MUST be returned with
         // an error-tag containing 'invalid-value'." Caught here so the
@@ -1048,7 +1168,10 @@ impl Session {
         self.ensure_established()?;
 
         let msg_id = self.next_message_id();
-        let xml = operations::copy_config_xml(&msg_id, target, source);
+        let xml = match mode {
+            Some(mode) => operations::copy_config_with_defaults_xml(&msg_id, target, source, mode),
+            None => operations::copy_config_xml(&msg_id, target, source),
+        };
         if matches!(target, ConfigLocation::Datastore(Datastore::Candidate)) {
             self.candidate_dirty = true;
         }
@@ -1069,16 +1192,24 @@ impl Session {
         // The pre-write marking above still stands for the uncertain case: if
         // the reply is lost we do not know the copy landed, and assuming dirty
         // is the safe side of that.
-        let synchronized = matches!(
-            (target, source),
-            (
-                ConfigLocation::Datastore(Datastore::Candidate),
-                CopySource::Datastore(Datastore::Running)
-            ) | (
-                ConfigLocation::Datastore(Datastore::Running),
-                CopySource::Datastore(Datastore::Candidate)
-            )
-        );
+        // Only a *plain* copy synchronizes the two datastores. Every RFC 6243
+        // mode transforms the representation on the way through — `report-all`
+        // materializes defaulted nodes, `trim` removes them, `explicit` reports
+        // only what was set, `report-all-tagged` adds markers — so afterwards
+        // the candidate is not necessarily equal to running and the flag must
+        // stand. Assuming otherwise would let a Junos `close_session` skip its
+        // discard and leave the shared candidate altered.
+        let synchronized = mode.is_none()
+            && matches!(
+                (target, source),
+                (
+                    ConfigLocation::Datastore(Datastore::Candidate),
+                    CopySource::Datastore(Datastore::Running)
+                ) | (
+                    ConfigLocation::Datastore(Datastore::Running),
+                    CopySource::Datastore(Datastore::Candidate)
+                )
+            );
         if synchronized {
             self.candidate_dirty = false;
         }
@@ -3016,6 +3147,193 @@ mod tests {
             .expect_err("cancel-commit needs :confirmed-commit:1.1");
         assert!(err.to_string().contains("cancel-commit"), "got {err}");
         assert_eq!(written.lock().unwrap().len(), before, "nothing sent");
+    }
+
+    /// A hello advertising with-defaults with an explicit mode list.
+    ///
+    /// `&` between query parameters is XML-escaped, as a real device must do -
+    /// an unescaped one makes the hello ill-formed.
+    fn mock_with_defaults_hello(params: &str) -> Vec<u8> {
+        let params = params.replace('&', "&amp;");
+        let hello = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability>urn:ietf:params:netconf:base:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:candidate:1.0</capability>
+    <capability>urn:ietf:params:netconf:capability:with-defaults:1.0?{params}</capability>
+  </capabilities>
+  <session-id>1</session-id>
+</hello>"#
+        );
+        let mut buf = hello.into_bytes();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    #[tokio::test]
+    async fn copy_config_with_defaults_emits_the_mode_and_is_gated() {
+        // Advertised: accepted and rendered.
+        let mut data = mock_with_defaults_hello("basic-mode=explicit&also-supported=trim");
+        // add :candidate and :writable-running via a second hello is not
+        // possible, so copy between running and startup is used instead.
+        let transport = MockTransport::new(data.clone());
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        // startup is not advertised here, so the datastore gate fires first -
+        // which is itself the point: gates compose and the mode gate is not
+        // the only one.
+        assert!(session
+            .copy_config_with_defaults(
+                &ConfigLocation::Datastore(Datastore::Startup),
+                &CopySource::Datastore(Datastore::Running),
+                WithDefaults::Trim,
+            )
+            .await
+            .is_err());
+
+        // Unadvertised mode is refused before anything is written.
+        data = mock_with_defaults_hello("basic-mode=explicit");
+        let transport = MockTransport::new(data);
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        let before = written.lock().unwrap().len();
+        let err = session
+            .copy_config_with_defaults(
+                &ConfigLocation::Datastore(Datastore::Running),
+                &CopySource::Datastore(Datastore::Startup),
+                WithDefaults::ReportAll,
+            )
+            .await
+            .expect_err("report-all is not advertised");
+        assert!(err.to_string().contains("report-all"), "got {err}");
+        assert_eq!(written.lock().unwrap().len(), before, "nothing sent");
+    }
+
+    #[tokio::test]
+    async fn unadvertised_with_defaults_mode_is_refused_before_sending() {
+        // Device supports explicit only. Sending `trim` anyway would return
+        // data in a different shape than the caller asked for.
+        let transport = MockTransport::new(mock_with_defaults_hello("basic-mode=explicit"));
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let before = written.lock().unwrap().len();
+        let err = session
+            .get_with_defaults(None, WithDefaults::Trim)
+            .await
+            .expect_err("trim is not advertised");
+        assert!(err.to_string().contains("trim"), "got {err}");
+        assert!(
+            err.to_string().contains("explicit"),
+            "should name what is supported: {err}"
+        );
+        assert_eq!(written.lock().unwrap().len(), before, "nothing sent");
+    }
+
+    #[tokio::test]
+    async fn with_defaults_copy_does_not_clear_the_dirty_flag() {
+        // trim removes defaulted nodes on the way through, so the candidate is
+        // not a copy of running afterwards - the flag must stand.
+        let mut data = mock_with_defaults_hello("basic-mode=trim");
+        data.extend_from_slice(&mock_ok_reply("1"));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session
+            .copy_config_with_defaults(
+                &ConfigLocation::Datastore(Datastore::Candidate),
+                &CopySource::Datastore(Datastore::Running),
+                WithDefaults::Trim,
+            )
+            .await
+            .expect("trim copy");
+        assert!(
+            session.candidate_dirty(),
+            "a transformed copy is not a synchronization"
+        );
+    }
+
+    #[tokio::test]
+    async fn report_all_tagged_keeps_the_vendor_wrapper() {
+        // The wd: prefix is bound on <configuration>; unwrapping would orphan
+        // the default markers that are the whole point of this mode.
+        let mut data = mock_with_defaults_hello("basic-mode=report-all-tagged");
+        data.extend_from_slice(&mock_data_reply(
+            "1",
+            r#"<configuration xmlns:wd="urn:ietf:params:xml:ns:netconf:default:1.0"><system><host-name wd:default="true">r1</host-name></system></configuration>"#,
+        ));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        session.set_vendor_profile(Box::new(crate::vendor::junos::JunosVendor::default()));
+
+        let out = session
+            .get_config_with_defaults(Datastore::Running, None, WithDefaults::ReportAllTagged)
+            .await
+            .expect("report-all-tagged");
+        assert!(
+            out.contains("xmlns:wd="),
+            "the wd binding must survive: {out}"
+        );
+        assert!(out.contains("wd:default=\"true\""), "got {out}");
+    }
+
+    #[tokio::test]
+    async fn other_modes_are_still_vendor_unwrapped() {
+        // The CLI diffs a self-unwrapped desired config against this, so the
+        // wrapper must keep coming off for every mode but report-all-tagged.
+        let mut data = mock_with_defaults_hello("basic-mode=trim");
+        data.extend_from_slice(&mock_data_reply(
+            "1",
+            r#"<configuration xmlns:junos="http://xml.juniper.net/junos/1.0" junos:commit-seconds="1"><system/></configuration>"#,
+        ));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        session.set_vendor_profile(Box::new(crate::vendor::junos::JunosVendor::default()));
+
+        let out = session
+            .get_config_with_defaults(Datastore::Running, None, WithDefaults::Trim)
+            .await
+            .expect("trim");
+        assert!(
+            !out.trim().starts_with("<configuration"),
+            "wrapper must still be stripped: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn advertised_with_defaults_mode_is_sent() {
+        let mut data =
+            mock_with_defaults_hello("basic-mode=explicit&also-supported=report-all,trim");
+        data.extend_from_slice(&mock_data_reply("1", "<interfaces/>"));
+        let transport = MockTransport::new(data);
+        let written = transport.written_handle();
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        session
+            .get_with_defaults(None, WithDefaults::Trim)
+            .await
+            .expect("trim is in also-supported");
+        let sent = String::from_utf8_lossy(&written.lock().unwrap()).to_string();
+        assert!(sent.contains(">trim</with-defaults>"), "sent: {sent}");
+    }
+
+    #[tokio::test]
+    async fn device_without_the_capability_reports_no_modes() {
+        let transport = MockTransport::new(mock_device_hello());
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        assert!(session.with_defaults_modes().is_empty());
+        assert!(session
+            .get_with_defaults(None, WithDefaults::ReportAll)
+            .await
+            .is_err());
     }
 
     #[tokio::test]

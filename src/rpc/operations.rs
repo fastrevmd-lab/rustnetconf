@@ -8,7 +8,7 @@
 
 use crate::error::NetconfError;
 use crate::rpc::filter::XPathFilter;
-use crate::types::{ConfigLocation, CopySource, DeleteTarget};
+use crate::types::{ConfigLocation, CopySource, DeleteTarget, WithDefaults};
 use crate::types::{
     Datastore, DefaultOperation, ErrorOption, LoadAction, LoadFormat, OpenConfigurationMode,
     TestOption,
@@ -128,6 +128,61 @@ pub fn get_config_xml(message_id: &str, source: Datastore, filter: Option<&str>)
   </nc:get-config>
 </nc:rpc>"#,
         source = source.as_xml_tag(),
+    )
+}
+
+/// The `<with-defaults>` element (RFC 6243 §4.6.1).
+///
+/// Carries its own namespace because it is defined by RFC 6243's YANG module,
+/// not the base NETCONF one — a bare `<with-defaults>` in the base namespace is
+/// ignored by conforming servers.
+fn with_defaults_element(mode: WithDefaults) -> String {
+    format!(
+        "\n    <with-defaults xmlns=\"urn:ietf:params:xml:ns:yang:ietf-netconf-with-defaults\">{}</with-defaults>",
+        mode.as_str()
+    )
+}
+
+/// Generate a `<get-config>` RPC with a subtree filter and a with-defaults mode.
+pub fn get_config_with_defaults_xml(
+    message_id: &str,
+    source: Datastore,
+    filter: Option<&str>,
+    mode: WithDefaults,
+) -> String {
+    let filter_xml = match filter {
+        Some(f) => format!("\n    <nc:filter type=\"subtree\">\n      {f}\n    </nc:filter>"),
+        None => String::new(),
+    };
+    let wd = with_defaults_element(mode);
+    let safe_id = escape_xml_attr(message_id);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:get-config>
+    <nc:source>
+      <nc:{source}/>
+    </nc:source>{filter_xml}{wd}
+  </nc:get-config>
+</nc:rpc>"#,
+        source = source.as_xml_tag(),
+    )
+}
+
+/// Generate a `<get>` RPC with a subtree filter and a with-defaults mode.
+pub fn get_with_defaults_xml(message_id: &str, filter: Option<&str>, mode: WithDefaults) -> String {
+    let filter_xml = match filter {
+        Some(f) => format!("\n    <nc:filter type=\"subtree\">\n      {f}\n    </nc:filter>"),
+        None => String::new(),
+    };
+    let wd = with_defaults_element(mode);
+    let safe_id = escape_xml_attr(message_id);
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
+  <nc:get>{filter_xml}{wd}
+  </nc:get>
+</nc:rpc>"#
     )
 }
 
@@ -316,10 +371,36 @@ fn copy_source_body(source: &CopySource, indent: &str) -> String {
 }
 
 /// Generate a `<copy-config>` RPC request (RFC 6241 §7.3).
+///
+/// Kept at three arguments: `rpc::operations` is public, so adding a parameter
+/// here would break callers that never asked for RFC 6243. The with-defaults
+/// form is [`copy_config_with_defaults_xml`].
 pub fn copy_config_xml(message_id: &str, target: &ConfigLocation, source: &CopySource) -> String {
+    copy_config_xml_inner(message_id, target, source, None)
+}
+
+/// Generate a `<copy-config>` RPC request carrying RFC 6243's
+/// `<with-defaults>`, which that RFC augments onto `copy-config` as well as the
+/// retrieval operations.
+pub fn copy_config_with_defaults_xml(
+    message_id: &str,
+    target: &ConfigLocation,
+    source: &CopySource,
+    mode: WithDefaults,
+) -> String {
+    copy_config_xml_inner(message_id, target, source, Some(mode))
+}
+
+fn copy_config_xml_inner(
+    message_id: &str,
+    target: &ConfigLocation,
+    source: &CopySource,
+    mode: Option<WithDefaults>,
+) -> String {
     let safe_id = escape_xml_attr(message_id);
     let target_body = location_body(target, "      ");
     let source_body = copy_source_body(source, "      ");
+    let wd = mode.map(with_defaults_element).unwrap_or_default();
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <nc:rpc xmlns:nc="urn:ietf:params:xml:ns:netconf:base:1.0" message-id="{safe_id}">
@@ -329,7 +410,7 @@ pub fn copy_config_xml(message_id: &str, target: &ConfigLocation, source: &CopyS
     </nc:target>
     <nc:source>
 {source_body}
-    </nc:source>
+    </nc:source>{wd}
   </nc:copy-config>
 </nc:rpc>"#
     )
@@ -764,6 +845,71 @@ mod tests {
     fn test_cancel_commit_rejects_invalid_xml_chars() {
         assert!(cancel_commit_xml("7", Some("a\u{1}b")).is_err());
         assert!(cancel_commit_xml("7", Some("a\u{fffe}b")).is_err());
+    }
+
+    #[test]
+    fn test_copy_config_carries_with_defaults() {
+        let xml = copy_config_with_defaults_xml(
+            "11",
+            &ConfigLocation::Datastore(Datastore::Startup),
+            &CopySource::Datastore(Datastore::Running),
+            WithDefaults::ReportAll,
+        );
+        assert!(xml.contains(">report-all</with-defaults>"), "got {xml}");
+        // RFC 6243 places it after <source>.
+        let src = xml.find("</nc:source>").expect("source");
+        let wd = xml.find("<with-defaults").expect("with-defaults");
+        assert!(src < wd, "with-defaults follows source: {xml}");
+    }
+
+    #[test]
+    fn test_copy_config_without_mode_has_no_with_defaults() {
+        let xml = copy_config_xml(
+            "12",
+            &ConfigLocation::Datastore(Datastore::Startup),
+            &CopySource::Datastore(Datastore::Running),
+        );
+        assert!(!xml.contains("with-defaults"), "got {xml}");
+    }
+
+    #[test]
+    fn test_with_defaults_uses_the_rfc6243_namespace() {
+        let xml = get_config_with_defaults_xml("1", Datastore::Running, None, WithDefaults::Trim);
+        assert!(
+            xml.contains(
+                r#"<with-defaults xmlns="urn:ietf:params:xml:ns:yang:ietf-netconf-with-defaults">trim</with-defaults>"#
+            ),
+            "with-defaults must carry its own namespace: {xml}"
+        );
+    }
+
+    #[test]
+    fn test_with_defaults_modes_render_their_wire_tokens() {
+        for (mode, token) in [
+            (WithDefaults::ReportAll, "report-all"),
+            (WithDefaults::ReportAllTagged, "report-all-tagged"),
+            (WithDefaults::Trim, "trim"),
+            (WithDefaults::Explicit, "explicit"),
+        ] {
+            let xml = get_with_defaults_xml("2", None, mode);
+            assert!(
+                xml.contains(&format!(">{token}</with-defaults>")),
+                "got {xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_with_defaults_composes_with_a_filter() {
+        let xml = get_config_with_defaults_xml(
+            "3",
+            Datastore::Running,
+            Some("<interfaces/>"),
+            WithDefaults::ReportAll,
+        );
+        let f = xml.find("<nc:filter").expect("filter");
+        let w = xml.find("<with-defaults").expect("with-defaults");
+        assert!(f < w, "filter precedes with-defaults per the RFC: {xml}");
     }
 
     #[test]
