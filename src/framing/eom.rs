@@ -4,7 +4,7 @@
 //! The hello exchange always uses EOM framing regardless of version.
 
 use crate::error::FramingError;
-use crate::framing::{FramePart, Framer};
+use crate::framing::Framer;
 
 /// The NETCONF 1.0 end-of-message delimiter.
 const EOM_DELIMITER: &[u8] = b"]]>]]>";
@@ -46,32 +46,6 @@ impl Framer for EomFramer {
             }
             None => Ok(None),
         }
-    }
-
-    fn decode_part(&self, buffer: &[u8]) -> Result<FramePart, FramingError> {
-        if let Some(pos) = find_subsequence(buffer, EOM_DELIMITER) {
-            if pos > 0 {
-                return Ok(FramePart::Data {
-                    payload: buffer[..pos].to_vec(),
-                    consumed: pos,
-                });
-            }
-            return Ok(FramePart::End {
-                consumed: EOM_DELIMITER.len(),
-            });
-        }
-
-        // Hold back anything that could still become a delimiter. Emitting a
-        // trailing `]]>]]` because the final `>` has not arrived yet would put
-        // framing bytes into the caller's payload.
-        let safe = buffer.len().saturating_sub(EOM_DELIMITER.len() - 1);
-        if safe == 0 {
-            return Ok(FramePart::NeedMore);
-        }
-        Ok(FramePart::Data {
-            payload: buffer[..safe].to_vec(),
-            consumed: safe,
-        })
     }
 }
 

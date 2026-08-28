@@ -11,11 +11,11 @@
 //! byte count of the chunk data. The end-of-chunks marker is `\n##\n`.
 
 use crate::error::FramingError;
-use crate::framing::{FramePart, Framer};
+use crate::framing::Framer;
 
 /// Maximum allowed chunk size (4 MB). Prevents memory exhaustion from
 /// malformed chunk headers advertising absurd lengths.
-const MAX_CHUNK_SIZE: usize = 4 * 1024 * 1024;
+pub(crate) const MAX_CHUNK_SIZE: usize = 4 * 1024 * 1024;
 
 /// End-of-chunks marker.
 const END_OF_CHUNKS: &[u8] = b"\n##\n";
@@ -136,89 +136,6 @@ impl Framer for ChunkedFramer {
             message.extend_from_slice(&buffer[pos..pos + chunk_len]);
             pos += chunk_len;
         }
-    }
-
-    fn decode_part(&self, buffer: &[u8]) -> Result<FramePart, FramingError> {
-        // One chunk per call. Chunked framing is self-describing — each chunk
-        // announces its length — so a chunk can be emitted as soon as it is
-        // complete, without waiting for the end-of-chunks marker.
-        if buffer.len() < 2 {
-            return Ok(FramePart::NeedMore);
-        }
-        if buffer[0] != b'\n' || buffer[1] != b'#' {
-            // Same firmware-bug detection as the all-at-once path: a device
-            // that advertised :base:1.1 and then sent EOM framing.
-            if looks_like_eom_data(buffer) {
-                return Err(FramingError::Mismatch {
-                    advertised: "1.1 (chunked)".to_string(),
-                    actual: "1.0 (EOM)".to_string(),
-                });
-            }
-            return Err(FramingError::Invalid(format!(
-                "expected chunk header, got {:?}",
-                &buffer[..std::cmp::min(4, buffer.len())]
-            )));
-        }
-
-        let mut pos = 2;
-        // End-of-chunks marker: \n##\n
-        if pos < buffer.len() && buffer[pos] == b'#' {
-            if pos + 2 > buffer.len() {
-                return Ok(FramePart::NeedMore);
-            }
-            if buffer[pos + 1] != b'\n' {
-                return Err(FramingError::Invalid(
-                    "expected \\n after ## in end-of-chunks marker".to_string(),
-                ));
-            }
-            return Ok(FramePart::End { consumed: pos + 2 });
-        }
-
-        let len_start = pos;
-        while pos < buffer.len() && buffer[pos] != b'\n' {
-            if !buffer[pos].is_ascii_digit() {
-                return Err(FramingError::Invalid(format!(
-                    "non-digit in chunk length: {:?}",
-                    buffer[pos] as char
-                )));
-            }
-            pos += 1;
-        }
-        if pos >= buffer.len() {
-            return Ok(FramePart::NeedMore);
-        }
-        if pos == len_start {
-            return Err(FramingError::Invalid("empty chunk length".to_string()));
-        }
-        let len_str = std::str::from_utf8(&buffer[len_start..pos])
-            .map_err(|e| FramingError::Invalid(format!("invalid chunk length: {e}")))?;
-        let chunk_len: usize = len_str
-            .parse()
-            .map_err(|e| FramingError::Invalid(format!("invalid chunk length: {e}")))?;
-        if chunk_len == 0 {
-            return Err(FramingError::Invalid("zero-length chunk".to_string()));
-        }
-        // Same bound the all-at-once path enforces. Without it a device can
-        // announce a huge length and force an allocation to match — and at
-        // exactly `usize::MAX` the `pos + chunk_len` below overflows and panics,
-        // which is reachable from device input.
-        if chunk_len > MAX_CHUNK_SIZE {
-            return Err(FramingError::Invalid(format!(
-                "chunk length {chunk_len} exceeds maximum {MAX_CHUNK_SIZE}"
-            )));
-        }
-        pos += 1; // the \n after the length
-
-        let end = pos
-            .checked_add(chunk_len)
-            .ok_or_else(|| FramingError::Invalid("chunk length overflows".to_string()))?;
-        if buffer.len() < end {
-            return Ok(FramePart::NeedMore);
-        }
-        Ok(FramePart::Data {
-            payload: buffer[pos..end].to_vec(),
-            consumed: end,
-        })
     }
 }
 

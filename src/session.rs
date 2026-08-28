@@ -26,7 +26,7 @@ use crate::error::{FramingError, NetconfError, ProtocolError, TransportError};
 use crate::facts::Facts;
 use crate::framing::chunked::ChunkedFramer;
 use crate::framing::eom::EomFramer;
-use crate::framing::{FramePart, Framer};
+use crate::framing::{FramePart, Framer, StreamDecoder};
 use crate::notification::{self, MessageKind, Notification};
 use crate::rpc;
 use crate::rpc::filter::XPathFilter;
@@ -1105,6 +1105,13 @@ impl Session {
         // buffered path bounds the entire loop, so this does too.
         let deadline = self.rpc_timeout.map(|t| tokio::time::Instant::now() + t);
 
+        // Chunk-granularity streaming needs state the `Framer` trait cannot
+        // hold, and without it the chunked path does not stream at all: this
+        // crate's own encoder emits one chunk per message, so an all-or-nothing
+        // chunk decoder buffers the entire reply and trips the ceiling before a
+        // byte reaches the sink.
+        let mut decoder = StreamDecoder::for_version(self.version == Some(NetconfVersion::V1_1));
+
         let mut written = 0usize;
         let mut temp = vec![0u8; READ_BUF_SIZE];
         // Held back until the reply's message-id has been checked. A prior RPC
@@ -1121,13 +1128,24 @@ impl Session {
         let mut prefix: Vec<u8> = Vec::new();
         let mut verified = false;
         let mut discarding = false;
+        // Same bound `send_rpc_raw` applies. Without it a peer that keeps
+        // sending frames for other message-ids holds this call open forever
+        // whenever no `rpc_timeout` is configured.
+        let mut stale_frames = 0usize;
+        let mut last_stale = String::new();
+        // Bytes at the front of `read_buffer` already handed to the decoder.
+        // Draining per part memmoves everything behind it each time, so a reply
+        // delivered as many small chunks would be quadratic; advance an offset
+        // and compact once per read instead.
+        let mut offset = 0usize;
 
         loop {
             loop {
-                match self.framer.decode_part(&self.read_buffer)? {
+                match decoder.decode_part(&self.read_buffer[offset..])? {
                     FramePart::Data { payload, consumed } => {
-                        self.read_buffer.drain(..consumed);
-                        if discarding {
+                        offset += consumed;
+                        // A chunk header carries no payload of its own.
+                        if discarding || payload.is_empty() {
                             continue;
                         }
                         if verified {
@@ -1143,9 +1161,10 @@ impl Session {
                                 written += prefix.len();
                                 prefix.clear();
                             }
-                            Some(_) => {
+                            Some(other) => {
                                 // A stale reply. Swallow the rest of this frame
                                 // and keep waiting for ours.
+                                last_stale = other;
                                 discarding = true;
                                 prefix.clear();
                             }
@@ -1157,8 +1176,21 @@ impl Session {
                         }
                     }
                     FramePart::End { consumed } => {
-                        self.read_buffer.drain(..consumed);
+                        offset += consumed;
                         if discarding || !verified {
+                            stale_frames += 1;
+                            if stale_frames > MAX_STALE_DRAIN {
+                                tracing::error!(
+                                    expected = %message_id,
+                                    actual = %last_stale,
+                                    "streaming: exceeded max drain attempts ({MAX_STALE_DRAIN})"
+                                );
+                                return Err(crate::error::RpcError::MessageIdMismatch {
+                                    expected: message_id.to_string(),
+                                    actual: last_stale,
+                                }
+                                .into());
+                            }
                             // That frame was not ours. Reset and wait for the
                             // next one; the buffer is back at a boundary.
                             discarding = false;
@@ -1166,6 +1198,7 @@ impl Session {
                             prefix.clear();
                             continue;
                         }
+                        self.read_buffer.drain(..offset);
                         // Cleared before the flush: the terminator is consumed,
                         // so the session is at a valid message boundary and a
                         // failing sink must not condemn an otherwise healthy
@@ -1178,6 +1211,9 @@ impl Session {
                     FramePart::NeedMore => break,
                 }
             }
+
+            self.read_buffer.drain(..offset);
+            offset = 0;
 
             if self.read_buffer.len() > self.max_read_buffer {
                 return Err(TransportError::Io(std::io::Error::new(
@@ -1220,17 +1256,28 @@ impl Session {
     /// stops `message-id` being matched inside a leading comment or processing
     /// instruction.
     fn reply_message_id(prefix: &[u8]) -> Option<String> {
-        // First real element start: skip `<?...?>` and `<!--...-->`.
+        fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+            haystack.windows(needle.len()).position(|w| w == needle)
+        }
+        // First real element start, skipping any prolog. Each construct is
+        // skipped to its own terminator, not to the next `>`: a comment may
+        // legally contain one, and `<!-- > <rpc-reply message-id="1"> -->`
+        // would otherwise be mistaken for the root element.
         let mut i = 0;
         loop {
             let lt = prefix[i..].iter().position(|&b| b == b'<')? + i;
             match prefix.get(lt + 1) {
-                Some(b'?') | Some(b'!') => {
-                    let gt = prefix[lt..].iter().position(|&b| b == b'>')? + lt;
-                    i = gt + 1;
+                Some(b'!') if prefix[lt..].starts_with(b"<!--") => {
+                    i = find(&prefix[lt + 4..], b"-->")? + lt + 4 + 3;
+                }
+                Some(b'!') => {
+                    i = prefix[lt..].iter().position(|&b| b == b'>')? + lt + 1;
+                }
+                Some(b'?') => {
+                    i = find(&prefix[lt + 2..], b"?>")? + lt + 2 + 2;
                 }
                 Some(_) => {
-                    let gt = prefix[lt..].iter().position(|&b| b == b'>')? + lt;
+                    let gt = Self::tag_end(&prefix[lt..])? + lt;
                     return Self::message_id_in_tag(&prefix[lt..=gt]);
                 }
                 // Tag has not arrived in full yet.
@@ -1239,31 +1286,71 @@ impl Session {
         }
     }
 
-    /// `message-id="..."` within one opening tag's bytes.
+    /// Offset of the `>` that closes an opening tag, ignoring any inside a
+    /// quoted attribute value.
+    fn tag_end(tag: &[u8]) -> Option<usize> {
+        let mut quote: Option<u8> = None;
+        for (i, &b) in tag.iter().enumerate() {
+            match quote {
+                Some(q) if b == q => quote = None,
+                Some(_) => {}
+                None if b == b'"' || b == b'\'' => quote = Some(b),
+                None if b == b'>' => return Some(i),
+                None => {}
+            }
+        }
+        None
+    }
+
+    /// Value of the unqualified `message-id` attribute within one opening tag.
+    ///
+    /// Attribute names are parsed and compared whole. A substring search would
+    /// let a stale reply carrying a qualified extension attribute such as
+    /// `evil:message-id="1"` ahead of its real `message-id="99"` masquerade as
+    /// message 1 — the caller would be handed the stale reply while its own
+    /// stayed queued.
     fn message_id_in_tag(tag: &[u8]) -> Option<String> {
-        let at = tag
-            .windows(b"message-id".len())
-            .position(|w| w == b"message-id")?;
-        let mut j = at + b"message-id".len();
-        while j < tag.len() && tag[j].is_ascii_whitespace() {
-            j += 1;
+        // Past `<` and the element name.
+        let mut i = 1;
+        while i < tag.len() && !tag[i].is_ascii_whitespace() && tag[i] != b'>' && tag[i] != b'/' {
+            i += 1;
         }
-        if tag.get(j)? != &b'=' {
-            return None;
+        loop {
+            while i < tag.len() && tag[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i >= tag.len() || tag[i] == b'>' || tag[i] == b'/' {
+                return None;
+            }
+            let name_start = i;
+            while i < tag.len() && !tag[i].is_ascii_whitespace() && tag[i] != b'=' && tag[i] != b'>'
+            {
+                i += 1;
+            }
+            let name = &tag[name_start..i];
+            while i < tag.len() && tag[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if tag.get(i) != Some(&b'=') {
+                return None;
+            }
+            i += 1;
+            while i < tag.len() && tag[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            let quote = *tag.get(i)?;
+            if quote != b'"' && quote != b'\'' {
+                return None;
+            }
+            i += 1;
+            let close = tag[i..].iter().position(|&b| b == quote)? + i;
+            if name == b"message-id" {
+                // The id itself is ASCII in practice, but decode defensively
+                // rather than assuming.
+                return std::str::from_utf8(&tag[i..close]).ok().map(str::to_string);
+            }
+            i = close + 1;
         }
-        j += 1;
-        while j < tag.len() && tag[j].is_ascii_whitespace() {
-            j += 1;
-        }
-        let quote = *tag.get(j)?;
-        if quote != b'"' && quote != b'\'' {
-            return None;
-        }
-        j += 1;
-        let close = tag[j..].iter().position(|&b| b == quote)? + j;
-        // The id itself is ASCII in practice, but decode defensively rather
-        // than assuming.
-        std::str::from_utf8(&tag[j..close]).ok().map(str::to_string)
     }
 
     /// Fetch configuration using an XPath filter (RFC 6241 §6.4).
@@ -3767,6 +3854,137 @@ mod tests {
             .await
             .expect("a large reply must stream under a small ceiling");
         assert!(n > 256 * 1024, "expected the whole payload, got {n}");
+    }
+
+    fn mock_device_hello_11() -> Vec<u8> {
+        let hello = r#"<?xml version="1.0" encoding="UTF-8"?>
+<hello xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <capabilities>
+    <capability>urn:ietf:params:netconf:base:1.0</capability>
+    <capability>urn:ietf:params:netconf:base:1.1</capability>
+  </capabilities>
+  <session-id>1</session-id>
+</hello>"#;
+        let mut buf = hello.as_bytes().to_vec();
+        buf.extend_from_slice(b"]]>]]>");
+        buf
+    }
+
+    /// One chunk for the whole message — exactly what this crate's own encoder
+    /// emits, and the shape that must still stream.
+    fn single_chunk_reply(id: &str, payload: &str) -> Vec<u8> {
+        let msg = format!(
+            "<rpc-reply message-id=\"{id}\" xmlns=\"urn:ietf:params:xml:ns:netconf:base:1.0\"><data>{payload}</data></rpc-reply>"
+        );
+        let mut buf = format!("\n#{}\n", msg.len()).into_bytes();
+        buf.extend_from_slice(msg.as_bytes());
+        buf.extend_from_slice(b"\n##\n");
+        buf
+    }
+
+    #[tokio::test]
+    async fn streaming_survives_a_large_reply_over_chunked_framing() {
+        // The 1.1 half of the ceiling test above, and the one that actually
+        // matters: NETCONF 1.1 peers — including this crate — send one chunk
+        // per message, so a decoder that only emits whole chunks buffers the
+        // entire reply and trips the ceiling before writing a byte.
+        let big = "x".repeat(256 * 1024);
+        let mut data = mock_device_hello_11();
+        data.extend_from_slice(&single_chunk_reply("1", &big));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+        assert_eq!(session.version(), Some(NetconfVersion::V1_1));
+        session.set_max_read_buffer(64 * 1024);
+
+        let mut out: Vec<u8> = Vec::new();
+        let n = session
+            .get_config_streaming(Datastore::Running, None, &mut out)
+            .await
+            .expect("a large single chunk must stream under a small ceiling");
+        assert!(n > 256 * 1024, "expected the whole payload, got {n}");
+        let text = String::from_utf8(out).expect("utf-8");
+        assert!(text.starts_with("<rpc-reply"), "envelope must be preserved");
+        assert!(
+            text.ends_with("</rpc-reply>"),
+            "got tail {:?}",
+            &text[text.len() - 32..]
+        );
+    }
+
+    #[tokio::test]
+    async fn streaming_ignores_a_qualified_message_id_attribute() {
+        // A stale reply carrying `evil:message-id="1"` ahead of its real
+        // `message-id="99"`. A substring search finds the decoy first and
+        // streams the wrong document while ours stays queued.
+        let mut data = mock_device_hello();
+        data.extend_from_slice(
+            b"<rpc-reply xmlns:evil=\"urn:x\" evil:message-id=\"1\" message-id=\"99\" \
+              xmlns=\"urn:ietf:params:xml:ns:netconf:base:1.0\"><data><stale/></data></rpc-reply>",
+        );
+        data.extend_from_slice(b"]]>]]>");
+        data.extend_from_slice(&mock_data_reply("1", "<real/>"));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let mut out: Vec<u8> = Vec::new();
+        session
+            .get_config_streaming(Datastore::Running, None, &mut out)
+            .await
+            .expect("streaming get-config");
+        let text = String::from_utf8(out).expect("utf-8");
+        assert!(text.contains("<real/>"), "got {text}");
+        assert!(!text.contains("stale"), "streamed the decoy reply: {text}");
+    }
+
+    #[tokio::test]
+    async fn streaming_is_not_fooled_by_a_message_id_in_a_comment() {
+        // `<!-- > ... -->` contains a `>`, so skipping the prolog to the next
+        // `>` leaves the scan inside the comment and reads the decoy id.
+        let mut data = mock_device_hello();
+        data.extend_from_slice(
+            b"<!-- > <rpc-reply message-id=\"1\"> --><rpc-reply message-id=\"99\" \
+              xmlns=\"urn:ietf:params:xml:ns:netconf:base:1.0\"><data><stale/></data></rpc-reply>",
+        );
+        data.extend_from_slice(b"]]>]]>");
+        data.extend_from_slice(&mock_data_reply("1", "<real/>"));
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let mut out: Vec<u8> = Vec::new();
+        session
+            .get_config_streaming(Datastore::Running, None, &mut out)
+            .await
+            .expect("streaming get-config");
+        let text = String::from_utf8(out).expect("utf-8");
+        assert!(text.contains("<real/>"), "got {text}");
+        assert!(!text.contains("stale"), "streamed the decoy reply: {text}");
+    }
+
+    #[tokio::test]
+    async fn streaming_stops_draining_stale_frames_eventually() {
+        // No `rpc_timeout` here on purpose: without a drain bound, a peer that
+        // keeps answering some other message-id holds the call open forever.
+        let mut data = mock_device_hello();
+        for stale_id in 50..=50 + MAX_STALE_DRAIN {
+            data.extend_from_slice(&mock_data_reply(&stale_id.to_string(), "<stale/>"));
+        }
+        let transport = MockTransport::new(data);
+        let mut session = Session::new(Box::new(transport));
+        session.establish().await.expect("establish failed");
+
+        let mut out: Vec<u8> = Vec::new();
+        let err = session
+            .get_config_streaming(Datastore::Running, None, &mut out)
+            .await
+            .expect_err("must give up rather than drain forever");
+        let err_str = format!("{err:?}");
+        assert!(
+            err_str.contains("MessageIdMismatch"),
+            "expected MessageIdMismatch, got: {err_str}"
+        );
     }
 
     #[tokio::test]
