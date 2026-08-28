@@ -22,6 +22,11 @@ categories = ["network-programming"]
 [features]
 default = []
 tls = ["rustls", "tokio-rustls", "webpki-roots"]
+# Validate outbound XML fragments by attempting a *conforming* parse, instead of
+# by the hand-written rule list in `validate_xml_fragment`. Off by default: it
+# costs one small pure-Rust dependency, and #77 is actively trying to shrink the
+# graph, so this is the caller's trade to make rather than ours.
+strict-validation = ["roxmltree"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -36,6 +41,7 @@ zeroize = { version = "1", features = ["derive"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
 tokio-rustls = { version = "0.26", optional = true }
 webpki-roots = { version = "0.26", optional = true }
+roxmltree = { version = "0.20", optional = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

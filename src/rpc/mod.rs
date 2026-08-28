@@ -298,6 +298,74 @@ pub fn validate_xml_fragment(xml: &str) -> Result<(), ProtocolError> {
     Ok(())
 }
 
+/// Validate by attempting a *conforming* parse of the embedded document.
+///
+/// Enabled by the `strict-validation` feature. Where [`validate_xml_fragment`]
+/// enforces a hand-written list of rules on top of quick-xml — which is a
+/// permissive pull parser, not a validating one — this asks a conforming parser
+/// whether the fragment actually embeds into a well-formed document. The
+/// property then holds by construction rather than by enumeration.
+///
+/// That distinction is not theoretical. Fuzzing the rule list against exactly
+/// this oracle found fourteen escapes (#80), and further rounds kept finding
+/// more after the list was believed complete: attribute values are not
+/// entity-checked, duplicate *expanded* attribute names pass, `<xmlns:a/>` is
+/// accepted. Each was individually fixable; the process did not converge.
+///
+/// Off by default because it costs a dependency, and #77 is actively shrinking
+/// the graph. See #89.
+///
+/// # Namespace binding
+///
+/// Deliberately not enforced. Whether a prefix resolves depends on declarations
+/// the *envelope* supplies, which this layer cannot see — a fragment using
+/// `nc:` is legitimate precisely because the caller's envelope declares it.
+/// Prefixes are bound synthetically before parsing so that structural checking
+/// is complete without demanding fragments be self-contained.
+#[cfg(feature = "strict-validation")]
+pub fn validate_xml_fragment_strict(xml: &str) -> Result<(), ProtocolError> {
+    // The cheap structural rules run first: they give specific errors
+    // ("not balanced", "undefined entity") where a conforming parser only
+    // reports that the document is malformed.
+    validate_xml_fragment(xml)?;
+
+    if xml.is_empty() {
+        return Ok(());
+    }
+
+    // The fragment is embedded verbatim. Nothing is rewritten and no bindings
+    // are synthesised, which is a deliberate reversal of an earlier design.
+    //
+    // That version renamed the reserved `xml` prefix and bound every prefix it
+    // found to a generated URI, so that structural checking continued past an
+    // unresolved prefix. All of it was string surgery on the fragment, and
+    // string surgery is defeatable by encoding: a URI spelling `xml:` literally
+    // while another spells it `&#x78;ml:` had only one side rewritten, which
+    // turned a genuine duplicate-expanded-name error into a pass. Chasing that
+    // means decoding entities and tracking QName positions — reimplementing the
+    // parser this function exists to delegate to.
+    //
+    // The cost is that a fragment relying on a prefix the *envelope* declares
+    // stops being checked at that point, because roxmltree reports only the
+    // first error. That is the safe direction for a validator: incomplete
+    // checking never rejects valid configuration, whereas a rewriting bug does.
+    // The rule list in `validate_xml_fragment` still applies to the whole
+    // fragment regardless.
+    let doc =
+        format!("<_nc:rpc xmlns:_nc=\"urn:ietf:params:xml:ns:netconf:base:1.0\">{xml}</_nc:rpc>");
+    match roxmltree::Document::parse(&doc) {
+        Ok(_) => Ok(()),
+        // Binding is out of scope: whether a prefix resolves depends on
+        // declarations the envelope supplies, which this layer cannot see. A
+        // fragment using `nc:` is legitimate precisely because the caller's
+        // envelope declares it.
+        Err(roxmltree::Error::UnknownNamespace(..)) => Ok(()),
+        Err(e) => Err(ProtocolError::Xml(format!(
+            "XML fragment does not embed into a well-formed document: {e}"
+        ))),
+    }
+}
+
 /// XML 1.0 (5th ed.) `NameStartChar`.
 ///
 /// The literal production. Approximating it does not work: a conservative
@@ -402,6 +470,18 @@ fn validate_attributes(tag: &quick_xml::events::BytesStart<'_>) -> Result<(), Pr
             ProtocolError::Xml(format!("XML fragment has an invalid attribute: {e}"))
         })?;
         validate_name(attribute.key.as_ref())?;
+        // Namespaces in XML 1.0 §5: a *prefixed* declaration may not be
+        // undeclared. `xmlns=""` is legal (it resets the default namespace);
+        // `xmlns:p=""` is not. roxmltree 0.20 accepts it, so the strict
+        // validator cannot catch it either — but the attribute iteration
+        // needed to see it already happens here.
+        if attribute.key.as_ref().starts_with(b"xmlns:") && attribute.value.is_empty() {
+            return Err(ProtocolError::Xml(
+                "XML fragment undeclares a prefixed namespace; only the default \
+                 namespace may be set to an empty URI"
+                    .to_string(),
+            ));
+        }
         let value = std::str::from_utf8(attribute.value.as_ref()).map_err(|_| {
             ProtocolError::Xml("XML fragment has a non-UTF-8 attribute value".to_string())
         })?;
@@ -649,6 +729,76 @@ mod fragment_validation_tests {
         assert!(validate_xml_fragment("<!--x--->").is_err()); // content `x-`
                                                               // Ordinary comments still pass.
         validate_xml_fragment("<!-- a comment --><a/>").unwrap();
+    }
+
+    #[cfg(feature = "strict-validation")]
+    #[test]
+    fn strict_catches_what_the_rule_list_documents_as_residual() {
+        use super::{validate_xml_fragment, validate_xml_fragment_strict};
+
+        // Every one of these is in fuzz/README.md's residual table: the rule
+        // list accepts them, a conforming parser does not. This is the whole
+        // argument of #89, as an assertion.
+        for frag in [
+            r#"<a b="&cmp;"/>"#, // undefined entity in an attribute
+            r#"<a b="&#4;"/>"#,  // out-of-range char ref in an attribute
+            r#"<a xmlns:p="urn:x" xmlns:q="urn:x" p:x="1" q:x="2"/>"#, // duplicate expanded names
+        ] {
+            assert!(
+                validate_xml_fragment(frag).is_ok(),
+                "rule list is expected to accept {frag:?} — if this fails the residual shrank"
+            );
+            assert!(
+                validate_xml_fragment_strict(frag).is_err(),
+                "strict validation must reject {frag:?}"
+            );
+        }
+    }
+
+    #[cfg(feature = "strict-validation")]
+    #[test]
+    fn strict_still_accepts_ordinary_netconf_fragments() {
+        use super::validate_xml_fragment_strict;
+        for frag in [
+            "<system><host-name>r1</host-name></system>",
+            "<interfaces/><routing/>",
+            "<a><![CDATA[x]]></a>",
+            "<a>&amp;&lt;</a>",
+            "",
+            // A prefix the *envelope* would declare: binding is out of scope.
+            r#"<if:interfaces xmlns:if="urn:x"/>"#,
+            "<nc:get-config/>",
+            // Colons inside a URI must not be mistaken for prefix separators.
+            // Scanning with `Name` rules instead of `NCName` synthesised a bogus
+            // `xmlns:urn:ietf=` and rejected this — the most ordinary fragment
+            // in NETCONF.
+            r#"<filter xmlns="urn:ietf:params:xml:ns:netconf:base:1.0"/>"#,
+            // The reserved `xml` prefix, which roxmltree rejects even when
+            // correctly declared, so it is renamed for the checked copy.
+            r#"<a xml:lang="en"/>"#,
+            r#"<a xml:space="preserve"/>"#,
+            // PITarget is a Name: colons are legal anywhere in it.
+            "<?a:b:c?>",
+            // A fragment declaring what the synthetic URI stem would have been.
+            // A fixed stem would bind an unrelated prefix to the same URI and
+            // invent a duplicate expanded name.
+            r#"<a xmlns:q="urn:rustnetconf:validate:0" p:x="1" q:x="2"/>"#,
+            // `xmlns=""` resets the default namespace and is legal.
+            r#"<a xmlns=""/>"#,
+        ] {
+            validate_xml_fragment_strict(frag).unwrap_or_else(|e| {
+                panic!("strict validation rejected a valid fragment {frag:?}: {e}")
+            });
+        }
+    }
+
+    #[test]
+    fn rejects_undeclaring_a_prefixed_namespace() {
+        // Namespaces in XML §5 forbids it, and roxmltree 0.20 accepts it — so
+        // this has to be caught here or not at all.
+        assert!(validate_xml_fragment(r#"<a xmlns:p="" p:x="1"/>"#).is_err());
+        // The default namespace may be reset to empty.
+        validate_xml_fragment(r#"<a xmlns=""/>"#).unwrap();
     }
 
     #[test]
