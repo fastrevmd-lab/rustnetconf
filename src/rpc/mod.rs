@@ -107,16 +107,16 @@ pub fn validate_xml_fragment(xml: &str) -> Result<(), ProtocolError> {
                 break;
             }
             Ok(Event::Start(ref e)) => {
-                validate_name(e.name().as_ref())?;
+                validate_element_name(e.name().as_ref())?;
                 validate_attributes(e)?;
                 depth += 1;
             }
             Ok(Event::Empty(ref e)) => {
-                validate_name(e.name().as_ref())?;
+                validate_element_name(e.name().as_ref())?;
                 validate_attributes(e)?;
             }
             Ok(Event::End(ref e)) => {
-                validate_name(e.name().as_ref())?;
+                validate_element_name(e.name().as_ref())?;
                 depth -= 1;
                 // Reaching zero before EOF means the fragment closed the
                 // synthetic root itself. `</_>x<_>` is balanced overall, so a
@@ -504,6 +504,7 @@ fn validate_attributes(tag: &quick_xml::events::BytesStart<'_>) -> Result<(), Pr
                     .to_string(),
             ));
         }
+        validate_attribute_references(value)?;
     }
     Ok(())
 }
@@ -515,6 +516,81 @@ fn validate_attributes(tag: &quick_xml::events::BytesStart<'_>) -> Result<(), Pr
 /// device to choke on. Found by the `fragment_embeds_cleanly` fuzz target, twice:
 /// first with control characters, then with a legal character in an illegal
 /// position, which is what prompted encoding the real production.
+/// Every `&` in an attribute value must open a `Reference`.
+///
+/// XML 1.0 §2.3 gives `AttValue ::= '"' ([^<&"] | Reference)* '"'`, so a bare
+/// `&` is as illegal there as a bare `<` — but quick-xml passes `<i n='&'/>`
+/// through even with `with_checks(true)`. Found by the `fragment_embeds_cleanly`
+/// fuzz target.
+///
+/// Resolution goes through the same helper the `GeneralRef` text path uses, so
+/// attribute values and character data cannot disagree about which entities
+/// exist — including the `escape-html` feature-unification hazard that helper
+/// already guards against.
+fn validate_attribute_references(value: &str) -> Result<(), ProtocolError> {
+    let mut rest = value;
+    while let Some(amp) = rest.find('&') {
+        let after = &rest[amp + 1..];
+        let Some(semi) = after.find(';') else {
+            return Err(ProtocolError::Xml(
+                "XML fragment has an attribute value containing a bare `&`; write \
+                 `&amp;`, or complete the reference"
+                    .to_string(),
+            ));
+        };
+        let name = &after[..semi];
+        match crate::xml_entity::resolve_entity_ref(&quick_xml::events::BytesRef::new(name)) {
+            Some(resolved)
+                if resolved
+                    .chars()
+                    .all(crate::rpc::reply::lexical::is_valid_xml_char) => {}
+            Some(_) => {
+                return Err(ProtocolError::Xml(
+                    "XML fragment has an attribute value with a character reference \
+                     outside the range XML 1.0 permits"
+                        .to_string(),
+                ));
+            }
+            None => {
+                let preview: String = name.chars().take(32).collect();
+                return Err(ProtocolError::Xml(format!(
+                    "XML fragment has an attribute value referencing an undefined \
+                     entity `&{preview};`; only the five predefined entities and \
+                     numeric character references can be embedded"
+                )));
+            }
+        }
+        rest = &after[semi + 1..];
+    }
+    Ok(())
+}
+
+/// An element name: a `QName` that additionally may not carry the reserved
+/// `xmlns` prefix.
+///
+/// Split out from [`validate_name`] because the rule is asymmetric.
+/// Namespaces in XML §3 reserves `xmlns` for declarations, so `<xmlns:a/>` is
+/// a perfectly well-formed QName that no conforming parser accepts — while
+/// `xmlns:p="…"` on an *attribute* is the declaration syntax itself and must
+/// stay legal. Applying this inside `validate_name` would reject every
+/// namespace declaration in the crate.
+///
+/// Only the prefix is reserved: `<xmlns/>` is a valid element name, and
+/// roxmltree accepts it.
+fn validate_element_name(raw: &[u8]) -> Result<(), ProtocolError> {
+    validate_name(raw)?;
+    let mut parts = raw.split(|byte| *byte == b':');
+    if let (Some(prefix), Some(_)) = (parts.next(), parts.next()) {
+        if prefix == b"xmlns" {
+            return Err(ProtocolError::Xml(
+                "XML fragment has an element using the reserved `xmlns` prefix;                  it may only introduce namespace declarations"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn validate_name(raw: &[u8]) -> Result<(), ProtocolError> {
     let name = std::str::from_utf8(raw)
         .map_err(|_| ProtocolError::Xml("XML fragment has a non-UTF-8 element name".to_string()))?;
@@ -540,6 +616,78 @@ fn validate_name(raw: &[u8]) -> Result<(), ProtocolError> {
 #[cfg(test)]
 mod xml_validate_tests {
     use super::*;
+
+    #[test]
+    fn rejects_a_bare_ampersand_in_an_attribute_value() {
+        // XML 1.0 §2.3. quick-xml passes these through even with checks on.
+        for fragment in [
+            "<i n='&'/>",
+            "<i n=\"a & b\"/>",
+            "<i n='&nosuch;'/>",
+            "<i n='&;'/>",
+            // Unterminated: the `;` never arrives.
+            "<i n='&amp'/>",
+        ] {
+            assert!(
+                validate_xml_fragment(fragment).is_err(),
+                "expected rejection of {fragment:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_well_formed_references_in_attribute_values() {
+        for fragment in [
+            "<i n='a &amp; b'/>",
+            "<i n='&lt;&gt;&quot;&apos;'/>",
+            "<i n='&#38;'/>",
+            "<i n='&#x26;'/>",
+            "<i n='plain'/>",
+        ] {
+            assert!(
+                validate_xml_fragment(fragment).is_ok(),
+                "expected acceptance of {fragment:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_the_reserved_xmlns_prefix_on_an_element() {
+        // Namespaces in XML §3. `<xmlns:a/>` is a well-formed QName, so the
+        // QName check accepts it and a conforming parser does not — found by
+        // the `fragment_embeds_cleanly` fuzz target, which minimised a much
+        // larger input down to exactly this.
+        for fragment in [
+            "<xmlns:snt/>",
+            "<xmlns:a></xmlns:a>",
+            "<a><xmlns:b/></a>",
+            // Declaring the prefix does not rescue it.
+            "<xmlns:a xmlns:xmlns=\"urn:x\"/>",
+        ] {
+            assert!(
+                validate_xml_fragment(fragment).is_err(),
+                "expected rejection of {fragment:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn allows_xmlns_where_it_is_legal() {
+        // Only the *prefix* is reserved. These must keep working, and the
+        // middle two are how every namespaced RPC this crate emits is built.
+        for fragment in [
+            // `xmlns` as a local name is a valid element name.
+            "<xmlns/>",
+            "<a xmlns=\"urn:x\"/>",
+            "<a xmlns:p=\"urn:x\"/>",
+            "<p:a xmlns:p=\"urn:x\"><p:b/></p:a>",
+        ] {
+            assert!(
+                validate_xml_fragment(fragment).is_ok(),
+                "expected acceptance of {fragment:?}"
+            );
+        }
+    }
 
     #[test]
     fn test_valid_xml_fragment() {
@@ -739,11 +887,18 @@ mod fragment_validation_tests {
         // Every one of these is in fuzz/README.md's residual table: the rule
         // list accepts them, a conforming parser does not. This is the whole
         // argument of #89, as an assertion.
-        for frag in [
-            r#"<a b="&cmp;"/>"#, // undefined entity in an attribute
-            r#"<a b="&#4;"/>"#,  // out-of-range char ref in an attribute
+        // Rules 16 and 17 closed the other two classes this list used to hold
+        // (see fuzz/README.md). Duplicate *expanded* attribute names remain:
+        // `with_checks(true)` compares lexical keys, so catching it means
+        // tracking namespace declarations through the fragment.
+        //
+        // A named slice rather than an inline array: this list is expected to
+        // shrink again, and it should read as a set that happens to hold one
+        // member rather than as a one-off assertion.
+        const RESIDUAL: &[&str] = &[
             r#"<a xmlns:p="urn:x" xmlns:q="urn:x" p:x="1" q:x="2"/>"#, // duplicate expanded names
-        ] {
+        ];
+        for frag in RESIDUAL {
             assert!(
                 validate_xml_fragment(frag).is_ok(),
                 "rule list is expected to accept {frag:?} — if this fails the residual shrank"
