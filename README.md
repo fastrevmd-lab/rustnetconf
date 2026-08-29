@@ -24,9 +24,9 @@ Async NETCONF client library, YANG code generation, vendor profiles, connection 
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.16.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.16.0)** (four new RFCs, streaming reads, XML hardening; one source break — a new `ProtocolError` variant).
-> On crates.io: `rustnetconf` 0.16.0 · `rustnetconf-cli` 0.3.7 · `rustnetconf-yang` 0.2.0.
-> See [What's New in v0.16.0](#whats-new-in-v0160) below.
+> **Latest release — [v0.16.1](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.16.1)** (two XML validator escapes closed, and an entity-resolution bug in `netconf diff`; no API change).
+> On crates.io: `rustnetconf` 0.16.1 · `rustnetconf-cli` 0.3.8 · `rustnetconf-yang` 0.2.0.
+> See [What's New in v0.16.1](#whats-new-in-v0161) below.
 
 ## Workspace
 
@@ -47,6 +47,26 @@ SSH is present as a *transport for NETCONF*, not as a general-purpose capability
 - Remote shell or command execution
 
 Consumers that need those should use a dedicated SSH crate alongside this one. A native SCP1 client was briefly added and then reverted before it was ever released (#52, reverted by #53) for exactly this reason; issues #47 and #51 were closed as not planned on the same grounds. The round trip is visible in `git log` between v0.13.2 and the next release — it was a deliberate reversal, not an accident.
+
+## What's New in v0.16.1
+
+Patch release, no API change. Two escapes from the outbound XML validator and one entity-resolution bug in the CLI (#96).
+
+`rustnetconf-yang` does **not** bump. It has no source change, and its `rustnetconf = "0.16"` requirement already resolves to 0.16.1 — publishing it would ship a version whose only content is a version number. The 0.15 and 0.16 releases moved all three crates because the requirement itself changed incompatibly; a patch does not do that.
+
+- **The `netconf diff` entity bug** — this is the one that reached users. `rustnetconf-cli`'s copy of `resolve_entity_ref` still called quick-xml's `resolve_predefined_entity`. Under Cargo feature unification, any crate in the graph enabling quick-xml's `escape-html` turns that into a resolver for the full HTML5 entity set, so `netconf diff` could resolve entities the device never sent. The library crate's copy was fixed for exactly this; the duplicate in the CLI was missed. Anyone on `rustnetconf-cli` 0.3.7 should upgrade.
+
+  The CLI's requirement on the library is raised from `0.16` to `0.16.1` at the same time. `rustnetconf-cli` calls `validate_xml_fragment` directly, and `^0.16` permits 0.16.0 — which is what a `cargo install --locked` would have selected from the packaged lockfile, shipping the new CLI against the pre-fix validator.
+
+- **Reserved `xmlns` prefix on an element** (rule 16). `<xmlns:a/>` is two valid NCNames, so the QName check accepted it and no conforming parser does (Namespaces in XML §3). It cannot live in `validate_name` because the rule is asymmetric — `xmlns:p="…"` on an *attribute* is the declaration syntax. Only the prefix is reserved; `<xmlns/>` stays legal.
+
+- **References in attribute values** (rule 17). XML 1.0 §2.3 gives `AttValue ::= '"' ([^<&"] | Reference)* '"'`, so a bare `&` is as illegal as a bare `<`, which was already checked. quick-xml keeps attribute values raw and emits no `GeneralRef` event, so `<i n='&'/>`, `&cmp;` and `&#4;` all passed. Resolution now routes through the same helper as the text path, so attribute values and character data cannot disagree about which entities exist.
+
+Both validator rules were already written down in `fuzz/README.md` as known escapes of the rule list, tracked under #89. One class remains — duplicate *expanded* attribute names — and the README's warning that the rule list is not a conformance check still stands. For a conforming parse, use the opt-in `strict-validation` feature.
+
+### Live-device tests fail loudly now
+
+`tests/integration_vsrx.rs` early-returns when `RUSTNETCONF_TEST_VSRX_HOST` is unset, and libtest has no "skipped" outcome for a test that returns normally — so a run that never contacted a device printed the same `23 passed` as one that did. Set `RUSTNETCONF_TEST_VSRX_REQUIRED=1` when a run is meant to be device coverage: every skip becomes a failure that names its reason, so a misspelled variable or an unreadable key file fails the run instead of passing it. A `~/` in `RUSTNETCONF_TEST_VSRX_KEY` is also expanded now — Rust does not do it, and neither does every shell in that position, and the resulting failure looked like an authentication fault.
 
 ## What's New in v0.16.0
 
