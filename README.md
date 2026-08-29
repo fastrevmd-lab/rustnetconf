@@ -24,9 +24,9 @@ Async NETCONF client library, YANG code generation, vendor profiles, connection 
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.16.1](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.16.1)** (two XML validator escapes closed, and an entity-resolution bug in `netconf diff`; no API change).
-> On crates.io: `rustnetconf` 0.16.1 · `rustnetconf-cli` 0.3.8 · `rustnetconf-yang` 0.2.0.
-> See [What's New in v0.16.1](#whats-new-in-v0161) below.
+> **Latest release — [v0.16.2](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.16.2)** (quick-xml 0.42; no API change to `rustnetconf`, but a breaking one to `rustnetconf-yang`, which re-exports quick-xml's `Writer`).
+> On crates.io: `rustnetconf` 0.16.2 · `rustnetconf-cli` 0.3.9 · `rustnetconf-yang` 0.3.0.
+> See [What's New in v0.16.2](#whats-new-in-v0162) below.
 
 ## Workspace
 
@@ -47,6 +47,44 @@ SSH is present as a *transport for NETCONF*, not as a general-purpose capability
 - Remote shell or command execution
 
 Consumers that need those should use a dedicated SSH crate alongside this one. A native SCP1 client was briefly added and then reverted before it was ever released (#52, reverted by #53) for exactly this reason; issues #47 and #51 were closed as not planned on the same grounds. The round trip is visible in `git log` between v0.13.2 and the next release — it was a deliberate reversal, not an accident.
+
+## What's New in v0.16.2
+
+The quick-xml 0.42 migration (#70). 0.42 decodes at the reader, so events hand back `str` rather than `[u8]`, which removes most of the decode / `from_utf8_lossy` layer this crate carried. The change is mostly deletion: 239 insertions against 277 deletions.
+
+**`rustnetconf` 0.16.2 is a patch — quick-xml is fully internal there.** No public signature, error variant, or trait exposes it, verified by reading every public item.
+
+**`rustnetconf-yang` 0.3.0 is a breaking change, and this is the one to read.** Unlike the library crate, yang puts quick-xml in its *public* API:
+
+```rust
+pub use quick_xml::Writer;
+
+pub trait WriteXmlFields {
+    fn write_xml_fields(&self, writer: &mut Writer<Cursor<Vec<u8>>>) -> Result<(), XmlError>;
+}
+```
+
+`new_writer`, `finish_writer`, `write_text_element`, `write_start_with_ns`, `write_end` and `write_element_with_fields` all take or return that type. A `Writer` from quick-xml 0.41 and one from 0.42 are distinct types from distinct crate versions, so any code that implements `WriteXmlFields` by hand, or that holds a `Writer` it obtained elsewhere, needs to move to 0.42 at the same time. Code that only uses generated types and calls `to_xml()` is unaffected.
+
+`rustnetconf-cli` 0.3.9 is a patch: its `diff/tree.rs` moved to the 0.42 event API, and its entity resolution still uses `resolve_xml_entity` — the `escape-html` feature-unification hazard fixed in 0.16.1 is unchanged by the version bump.
+
+Both `rustnetconf-cli` and `rustnetconf-yang` now require `rustnetconf = "0.16.2"` rather than a looser range. quick-xml 0.41 and 0.42 are semver-incompatible, so a graph that paired the new CLI or yang with `rustnetconf` 0.16.1 would build **both** copies of quick-xml.
+
+### What the migration decided, where a choice existed
+
+- **Kept as byte scans** — the attribute-separator check and the PI-target split. Both use `is_ascii_whitespace`, never `char::is_whitespace`, which is Unicode-aware and would split on characters XML does not treat as whitespace.
+- **Moved to `str`** — splitting on `:` in `expanded_name`/`resolve_ns`, where no char boundary can fall inside a single-byte codepoint, and the whitespace-outside-root test, written as the four XML whitespace characters explicitly.
+- **`OpenElement` moved `Vec<u8>` → `String`** — the last byte holdout. Its helpers had already moved, so every comparison was crossing a boundary for nothing.
+- **Five UTF-8 branches deleted, not retyped** — the reader guarantees UTF-8 now, and three of the five silently skipped or discarded input on failure.
+
+### Verification
+
+A parser that compiles, passes, and then mis-parses is the failure mode this change is exposed to, so the unit suite alone was not the argument.
+
+- 654 tests, clippy and fmt clean, `cargo build --locked` in `fuzz/`
+- `reply_parser_is_total` — 6.06M fuzz executions on the migrated parser, no crashes
+- `fragment_embeds_cleanly` — 8.1M on the pre-migration parser, 5.5M on the migrated one
+- **Live vSRX (Junos 24.4R1.9), against a baseline**: 23 + 9 tests passed on both, under `RUSTNETCONF_TEST_VSRX_REQUIRED=1` so a run that never reached the device would have failed rather than reported a pass it did not earn
 
 ## What's New in v0.16.1
 
