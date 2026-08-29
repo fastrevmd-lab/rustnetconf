@@ -55,7 +55,13 @@ fn resolve_entity_ref(entity: &quick_xml::events::BytesRef<'_>) -> Option<String
         return Some(ch.to_string());
     }
     let name = entity.decode().ok()?;
-    quick_xml::escape::resolve_predefined_entity(&name).map(|s| s.to_string())
+    // `resolve_xml_entity`, not `resolve_predefined_entity` — the same hazard
+    // the library crate's copy of this helper documents, missed here when that
+    // one was fixed. `resolve_predefined_entity` is dispatched on quick-xml's
+    // `escape-html` feature, and Cargo unifies features across the whole
+    // graph, so any unrelated dependency enabling it would make `netconf diff`
+    // resolve HTML5 entities the device never sent.
+    quick_xml::escape::resolve_xml_entity(&name).map(|s| s.to_string())
 }
 
 /// Parse an XML string into a simplified tree.

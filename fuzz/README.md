@@ -64,19 +64,15 @@ clean run means "no new class within that budget", not "the validator conforms".
 Known cases, all reachable in minutes:
 
 ```
-<i n = '... & ...' />                 # attribute values are not entity-checked:
-<a b="&cmp;"/>  <a b="&#4;"/>         # a bare `&`, an undefined entity, and an
-                                      # out-of-range character reference all pass,
-                                      # because quick-xml keeps them raw in the
-                                      # attribute and emits no GeneralRef event
-
 <a xmlns:p="urn:x" xmlns:q="urn:x"    # duplicate *expanded* attribute names.
    p:x="1" q:x="2"/>                  # `with_checks(true)` compares lexical keys
                                       # only, so tracking declarations is needed
-
-<xmlns:a/>                            # `xmlns` is forbidden as an element prefix;
-                                      # the QName check sees two valid NCNames
 ```
+
+Two classes previously listed here — unchecked attribute references, and `xmlns`
+as an element prefix — are now rules 16 and 17 below. They were closed after the
+fuzzer surfaced them again during the quick-xml 0.42 migration. That is the third
+time this table has shrunk by enumeration and not reached zero.
 
 This is structural, not a backlog item. `validate_xml_fragment` is a
 hand-written conformance layer over quick-xml, which is *deliberately*
@@ -100,6 +96,8 @@ below had to be added by hand after the fuzzer pointed at it:
 | 13 | PI target is a `Name` | `<?<a?>`. Colons **are** legal here — two revisions wrongly rejected `<?a:b?>` and then `<?a:b:c?>` by reusing the element-name (QName) check |
 | 14 | `Char` in PI bodies | control characters |
 | 15 | no literal `<` in attribute values | `<a b="x<y"/>` |
+| 16 | reserved `xmlns` prefix on elements | `<xmlns:a/>` — a well-formed QName of two valid NCNames, which no conforming parser accepts. Attributes are the opposite case: `xmlns:p="…"` **is** the declaration syntax, so the rule cannot live in the shared name check |
+| 17 | references in attribute values | `<i n='&'/>`, `<a b="&cmp;"/>`, `<a b="&#4;"/>` — quick-xml keeps attribute values raw and emits no `GeneralRef` event, so a bare `&`, an undefined entity and an out-of-range char ref all passed. Resolution now goes through the same helper the text path uses, so the two cannot disagree |
 
 Enumerating rules terminates only when the list is complete, and nothing here
 proves it is. #10 and #13 were found *after* the first twelve were fixed and the
