@@ -33,7 +33,7 @@ tokio = { version = "1", features = ["full"] }
 russh = { version = "0.62", default-features = false, features = ["flate2", "aws-lc-rs"] }
 aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
 base64ct = { version = "1", features = ["std"] }
-quick-xml = "0.41"
+quick-xml = "0.42"
 thiserror = "2"
 tracing = "0.1"
 async-trait = "0.1"

@@ -59,26 +59,26 @@ enum ErrorField {
 }
 
 impl ErrorField {
-    fn from_name(name: &[u8]) -> Option<Self> {
+    fn from_name(name: &str) -> Option<Self> {
         match name {
-            b"error-type" => Some(Self::Type),
-            b"error-tag" => Some(Self::Tag),
-            b"error-severity" => Some(Self::Severity),
-            b"error-app-tag" => Some(Self::AppTag),
-            b"error-path" => Some(Self::Path),
-            b"error-message" => Some(Self::Message),
+            "error-type" => Some(Self::Type),
+            "error-tag" => Some(Self::Tag),
+            "error-severity" => Some(Self::Severity),
+            "error-app-tag" => Some(Self::AppTag),
+            "error-path" => Some(Self::Path),
+            "error-message" => Some(Self::Message),
             _ => None,
         }
     }
 
-    fn xml_name(self) -> &'static [u8] {
+    fn xml_name(self) -> &'static str {
         match self {
-            Self::Type => b"error-type",
-            Self::Tag => b"error-tag",
-            Self::Severity => b"error-severity",
-            Self::AppTag => b"error-app-tag",
-            Self::Path => b"error-path",
-            Self::Message => b"error-message",
+            Self::Type => "error-type",
+            Self::Tag => "error-tag",
+            Self::Severity => "error-severity",
+            Self::AppTag => "error-app-tag",
+            Self::Path => "error-path",
+            Self::Message => "error-message",
         }
     }
 }
@@ -192,20 +192,20 @@ impl ReplyParser<'_> {
         }
         if self.current_error.is_none()
             && self.in_open_direct_payload()
-            && protocol_name == Some(b"rpc-reply")
+            && protocol_name == Some("rpc-reply")
         {
             return Err(parse_error("nested <rpc-reply> is not allowed"));
         }
         if self.current_error.is_none()
             && self.in_open_direct_payload()
-            && protocol_name == Some(b"rpc-error")
+            && protocol_name == Some("rpc-error")
         {
             self.current_error = Some(ErrorState::default());
             return Ok(());
         }
         if self.current_error.is_none()
             && self.in_open_direct_payload()
-            && protocol_name == Some(b"ok")
+            && protocol_name == Some("ok")
         {
             return Err(parse_error("<ok> must be an empty element"));
         }
@@ -217,16 +217,16 @@ impl ReplyParser<'_> {
         }
 
         match (self.envelope, protocol_name) {
-            (EnvelopeState::Before, Some(b"rpc-reply")) => self.open_reply(tag),
-            (EnvelopeState::Inside, Some(b"rpc-reply")) => {
+            (EnvelopeState::Before, Some("rpc-reply")) => self.open_reply(tag),
+            (EnvelopeState::Inside, Some("rpc-reply")) => {
                 Err(parse_error("nested <rpc-reply> is not allowed"))
             }
-            (EnvelopeState::Inside, Some(b"data")) => self.open_data(),
-            (EnvelopeState::Inside, Some(b"rpc-error")) => {
+            (EnvelopeState::Inside, Some("data")) => self.open_data(),
+            (EnvelopeState::Inside, Some("rpc-error")) => {
                 self.current_error = Some(ErrorState::default());
                 Ok(())
             }
-            (EnvelopeState::Inside, Some(b"ok")) => {
+            (EnvelopeState::Inside, Some("ok")) => {
                 Err(parse_error("<ok> must be an empty element"))
             }
             (EnvelopeState::Inside, _) => self.open_direct(tag),
@@ -256,20 +256,20 @@ impl ReplyParser<'_> {
         }
         if self.current_error.is_none()
             && self.in_open_direct_payload()
-            && protocol_name == Some(b"rpc-reply")
+            && protocol_name == Some("rpc-reply")
         {
             return Err(parse_error("nested <rpc-reply> is not allowed"));
         }
         if self.current_error.is_none()
             && self.in_open_direct_payload()
-            && protocol_name == Some(b"ok")
+            && protocol_name == Some("ok")
         {
             self.protocol_ok = true;
             return Ok(());
         }
         if self.current_error.is_none()
             && self.in_open_direct_payload()
-            && protocol_name == Some(b"rpc-error")
+            && protocol_name == Some("rpc-error")
         {
             return RpcErrorBuilder::default().finish().map(|_| ());
         }
@@ -281,14 +281,14 @@ impl ReplyParser<'_> {
         }
 
         match (self.envelope, protocol_name) {
-            (EnvelopeState::Before, Some(b"rpc-reply")) => {
+            (EnvelopeState::Before, Some("rpc-reply")) => {
                 self.open_reply(tag)?;
                 self.envelope = EnvelopeState::After;
                 Ok(())
             }
-            (EnvelopeState::Inside, Some(b"ok")) => self.set_ok(),
-            (EnvelopeState::Inside, Some(b"data")) => self.set_empty_data(),
-            (EnvelopeState::Inside, Some(b"rpc-error" | b"rpc-reply")) => {
+            (EnvelopeState::Inside, Some("ok")) => self.set_ok(),
+            (EnvelopeState::Inside, Some("data")) => self.set_empty_data(),
+            (EnvelopeState::Inside, Some("rpc-error" | "rpc-reply")) => {
                 Err(parse_error("invalid empty NETCONF reply element"))
             }
             (EnvelopeState::Inside, _) => self.capture_direct_empty(tag),
@@ -299,18 +299,14 @@ impl ReplyParser<'_> {
 
     fn text(&mut self, text: &BytesText<'_>) -> Result<(), RpcError> {
         if self.ignored_payload.is_some() && self.current_error.is_none() {
-            let decoded = text
-                .xml10_content()
-                .map_err(|error| parse_error(format!("invalid text encoding: {error}")))?;
+            let decoded = text.xml10_content();
             validate_xml_chars(&decoded, "ignored text content")?;
             return Ok(());
         }
         if self.capture_text(text)? {
             return Ok(());
         }
-        let decoded = text
-            .xml10_content()
-            .map_err(|error| parse_error(format!("invalid text encoding: {error}")))?;
+        let decoded = text.xml10_content();
         validate_xml_chars(&decoded, "text content")?;
         if contains_only_xml_space(&decoded) {
             Ok(())
@@ -321,9 +317,7 @@ impl ReplyParser<'_> {
 
     fn cdata(&mut self, cdata: &BytesCData<'_>) -> Result<(), RpcError> {
         if self.ignored_payload.is_some() && self.current_error.is_none() {
-            let decoded = cdata
-                .xml10_content()
-                .map_err(|error| parse_error(format!("invalid CDATA encoding: {error}")))?;
+            let decoded = cdata.xml10_content();
             validate_xml_chars(&decoded, "ignored CDATA content")?;
             return Ok(());
         }
@@ -351,7 +345,7 @@ impl ReplyParser<'_> {
     /// NETCONF namespace or none.
     fn is_commit_results(&self, tag: &BytesStart<'_>) -> bool {
         let qualified_name = tag.name();
-        self.netconf_local_name(qualified_name.as_ref()) == Some(b"commit-results")
+        self.netconf_local_name(qualified_name.as_ref()) == Some("commit-results")
     }
 
     fn in_open_direct_payload(&self) -> bool {
@@ -397,7 +391,7 @@ impl ReplyParser<'_> {
         let qualified_name = tag.name();
         let protocol_name = self
             .netconf_local_name(qualified_name.as_ref())
-            .map(<[u8]>::to_vec);
+            .map(str::to_string);
         if let Some(error) = self.current_error.as_mut() {
             if let Some(capture) = error.info_capture.as_mut() {
                 capture.empty(tag)?;
@@ -439,9 +433,7 @@ impl ReplyParser<'_> {
                 return Ok(true);
             }
             if error.field.is_some() {
-                let decoded = text
-                    .xml10_content()
-                    .map_err(|cause| parse_error(format!("invalid text encoding: {cause}")))?;
+                let decoded = text.xml10_content();
                 validate_xml_chars(&decoded, "rpc-error text field")?;
                 error.field_text.push_str(&decoded);
                 return Ok(true);
@@ -473,9 +465,7 @@ impl ReplyParser<'_> {
                 return Ok(true);
             }
             if error.field.is_some() {
-                let decoded = cdata
-                    .xml10_content()
-                    .map_err(|cause| parse_error(format!("invalid CDATA encoding: {cause}")))?;
+                let decoded = cdata.xml10_content();
                 validate_xml_chars(&decoded, "rpc-error text field")?;
                 error.field_text.push_str(&decoded);
                 return Ok(true);
@@ -602,7 +592,7 @@ impl ReplyParser<'_> {
             .current_error
             .as_mut()
             .expect("error_start requires current_error");
-        if name == Some(b"error-info") {
+        if name == Some("error-info") {
             if error.info_seen {
                 return Err(parse_error("duplicate error-info"));
             }
@@ -630,7 +620,7 @@ impl ReplyParser<'_> {
             .current_error
             .as_mut()
             .expect("error_empty requires current_error");
-        if name == Some(b"error-info") {
+        if name == Some("error-info") {
             if error.info_seen {
                 return Err(parse_error("duplicate error-info"));
             }
@@ -654,7 +644,7 @@ impl ReplyParser<'_> {
         for attribute in tag.attributes().with_checks(true) {
             let attribute = attribute
                 .map_err(|error| parse_error(format!("invalid XML attribute: {error}")))?;
-            if attribute.key.as_ref() == b"message-id" {
+            if attribute.key.as_ref() == "message-id" {
                 if message_id.is_some() {
                     return Err(parse_error("duplicate message-id attribute"));
                 }
@@ -760,7 +750,7 @@ impl ReplyParser<'_> {
                         error.info_depth -= 1;
                         return Ok(());
                     }
-                    if name != Some(b"error-info") {
+                    if name != Some("error-info") {
                         return Err(parse_error("unexpected end inside error-info"));
                     }
                     let info = error
@@ -783,7 +773,7 @@ impl ReplyParser<'_> {
                 }
             }
 
-            if name == Some(b"rpc-error") {
+            if name == Some("rpc-error") {
                 let error = self
                     .current_error
                     .take()
@@ -816,7 +806,7 @@ impl ReplyParser<'_> {
                     *depth -= 1;
                     return Ok(());
                 }
-                if name == Some(b"data") {
+                if name == Some("data") {
                     *closed = true;
                     return Ok(());
                 }
@@ -830,7 +820,7 @@ impl ReplyParser<'_> {
             _ => {}
         }
 
-        if name != Some(b"rpc-reply") {
+        if name != Some("rpc-reply") {
             return Err(parse_error("unexpected end directly inside rpc-reply"));
         }
         if self.envelope != EnvelopeState::Inside {
@@ -906,14 +896,14 @@ impl ReplyParser<'_> {
                 *depth += 1;
                 Ok(())
             }
-            Some(IgnoredPayload::Direct { .. }) if name == Some(b"rpc-reply") => {
+            Some(IgnoredPayload::Direct { .. }) if name == Some("rpc-reply") => {
                 Err(parse_error("nested <rpc-reply> is not allowed"))
             }
-            Some(IgnoredPayload::Direct { .. }) if name == Some(b"rpc-error") => {
+            Some(IgnoredPayload::Direct { .. }) if name == Some("rpc-error") => {
                 self.current_error = Some(ErrorState::default());
                 Ok(())
             }
-            Some(IgnoredPayload::Direct { .. }) if name == Some(b"ok") => {
+            Some(IgnoredPayload::Direct { .. }) if name == Some("ok") => {
                 Err(parse_error("<ok> must be an empty element"))
             }
             Some(IgnoredPayload::Direct { ref mut depth }) => {
@@ -929,13 +919,13 @@ impl ReplyParser<'_> {
         let name = self.netconf_local_name(qualified_name.as_ref());
         match self.ignored_payload {
             Some(IgnoredPayload::Data { .. }) => Ok(()),
-            Some(IgnoredPayload::Direct { .. }) if name == Some(b"rpc-reply") => {
+            Some(IgnoredPayload::Direct { .. }) if name == Some("rpc-reply") => {
                 Err(parse_error("nested <rpc-reply> is not allowed"))
             }
-            Some(IgnoredPayload::Direct { .. }) if name == Some(b"rpc-error") => {
+            Some(IgnoredPayload::Direct { .. }) if name == Some("rpc-error") => {
                 RpcErrorBuilder::default().finish().map(|_| ())
             }
-            Some(IgnoredPayload::Direct { .. }) if name == Some(b"ok") => {
+            Some(IgnoredPayload::Direct { .. }) if name == Some("ok") => {
                 self.protocol_ok = true;
                 Ok(())
             }
@@ -950,29 +940,29 @@ impl ReplyParser<'_> {
         }
     }
 
-    fn netconf_local_name<'a>(&self, qualified_name: &'a [u8]) -> Option<&'a [u8]> {
+    fn netconf_local_name<'a>(&self, qualified_name: &'a str) -> Option<&'a str> {
         let name = self.expanded_element_name(qualified_name).ok()?;
         match name.namespace {
-            None => Some(name.local.as_bytes()),
-            Some(NETCONF_NAMESPACE) => Some(name.local.as_bytes()),
+            None => Some(name.local),
+            Some(NETCONF_NAMESPACE) => Some(name.local),
             _ => None,
         }
     }
 
-    fn validate_element_name(&self, qualified_name: &[u8]) -> Result<(), RpcError> {
+    fn validate_element_name(&self, qualified_name: &str) -> Result<(), RpcError> {
         self.expanded_element_name(qualified_name).map(|_| ())
     }
 
     fn expanded_element_name<'name, 'namespace>(
         &'namespace self,
-        qualified_name: &'name [u8],
+        qualified_name: &'name str,
     ) -> Result<ExpandedName<'name, 'namespace>, RpcError> {
         self.expanded_name(validate_qname(qualified_name)?, true)
     }
 
     fn expanded_attribute_name<'name, 'namespace>(
         &'namespace self,
-        qualified_name: &'name [u8],
+        qualified_name: &'name str,
     ) -> Result<ExpandedName<'name, 'namespace>, RpcError> {
         self.expanded_name(validate_qname(qualified_name)?, false)
     }
@@ -1088,7 +1078,7 @@ impl RpcErrorBuilder {
             ErrorField::Message => self.message.is_some(),
         };
         if duplicate {
-            let name = String::from_utf8_lossy(field.xml_name());
+            let name = field.xml_name();
             return Err(parse_error(format!("duplicate rpc-error {name}")));
         }
 
@@ -1175,7 +1165,7 @@ mod tests {
     use super::*;
     use crate::rpc::validate_xml_fragment;
 
-    fn reparse_attribute(fragment: &str, element: &[u8], key: &[u8]) -> String {
+    fn reparse_attribute(fragment: &str, element: &str, key: &str) -> String {
         let mut reader = Reader::from_str(fragment);
         loop {
             match reader.read_event().expect("captured fragment must reparse") {
@@ -3068,9 +3058,9 @@ mod tests {
         let info = server_error.info.expect("expected captured error-info");
 
         for (path, fragment, element) in [
-            ("data", data.as_str(), b"item".as_slice()),
-            ("direct", direct.as_str(), b"output".as_slice()),
-            ("error-info", info.as_str(), b"detail".as_slice()),
+            ("data", data.as_str(), "item"),
+            ("direct", direct.as_str(), "output"),
+            ("error-info", info.as_str(), "detail"),
         ] {
             assert!(fragment.contains(serialized), "{path}: {fragment}");
             assert!(
@@ -3078,7 +3068,7 @@ mod tests {
                 "{path}: serialized literal controls"
             );
             assert_eq!(
-                reparse_attribute(fragment, element, b"probe"),
+                reparse_attribute(fragment, element, "probe"),
                 expected,
                 "{path}: reparsing changed the semantic value"
             );
@@ -3090,7 +3080,7 @@ mod tests {
             "ordinary attributes changed: {data}"
         );
         assert_eq!(
-            reparse_attribute(&data, b"item", b"ordinary"),
+            reparse_attribute(&data, "item", "ordinary"),
             "caf\u{e9} & \"quoted\""
         );
     }
@@ -3109,7 +3099,7 @@ mod tests {
         assert!(!data.contains("&#xA;"));
         assert!(!data.contains("&#xD;"));
         assert_eq!(
-            reparse_attribute(&data, b"item", b"probe"),
+            reparse_attribute(&data, "item", "probe"),
             "left middle right end tail"
         );
     }
@@ -3131,15 +3121,15 @@ mod tests {
         );
         assert!(data.contains("xmlns:r=\"urn:literal space end\""), "{data}");
         assert_eq!(
-            reparse_attribute(&data, b"p:item", b"xmlns:p"),
+            reparse_attribute(&data, "p:item", "xmlns:p"),
             "urn:parent\tscope"
         );
         assert_eq!(
-            reparse_attribute(&data, b"p:item", b"xmlns:q"),
+            reparse_attribute(&data, "p:item", "xmlns:q"),
             "urn:explicit\nscope"
         );
         assert_eq!(
-            reparse_attribute(&data, b"p:item", b"xmlns:r"),
+            reparse_attribute(&data, "p:item", "xmlns:r"),
             "urn:literal space end"
         );
         validate_xml_fragment(&data).expect("captured namespace scope stays well formed");

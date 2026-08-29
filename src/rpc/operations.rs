@@ -574,14 +574,13 @@ pub(crate) fn parse_partial_lock_reply(payload: &str) -> Result<PartialLock, Net
                     "partial-lock reply has an invalid attribute: {e}"
                 )))
             })?;
-            let key = attr.key.as_ref();
-            let prefix = if key == b"xmlns" {
+            let key: &str = attr.key.as_ref();
+            // 0.42 decodes at the reader, so a prefix that is not valid UTF-8
+            // fails the read rather than arriving here to be skipped.
+            let prefix = if key == "xmlns" {
                 None
-            } else if let Some(p) = key.strip_prefix(b"xmlns:") {
-                match std::str::from_utf8(p) {
-                    Ok(p) => Some(p.to_string()),
-                    Err(_) => continue,
-                }
+            } else if let Some(p) = key.strip_prefix("xmlns:") {
+                Some(p.to_string())
             } else {
                 continue;
             };
@@ -596,12 +595,10 @@ pub(crate) fn parse_partial_lock_reply(payload: &str) -> Result<PartialLock, Net
     }
 
     /// Resolve an element's namespace against the declarations in scope.
-    fn resolve_ns(raw_name: &[u8], scopes: &[Vec<(Option<String>, String)>]) -> Option<String> {
-        let prefix = raw_name
-            .iter()
-            .position(|b| *b == b':')
-            .and_then(|i| std::str::from_utf8(&raw_name[..i]).ok())
-            .map(|s| s.to_string());
+    fn resolve_ns(raw_name: &str, scopes: &[Vec<(Option<String>, String)>]) -> Option<String> {
+        // `:` is ASCII, so splitting on the first one is the same operation it
+        // was over bytes — no char boundary can fall inside it.
+        let prefix = raw_name.find(':').map(|i| raw_name[..i].to_string());
         // `xml` is bound implicitly and never appears in a declaration, so it
         // must be resolved here; otherwise <xml:lock-id> looks unqualified and
         // would be wrongly accepted.
@@ -663,8 +660,8 @@ pub(crate) fn parse_partial_lock_reply(payload: &str) -> Result<PartialLock, Net
                 };
                 current = if in_scope {
                     match e.local_name().as_ref() {
-                        b"lock-id" => Some("lock-id"),
-                        b"locked-node" => Some("locked-node"),
+                        "lock-id" => Some("lock-id"),
+                        "locked-node" => Some("locked-node"),
                         _ => None,
                     }
                 } else {
@@ -683,20 +680,10 @@ pub(crate) fn parse_partial_lock_reply(payload: &str) -> Result<PartialLock, Net
             }
             Ok(Event::Empty(_)) => {}
             Ok(Event::Text(ref text)) if current.is_some() => {
-                let decoded = text.decode().map_err(|e| {
-                    NetconfError::Protocol(ProtocolError::Xml(format!(
-                        "partial-lock reply text is not decodable: {e}"
-                    )))
-                })?;
-                text_buf.push_str(&decoded);
+                text_buf.push_str(text);
             }
             Ok(Event::CData(ref cdata)) if current.is_some() => {
-                let decoded = cdata.decode().map_err(|e| {
-                    NetconfError::Protocol(ProtocolError::Xml(format!(
-                        "partial-lock reply CDATA is not decodable: {e}"
-                    )))
-                })?;
-                text_buf.push_str(&decoded);
+                text_buf.push_str(cdata);
             }
             Ok(Event::GeneralRef(ref entity)) if current.is_some() => {
                 if let Some(resolved) = crate::xml_entity::resolve_entity_ref(entity) {

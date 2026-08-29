@@ -50,8 +50,7 @@ impl FragmentCapture {
             ));
         }
         let binding = tag.name();
-        let name = str::from_utf8(binding.as_ref())
-            .map_err(|error| parse_error(format!("invalid end-tag name: {error}")))?;
+        let name = binding.as_ref();
         self.xml.push_str("</");
         self.xml.push_str(name);
         self.xml.push('>');
@@ -61,32 +60,29 @@ impl FragmentCapture {
 
     pub(super) fn text(&mut self, text: &BytesText<'_>) -> Result<(), RpcError> {
         validate_text_lexical(text.as_ref())?;
-        let decoded = text
-            .xml10_content()
-            .map_err(|error| parse_error(format!("invalid text encoding: {error}")))?;
+        let decoded = text.xml10_content();
         validate_xml_chars(&decoded, "text content")?;
         self.xml.push_str(&escape_xml_text(&decoded));
         Ok(())
     }
 
     pub(super) fn cdata(&mut self, cdata: &BytesCData<'_>) -> Result<(), RpcError> {
-        let decoded = cdata
-            .xml10_content()
-            .map_err(|error| parse_error(format!("invalid CDATA encoding: {error}")))?;
+        let decoded = cdata.xml10_content();
         validate_xml_chars(&decoded, "CDATA content")?;
         self.xml.push_str(&escape_xml_text(&decoded));
         Ok(())
     }
 
     pub(super) fn entity(&mut self, entity: &BytesRef<'_>) -> Result<(), RpcError> {
-        let decoded = entity
-            .decode()
-            .map_err(|error| parse_error(format!("invalid entity encoding: {error}")))?;
+        // quick-xml 0.42 decodes at the reader, so the event already holds
+        // `str`; there is no per-event decode step and no encoding error to
+        // surface here any more.
+        let decoded: &str = entity;
         crate::xml_entity::resolve_entity_ref(entity)
             .filter(|value| value.chars().all(is_valid_xml_char))
             .ok_or_else(|| parse_error("invalid entity reference".to_string()))?;
         self.xml.push('&');
-        self.xml.push_str(&decoded);
+        self.xml.push_str(decoded);
         self.xml.push(';');
         Ok(())
     }
@@ -97,15 +93,13 @@ impl FragmentCapture {
 
     fn write_start_like(&mut self, tag: &BytesStart<'_>, empty: bool) -> Result<(), RpcError> {
         let binding = tag.name();
-        let name = str::from_utf8(binding.as_ref())
-            .map_err(|error| parse_error(format!("invalid start-tag name: {error}")))?;
+        let name = binding.as_ref();
         let mut attributes = Vec::new();
         let mut explicit_namespaces = HashSet::new();
         for attribute in tag.attributes().with_checks(true) {
             let attribute = attribute
                 .map_err(|error| parse_error(format!("invalid XML attribute: {error}")))?;
-            let key = str::from_utf8(attribute.key.as_ref())
-                .map_err(|error| parse_error(format!("invalid attribute name: {error}")))?;
+            let key = attribute.key.as_ref();
             let value = decode_attribute(attribute.value.as_ref(), "captured XML attribute value")?;
             if let Some(prefix) = namespace_prefix(key)? {
                 explicit_namespaces.insert(prefix.to_string());
@@ -173,8 +167,7 @@ pub(super) fn namespace_declarations(tag: &BytesStart<'_>) -> Result<NamespaceBi
     for attribute in tag.attributes().with_checks(true) {
         let attribute =
             attribute.map_err(|error| parse_error(format!("invalid XML attribute: {error}")))?;
-        let key = str::from_utf8(attribute.key.as_ref())
-            .map_err(|error| parse_error(format!("invalid attribute name: {error}")))?;
+        let key = attribute.key.as_ref();
         let Some(prefix) = namespace_prefix(key)? else {
             continue;
         };
@@ -187,9 +180,9 @@ pub(super) fn namespace_declarations(tag: &BytesStart<'_>) -> Result<NamespaceBi
     Ok(declarations)
 }
 
-pub(super) fn validate_qname(raw: &[u8]) -> Result<ValidatedQName<'_>, RpcError> {
-    let name =
-        str::from_utf8(raw).map_err(|_| parse_error("invalid QName encoding".to_string()))?;
+pub(super) fn validate_qname(name: &str) -> Result<ValidatedQName<'_>, RpcError> {
+    // quick-xml 0.42 decodes at the reader, so names arrive as `str` and the
+    // UTF-8 check that used to guard this is unreachable rather than removed.
     let mut parts = name.split(':');
     let first = parts
         .next()
@@ -213,8 +206,8 @@ pub(super) fn validate_qname(raw: &[u8]) -> Result<ValidatedQName<'_>, RpcError>
     Ok(ValidatedQName { prefix, local })
 }
 
-pub(super) fn is_namespace_declaration(attribute_name: &[u8]) -> bool {
-    attribute_name == b"xmlns" || attribute_name.starts_with(b"xmlns:")
+pub(super) fn is_namespace_declaration(attribute_name: &str) -> bool {
+    attribute_name == "xmlns" || attribute_name.starts_with("xmlns:")
 }
 
 fn namespace_prefix(attribute_name: &str) -> Result<Option<&str>, RpcError> {
