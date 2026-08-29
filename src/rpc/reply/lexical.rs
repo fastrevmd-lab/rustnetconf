@@ -50,7 +50,10 @@ fn validate_attribute_separators(tag: &BytesStart<'_>) -> Result<(), RpcError> {
     }
 }
 
-fn ordinary_attribute_separators_are_valid(raw: &[u8]) -> bool {
+fn ordinary_attribute_separators_are_valid(raw: &str) -> bool {
+    // The lexical rules below are byte rules; only the boundary moved to
+    // `str` when quick-xml started decoding at the reader.
+    let raw = raw.as_bytes();
     let mut cursor = 0usize;
     loop {
         let separator_start = cursor;
@@ -99,7 +102,10 @@ fn ordinary_attribute_separators_are_valid(raw: &[u8]) -> bool {
     }
 }
 
-pub(super) fn validate_text_lexical(raw: &[u8]) -> Result<(), RpcError> {
+pub(super) fn validate_text_lexical(raw: &str) -> Result<(), RpcError> {
+    // The lexical rules below are byte rules; only the boundary moved to
+    // `str` when quick-xml started decoding at the reader.
+    let raw = raw.as_bytes();
     if raw.windows(3).any(|window| window == b"]]>") {
         Err(parse_error(
             "character data contains forbidden CDATA terminator",
@@ -109,31 +115,28 @@ pub(super) fn validate_text_lexical(raw: &[u8]) -> Result<(), RpcError> {
     }
 }
 
-fn validate_comment(raw: &[u8]) -> Result<(), RpcError> {
-    if raw.windows(2).any(|window| window == b"--") || raw.ends_with(b"-") {
+fn validate_comment(raw: &str) -> Result<(), RpcError> {
+    if raw.contains("--") || raw.ends_with('-') {
         return Err(parse_error("invalid XML comment syntax"));
     }
-    let decoded = str::from_utf8(raw).map_err(|_| parse_error("invalid comment encoding"))?;
-    validate_xml_chars(decoded, "comment")
+    validate_xml_chars(raw, "comment")
 }
 
 fn validate_processing_instruction(
     instruction: &quick_xml::events::BytesPI<'_>,
 ) -> Result<(), RpcError> {
     let target = instruction.target();
-    if !is_valid_ncname_bytes(target) || target.eq_ignore_ascii_case(b"xml") {
+    if !is_valid_ncname_bytes(target.as_bytes()) || target.eq_ignore_ascii_case("xml") {
         return Err(parse_error("invalid processing instruction target"));
     }
-    let decoded = str::from_utf8(instruction.as_ref())
-        .map_err(|_| parse_error("invalid processing instruction encoding"))?;
+    let decoded = instruction.as_ref();
     validate_xml_chars(decoded, "processing instruction")
 }
 
 fn validate_declaration(declaration: &BytesDecl<'_>) -> Result<(), RpcError> {
-    let raw = str::from_utf8(declaration.as_ref())
-        .map_err(|_| parse_error("invalid XML declaration encoding"))?;
+    let raw = declaration.as_ref();
     validate_xml_chars(raw, "XML declaration")?;
-    if !declaration_attributes_are_separated(raw.as_bytes()) {
+    if !declaration_attributes_are_separated(raw) {
         return Err(parse_error("invalid XML declaration syntax"));
     }
 
@@ -143,9 +146,9 @@ fn validate_declaration(declaration: &BytesDecl<'_>) -> Result<(), RpcError> {
     for attribute in declaration.attributes().with_checks(true) {
         let attribute = attribute.map_err(|_| parse_error("invalid XML declaration syntax"))?;
         let (rank, valid_value) = match attribute.key.as_ref() {
-            b"version" => (0, attribute.value.as_ref() == b"1.0"),
-            b"encoding" => (1, valid_encoding_name(attribute.value.as_ref())),
-            b"standalone" => (2, matches!(attribute.value.as_ref(), b"yes" | b"no")),
+            "version" => (0, attribute.value.as_ref() == "1.0"),
+            "encoding" => (1, valid_encoding_name(attribute.value.as_ref())),
+            "standalone" => (2, matches!(attribute.value.as_ref(), "yes" | "no")),
             _ => return Err(parse_error("invalid XML declaration syntax")),
         };
         if (count == 0 && rank != 0) || previous_rank.is_some_and(|previous| previous >= rank) {
@@ -163,7 +166,10 @@ fn validate_declaration(declaration: &BytesDecl<'_>) -> Result<(), RpcError> {
     Ok(())
 }
 
-fn declaration_attributes_are_separated(raw: &[u8]) -> bool {
+fn declaration_attributes_are_separated(raw: &str) -> bool {
+    // The lexical rules below are byte rules; only the boundary moved to
+    // `str` when quick-xml started decoding at the reader.
+    let raw = raw.as_bytes();
     if !raw.starts_with(b"xml") {
         return false;
     }
@@ -226,7 +232,10 @@ pub(super) fn contains_only_xml_space(value: &str) -> bool {
     value.bytes().all(is_xml_space)
 }
 
-fn valid_encoding_name(value: &[u8]) -> bool {
+fn valid_encoding_name(value: &str) -> bool {
+    // The lexical rules below are byte rules; only the boundary moved to
+    // `str` when quick-xml started decoding at the reader.
+    let value = value.as_bytes();
     value.first().is_some_and(u8::is_ascii_alphabetic)
         && value[1..]
             .iter()
@@ -296,9 +305,8 @@ pub(super) fn validate_xml_chars(value: &str, field: &'static str) -> Result<(),
     }
 }
 
-pub(crate) fn decode_attribute(raw: &[u8], field: &'static str) -> Result<String, RpcError> {
+pub(crate) fn decode_attribute(raw: &str, field: &'static str) -> Result<String, RpcError> {
     validate_attribute_lexical(raw)?;
-    let raw = str::from_utf8(raw).map_err(|_| parse_error(format!("invalid {field} encoding")))?;
     let normalized = normalize_literal_attribute_whitespace(raw);
     let decoded = quick_xml::escape::unescape(&normalized)
         .map(|value| value.into_owned())
@@ -332,7 +340,9 @@ fn normalize_literal_attribute_whitespace(raw: &str) -> Cow<'_, str> {
     Cow::Owned(normalized)
 }
 
-fn validate_attribute_lexical(raw: &[u8]) -> Result<(), RpcError> {
+fn validate_attribute_lexical(raw: &str) -> Result<(), RpcError> {
+    // quick-xml 0.42 decodes at the reader; only the boundary moved to `str`.
+    let raw = raw.as_bytes();
     if raw.contains(&b'<') {
         return Err(parse_error("attribute value contains raw '<'"));
     }
@@ -349,12 +359,12 @@ mod tests {
 
     #[test]
     fn normalizes_literal_attribute_whitespace_before_expanding_references() {
-        let literal = decode_attribute(b"left\tmiddle\nright\rend\r\ntail", "test attribute value")
+        let literal = decode_attribute("left\tmiddle\nright\rend\r\ntail", "test attribute value")
             .expect("literal XML whitespace is valid");
         assert_eq!(literal, "left middle right end tail");
 
         let referenced =
-            decode_attribute(b"left&#x9;middle&#xA;right&#xD;end", "test attribute value")
+            decode_attribute("left&#x9;middle&#xA;right&#xD;end", "test attribute value")
                 .expect("referenced XML whitespace is valid");
         assert_eq!(referenced, "left\tmiddle\nright\rend");
     }
@@ -362,7 +372,7 @@ mod tests {
     #[test]
     fn attribute_normalization_preserves_entities_quotes_and_unicode() {
         let decoded = decode_attribute(
-            "caf\u{e9} &amp; &quot;quoted&quot; &apos;single&apos;".as_bytes(),
+            "caf\u{e9} &amp; &quot;quoted&quot; &apos;single&apos;",
             "test attribute value",
         )
         .expect("ordinary attribute content is valid");

@@ -54,14 +54,15 @@ fn resolve_entity_ref(entity: &quick_xml::events::BytesRef<'_>) -> Option<String
     if let Ok(Some(ch)) = entity.resolve_char_ref() {
         return Some(ch.to_string());
     }
-    let name = entity.decode().ok()?;
+    // 0.42 decodes at the reader, so the name is already `str`.
+    let name: &str = entity;
     // `resolve_xml_entity`, not `resolve_predefined_entity` — the same hazard
     // the library crate's copy of this helper documents, missed here when that
     // one was fixed. `resolve_predefined_entity` is dispatched on quick-xml's
     // `escape-html` feature, and Cargo unifies features across the whole
     // graph, so any unrelated dependency enabling it would make `netconf diff`
     // resolve HTML5 entities the device never sent.
-    quick_xml::escape::resolve_xml_entity(&name).map(|s| s.to_string())
+    quick_xml::escape::resolve_xml_entity(name).map(|s| s.to_string())
 }
 
 /// Parse an XML string into a simplified tree.
@@ -90,7 +91,7 @@ fn parse_xml_tree(xml: &str) -> Result<Vec<XmlNode>, String> {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref tag)) => {
                 flush_text(&mut pending_text, &mut stack);
-                let name = String::from_utf8_lossy(tag.local_name().as_ref()).to_string();
+                let name = tag.local_name().as_ref().to_string();
                 stack.push((name, Vec::new()));
             }
             Ok(Event::End(_)) => {
@@ -105,7 +106,7 @@ fn parse_xml_tree(xml: &str) -> Result<Vec<XmlNode>, String> {
                 }
             }
             Ok(Event::Text(ref text)) => {
-                pending_text.push_str(&text.decode().unwrap_or_default());
+                pending_text.push_str(text);
             }
             Ok(Event::GeneralRef(ref entity)) => {
                 if let Some(resolved) = resolve_entity_ref(entity) {
@@ -113,11 +114,11 @@ fn parse_xml_tree(xml: &str) -> Result<Vec<XmlNode>, String> {
                 }
             }
             Ok(Event::CData(ref cdata)) => {
-                pending_text.push_str(&cdata.decode().unwrap_or_default());
+                pending_text.push_str(cdata);
             }
             Ok(Event::Empty(ref tag)) => {
                 flush_text(&mut pending_text, &mut stack);
-                let name = String::from_utf8_lossy(tag.local_name().as_ref()).to_string();
+                let name = tag.local_name().as_ref().to_string();
                 let node = XmlNode::Element {
                     name,
                     children: Vec::new(),

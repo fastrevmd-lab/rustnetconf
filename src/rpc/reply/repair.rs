@@ -19,9 +19,9 @@ enum DocumentRootState {
 
 #[derive(Debug)]
 struct OpenElement {
-    qname: Vec<u8>,
-    local: Vec<u8>,
-    protocol_local: Option<Vec<u8>>,
+    qname: String,
+    local: String,
+    protocol_local: Option<String>,
     namespaces: NamespaceBindings,
     multi_re_path: MultiRePathElement,
     routing_engine_supported: bool,
@@ -30,14 +30,14 @@ struct OpenElement {
 
 impl OpenElement {
     fn ordinary(
-        qname: &[u8],
+        qname: &str,
         namespaces: NamespaceBindings,
         multi_re_path: MultiRePathElement,
     ) -> Self {
         Self {
-            qname: qname.to_vec(),
-            local: local_name(qname).to_vec(),
-            protocol_local: netconf_local_name(qname, &namespaces).map(<[u8]>::to_vec),
+            qname: qname.to_string(),
+            local: local_name(qname).to_string(),
+            protocol_local: netconf_local_name(qname, &namespaces).map(str::to_string),
             namespaces,
             multi_re_path,
             routing_engine_supported: false,
@@ -45,11 +45,11 @@ impl OpenElement {
         }
     }
 
-    fn routing_engine(qname: &[u8], supported: bool, namespaces: NamespaceBindings) -> Self {
+    fn routing_engine(qname: &str, supported: bool, namespaces: NamespaceBindings) -> Self {
         Self {
-            qname: qname.to_vec(),
-            local: b"routing-engine".to_vec(),
-            protocol_local: netconf_local_name(qname, &namespaces).map(<[u8]>::to_vec),
+            qname: qname.to_string(),
+            local: "routing-engine".to_string(),
+            protocol_local: netconf_local_name(qname, &namespaces).map(str::to_string),
             namespaces,
             multi_re_path: MultiRePathElement::Other,
             routing_engine_supported: supported,
@@ -58,20 +58,20 @@ impl OpenElement {
     }
 
     fn repairable(&self) -> bool {
-        self.local == b"routing-engine"
+        self.local == "routing-engine"
             && self.routing_engine_supported
             && self.routing_engine_has_marker
     }
 }
 
-fn local_name(qname: &[u8]) -> &[u8] {
-    qname.rsplit(|byte| *byte == b':').next().unwrap_or(qname)
+fn local_name(qname: &str) -> &str {
+    qname.rsplit(':').next().unwrap_or(qname)
 }
 
 fn netconf_local_name<'a>(
-    qualified_name: &'a [u8],
+    qualified_name: &'a str,
     namespaces: &NamespaceBindings,
-) -> Option<&'a [u8]> {
+) -> Option<&'a str> {
     let (namespace, local) = expanded_name(qualified_name, namespaces)?;
     match namespace {
         None => Some(local),
@@ -81,9 +81,9 @@ fn netconf_local_name<'a>(
 }
 
 fn juniper_local_name<'a>(
-    qualified_name: &'a [u8],
+    qualified_name: &'a str,
     namespaces: &NamespaceBindings,
-) -> Option<&'a [u8]> {
+) -> Option<&'a str> {
     let (namespace, local) = expanded_name(qualified_name, namespaces)?;
     match namespace {
         None => Some(local),
@@ -93,18 +93,20 @@ fn juniper_local_name<'a>(
 }
 
 fn expanded_name<'name, 'namespace>(
-    qualified_name: &'name [u8],
+    qualified_name: &'name str,
     namespaces: &'namespace NamespaceBindings,
-) -> Option<(Option<&'namespace str>, &'name [u8])> {
-    let mut parts = qualified_name.split(|byte| *byte == b':');
+) -> Option<(Option<&'namespace str>, &'name str)> {
+    // Splitting on an ASCII colon is the same operation over `str` as it was
+    // over bytes: no char boundary can fall inside a single-byte codepoint.
+    let mut parts = qualified_name.split(':');
     let first = parts.next()?;
     let second = parts.next();
     if parts.next().is_some() {
         return None;
     }
     let (namespace, local) = if let Some(local) = second {
-        let prefix = std::str::from_utf8(first).ok()?;
-        (Some(namespaces.get(prefix)?.as_str()), local)
+        // The prefix no longer needs a UTF-8 check — the reader made one.
+        (Some(namespaces.get(first)?.as_str()), local)
     } else {
         (namespaces.get("").map(String::as_str), first)
     };
@@ -197,7 +199,7 @@ fn namespaces_for(
 
 fn supported_routing_engine_parent(stack: &[OpenElement]) -> bool {
     stack.last().is_some_and(|element| {
-        (stack.len() == 1 && element.protocol_local.as_deref() == Some(b"rpc-reply"))
+        (stack.len() == 1 && element.protocol_local.as_deref() == Some("rpc-reply"))
             || matches!(
                 element.multi_re_path,
                 MultiRePathElement::Results | MultiRePathElement::Item
@@ -208,13 +210,13 @@ fn supported_routing_engine_parent(stack: &[OpenElement]) -> bool {
 fn mark_commit_check_result(stack: &mut [OpenElement]) {
     let Some(index) = stack
         .iter_mut()
-        .rposition(|element| element.local == b"routing-engine")
+        .rposition(|element| element.local == "routing-engine")
     else {
         return;
     };
     if stack[index + 1..]
         .iter()
-        .any(|element| element.protocol_local.as_deref() == Some(b"data"))
+        .any(|element| element.protocol_local.as_deref() == Some("data"))
     {
         return;
     }
@@ -226,8 +228,11 @@ fn close_repairable(writer: &mut Writer<Vec<u8>>, stack: &mut Vec<OpenElement>) 
     if !top.repairable() {
         return None;
     }
-    let qname = std::str::from_utf8(&top.qname).ok()?;
-    writer.write_event(Event::End(BytesEnd::new(qname))).ok()?;
+    // Was a `from_utf8(...).ok()?` — the reader has already guaranteed UTF-8,
+    // so that arm could only ever have discarded a repair silently.
+    writer
+        .write_event(Event::End(BytesEnd::new(&top.qname)))
+        .ok()?;
     stack.pop();
     Some(())
 }
@@ -242,16 +247,16 @@ fn handle_start(
     let local = local_name(qname.as_ref());
     let namespaces = namespaces_for(&tag, stack)?;
 
-    if juniper_local_name(qname.as_ref(), &namespaces) == Some(b"commit-check-success")
-        || netconf_local_name(qname.as_ref(), &namespaces) == Some(b"rpc-error")
+    if juniper_local_name(qname.as_ref(), &namespaces) == Some("commit-check-success")
+        || netconf_local_name(qname.as_ref(), &namespaces) == Some("rpc-error")
     {
         mark_commit_check_result(stack);
     }
 
-    if local == b"routing-engine" {
+    if local == "routing-engine" {
         if stack
             .last()
-            .is_some_and(|element| element.local == b"routing-engine")
+            .is_some_and(|element| element.local == "routing-engine")
         {
             close_repairable(writer, stack)?;
             *repaired_any = true;
@@ -264,14 +269,14 @@ fn handle_start(
         ));
     } else {
         let vendor_local = juniper_local_name(qname.as_ref(), &namespaces);
-        let multi_re_path = if vendor_local == Some(b"multi-routing-engine-results")
+        let multi_re_path = if vendor_local == Some("multi-routing-engine-results")
             && stack.len() == 1
             && stack
                 .last()
-                .is_some_and(|element| element.protocol_local.as_deref() == Some(b"rpc-reply"))
+                .is_some_and(|element| element.protocol_local.as_deref() == Some("rpc-reply"))
         {
             MultiRePathElement::Results
-        } else if vendor_local == Some(b"multi-routing-engine-item")
+        } else if vendor_local == Some("multi-routing-engine-item")
             && stack
                 .last()
                 .is_some_and(|element| element.multi_re_path == MultiRePathElement::Results)
@@ -302,7 +307,7 @@ fn begin_document_root(
         return None;
     }
     let namespaces = namespaces_for(tag, stack)?;
-    if netconf_local_name(tag.name().as_ref(), &namespaces) != Some(b"rpc-reply") {
+    if netconf_local_name(tag.name().as_ref(), &namespaces) != Some("rpc-reply") {
         return None;
     }
     *root_state = DocumentRootState::Inside;
@@ -312,10 +317,9 @@ fn begin_document_root(
 fn event_allowed_outside_root(event: &Event<'_>, root_state: DocumentRootState) -> bool {
     root_state == DocumentRootState::Inside
         || match event {
-            Event::Text(text) => text
-                .as_ref()
-                .iter()
-                .all(|byte| matches!(byte, b' ' | b'\t' | b'\r' | b'\n')),
+            // XML's four whitespace characters, not `char::is_whitespace`,
+            // which is Unicode-aware and would accept NBSP outside the root.
+            Event::Text(text) => text.chars().all(|c| matches!(c, ' ' | '\t' | '\r' | '\n')),
             Event::CData(_) | Event::GeneralRef(_) | Event::DocType(_) => false,
             _ => true,
         }
@@ -348,8 +352,8 @@ pub(super) fn repair_cluster_commit_check(xml: &str) -> Option<String> {
                 }
                 let namespaces = namespaces_for(&tag, &stack)?;
                 let qname = tag.name();
-                if juniper_local_name(qname.as_ref(), &namespaces) == Some(b"commit-check-success")
-                    || netconf_local_name(qname.as_ref(), &namespaces) == Some(b"rpc-error")
+                if juniper_local_name(qname.as_ref(), &namespaces) == Some("commit-check-success")
+                    || netconf_local_name(qname.as_ref(), &namespaces) == Some("rpc-error")
                 {
                     mark_commit_check_result(&mut stack);
                 }
@@ -361,10 +365,10 @@ pub(super) fn repair_cluster_commit_check(xml: &str) -> Option<String> {
 
                 while stack
                     .last()
-                    .is_some_and(|element| element.local.as_slice() != end_local)
+                    .is_some_and(|element| element.local != end_local)
                 {
                     let parent_matches =
-                        stack.len() >= 2 && stack[stack.len() - 2].local.as_slice() == end_local;
+                        stack.len() >= 2 && stack[stack.len() - 2].local == end_local;
                     if !parent_matches {
                         return None;
                     }
@@ -373,13 +377,13 @@ pub(super) fn repair_cluster_commit_check(xml: &str) -> Option<String> {
                 }
 
                 let open = stack.pop()?;
-                if open.local.as_slice() != end_local {
+                if open.local != end_local {
                     return None;
                 }
                 writer.write_event(Event::End(tag.into_owned())).ok()?;
                 if stack.is_empty() {
                     if root_state != DocumentRootState::Inside
-                        || open.protocol_local.as_deref() != Some(b"rpc-reply")
+                        || open.protocol_local.as_deref() != Some("rpc-reply")
                     {
                         return None;
                     }

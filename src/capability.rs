@@ -232,17 +232,16 @@ pub fn parse_device_hello(xml: &str) -> Result<Capabilities, String> {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref tag)) | Ok(Event::Empty(ref tag)) => {
                 let local_name = tag.local_name();
-                if local_name.as_ref() == b"capability" {
+                if local_name.as_ref() == "capability" {
                     in_capability = true;
                     text_buf.clear();
-                } else if local_name.as_ref() == b"session-id" {
+                } else if local_name.as_ref() == "session-id" {
                     in_session_id = true;
                     text_buf.clear();
                 }
             }
             Ok(Event::Text(ref text)) if in_capability || in_session_id => {
-                let value = text.decode().map_err(|e| e.to_string())?;
-                text_buf.push_str(&value);
+                text_buf.push_str(text);
             }
             Ok(Event::GeneralRef(ref entity)) if in_capability || in_session_id => {
                 if let Some(resolved) = resolve_entity_ref(entity) {
@@ -250,19 +249,18 @@ pub fn parse_device_hello(xml: &str) -> Result<Capabilities, String> {
                 }
             }
             Ok(Event::CData(ref cdata)) if in_capability || in_session_id => {
-                let value = cdata.decode().map_err(|e| e.to_string())?;
-                text_buf.push_str(&value);
+                text_buf.push_str(cdata);
             }
             Ok(Event::End(ref tag)) => {
                 let local_name = tag.local_name();
-                if local_name.as_ref() == b"capability" {
+                if local_name.as_ref() == "capability" {
                     in_capability = false;
                     let trimmed = text_buf.trim();
                     if !trimmed.is_empty() {
                         capabilities.insert(trimmed.to_string());
                     }
                     text_buf.clear();
-                } else if local_name.as_ref() == b"session-id" {
+                } else if local_name.as_ref() == "session-id" {
                     in_session_id = false;
                     session_id = text_buf.trim().parse().ok();
                     text_buf.clear();

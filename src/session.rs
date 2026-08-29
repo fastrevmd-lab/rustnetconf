@@ -2179,16 +2179,15 @@ fn parse_session_id_from_info(info: &str) -> Option<u32> {
             match reader.read_event_into(&mut buf) {
                 Ok(Event::Start(ref tag)) => {
                     let local = tag.local_name();
-                    let name = std::str::from_utf8(local.as_ref()).unwrap_or("");
+                    let name: &str = local.as_ref();
                     if name == "session-id" {
                         in_session_id = true;
                         id_buf.clear();
                     }
                 }
                 Ok(Event::Text(ref text)) if in_session_id => {
-                    if let Ok(value) = text.decode() {
-                        id_buf.push_str(&value);
-                    }
+                    let value: &str = text;
+                    id_buf.push_str(value);
                 }
                 Ok(Event::GeneralRef(ref entity)) if in_session_id => {
                     if let Some(resolved) = resolve_entity_ref(entity) {
@@ -2196,9 +2195,8 @@ fn parse_session_id_from_info(info: &str) -> Option<u32> {
                     }
                 }
                 Ok(Event::CData(ref cdata)) if in_session_id => {
-                    if let Ok(value) = cdata.decode() {
-                        id_buf.push_str(&value);
-                    }
+                    let value: &str = cdata;
+                    id_buf.push_str(value);
                 }
                 Ok(Event::End(_)) => {
                     if in_session_id {

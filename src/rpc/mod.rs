@@ -153,9 +153,7 @@ pub fn validate_xml_fragment(xml: &str) -> Result<(), ProtocolError> {
             // slips through Text/CDATA and produces a document a strict parser
             // rejects. Same validator/parser disagreement, different axis.
             Ok(Event::Text(ref t)) => {
-                let decoded = t.decode().map_err(|e| {
-                    ProtocolError::Xml(format!("XML fragment text is not decodable: {e}"))
-                })?;
+                let decoded: &str = t;
                 if !decoded
                     .chars()
                     .all(crate::rpc::reply::lexical::is_valid_xml_char)
@@ -174,9 +172,7 @@ pub fn validate_xml_fragment(xml: &str) -> Result<(), ProtocolError> {
                 }
             }
             Ok(Event::CData(ref c)) => {
-                let decoded = c.decode().map_err(|e| {
-                    ProtocolError::Xml(format!("XML fragment CDATA is not decodable: {e}"))
-                })?;
+                let decoded: &str = c;
                 if !decoded
                     .chars()
                     .all(crate::rpc::reply::lexical::is_valid_xml_char)
@@ -199,9 +195,7 @@ pub fn validate_xml_fragment(xml: &str) -> Result<(), ProtocolError> {
             // not end with `-`. quick-xml accepts `<!-->` and `<---->`; a
             // conforming parser rejects both.
             Ok(Event::Comment(ref c)) => {
-                let body = std::str::from_utf8(c.as_ref()).map_err(|_| {
-                    ProtocolError::Xml("XML fragment has a non-UTF-8 comment".to_string())
-                })?;
+                let body: &str = c.as_ref();
                 if body.contains("--") || body.ends_with('-') {
                     return Err(ProtocolError::Xml(
                         "XML fragment has a malformed comment: `--` may not appear \
@@ -223,10 +217,12 @@ pub fn validate_xml_fragment(xml: &str) -> Result<(), ProtocolError> {
             // A processing instruction's target must be a Name, and may not be
             // `xml` in any case (XML 1.0 §2.6). quick-xml validates neither.
             Ok(Event::PI(ref pi)) => {
-                let raw = pi.as_ref();
+                let raw: &str = pi.as_ref();
+                // ASCII whitespace only, exactly as the byte scan did. Not
+                // `char::is_whitespace`, which is Unicode-aware and would split
+                // the target on characters XML does not treat as whitespace.
                 let target_end = raw
-                    .iter()
-                    .position(|b| b.is_ascii_whitespace())
+                    .find(|c: char| c.is_ascii_whitespace())
                     .unwrap_or(raw.len());
                 let target = &raw[..target_end];
                 // `Name`, not `NCName`. XML 1.0 §2.6 defines
@@ -238,19 +234,14 @@ pub fn validate_xml_fragment(xml: &str) -> Result<(), ProtocolError> {
                 // first by requiring NCName, then by reusing `validate_name`,
                 // which enforces QName and so still refused `<?a:b:c?>`.
                 validate_pi_target(target)?;
-                if target.eq_ignore_ascii_case(b"xml") {
+                if target.eq_ignore_ascii_case("xml") {
                     return Err(ProtocolError::Xml(
                         "XML fragment has a processing instruction targeting `xml`, \
                          which is reserved"
                             .to_string(),
                     ));
                 }
-                let body = std::str::from_utf8(raw).map_err(|_| {
-                    ProtocolError::Xml(
-                        "XML fragment has a non-UTF-8 processing instruction".to_string(),
-                    )
-                })?;
-                if !body
+                if !raw
                     .chars()
                     .all(crate::rpc::reply::lexical::is_valid_xml_char)
                 {
@@ -276,7 +267,7 @@ pub fn validate_xml_fragment(xml: &str) -> Result<(), ProtocolError> {
                         }
                     }
                     None => {
-                        let name = entity.decode().unwrap_or_default();
+                        let name: &str = entity;
                         let preview: String = name.chars().take(32).collect();
                         return Err(ProtocolError::Xml(format!(
                             "XML fragment references an undefined entity `&{preview};`; \
@@ -398,10 +389,7 @@ fn is_name_char(c: char) -> bool {
 /// processing-instruction target is only required to be a `Name`, so
 /// `<?a:b:c?>`, `<?:a?>` and `<?a:?>` are all legal and a conforming parser
 /// accepts them.
-fn validate_pi_target(raw: &[u8]) -> Result<(), ProtocolError> {
-    let name = std::str::from_utf8(raw).map_err(|_| {
-        ProtocolError::Xml("XML fragment has a non-UTF-8 processing-instruction target".to_string())
-    })?;
+fn validate_pi_target(name: &str) -> Result<(), ProtocolError> {
     let mut chars = name.chars();
     let ok = match chars.next() {
         None => false,
@@ -442,8 +430,9 @@ fn validate_attributes(tag: &quick_xml::events::BytesStart<'_>) -> Result<(), Pr
     // XML requires whitespace before every attribute. quick-xml's iterator
     // happily yields both of `<a b="1"c="2"/>`, so the separator has to be
     // checked against the raw bytes: after a closing quote, only whitespace or
-    // the end of the tag may follow.
-    let raw = tag.attributes_raw();
+    // the end of the tag may follow. 0.42 hands this back as `str`; the rule is
+    // about ASCII quote and whitespace bytes, so it stays a byte scan.
+    let raw = tag.attributes_raw().as_bytes();
     let mut quote: Option<u8> = None;
     for (i, &byte) in raw.iter().enumerate() {
         match quote {
@@ -475,16 +464,14 @@ fn validate_attributes(tag: &quick_xml::events::BytesStart<'_>) -> Result<(), Pr
         // `xmlns:p=""` is not. roxmltree 0.20 accepts it, so the strict
         // validator cannot catch it either — but the attribute iteration
         // needed to see it already happens here.
-        if attribute.key.as_ref().starts_with(b"xmlns:") && attribute.value.is_empty() {
+        if attribute.key.as_ref().starts_with("xmlns:") && attribute.value.is_empty() {
             return Err(ProtocolError::Xml(
                 "XML fragment undeclares a prefixed namespace; only the default \
                  namespace may be set to an empty URI"
                     .to_string(),
             ));
         }
-        let value = std::str::from_utf8(attribute.value.as_ref()).map_err(|_| {
-            ProtocolError::Xml("XML fragment has a non-UTF-8 attribute value".to_string())
-        })?;
+        let value: &str = attribute.value.as_ref();
         if !value
             .chars()
             .all(crate::rpc::reply::lexical::is_valid_xml_char)
@@ -577,11 +564,12 @@ fn validate_attribute_references(value: &str) -> Result<(), ProtocolError> {
 ///
 /// Only the prefix is reserved: `<xmlns/>` is a valid element name, and
 /// roxmltree accepts it.
-fn validate_element_name(raw: &[u8]) -> Result<(), ProtocolError> {
-    validate_name(raw)?;
-    let mut parts = raw.split(|byte| *byte == b':');
+fn validate_element_name(name: &str) -> Result<(), ProtocolError> {
+    validate_name(name)?;
+    // `:` is ASCII, so this split is the same operation it was over bytes.
+    let mut parts = name.split(':');
     if let (Some(prefix), Some(_)) = (parts.next(), parts.next()) {
-        if prefix == b"xmlns" {
+        if prefix == "xmlns" {
             return Err(ProtocolError::Xml(
                 "XML fragment has an element using the reserved `xmlns` prefix;                  it may only introduce namespace declarations"
                     .to_string(),
@@ -591,9 +579,7 @@ fn validate_element_name(raw: &[u8]) -> Result<(), ProtocolError> {
     Ok(())
 }
 
-fn validate_name(raw: &[u8]) -> Result<(), ProtocolError> {
-    let name = std::str::from_utf8(raw)
-        .map_err(|_| ProtocolError::Xml("XML fragment has a non-UTF-8 element name".to_string()))?;
+fn validate_name(name: &str) -> Result<(), ProtocolError> {
     // NETCONF is namespace-based throughout, so the relevant standard is
     // QName, not the raw Name production. `:` is a legal NameStartChar, which
     // makes `<:/>` a valid Name and an invalid QName — a namespace-aware parser

@@ -39,8 +39,8 @@ pub fn classify_message(xml: &str) -> Option<MessageKind> {
             Ok(Event::Start(ref tag)) | Ok(Event::Empty(ref tag)) => {
                 let local_name = tag.local_name();
                 return match local_name.as_ref() {
-                    b"rpc-reply" => Some(MessageKind::RpcReply),
-                    b"notification" => Some(MessageKind::Notification),
+                    "rpc-reply" => Some(MessageKind::RpcReply),
+                    "notification" => Some(MessageKind::Notification),
                     _ => None,
                 };
             }
@@ -73,16 +73,13 @@ pub fn parse_notification(xml: &str) -> Result<Notification, RpcError> {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref tag)) => {
-                if tag.local_name().as_ref() == b"eventTime" {
+                if tag.local_name().as_ref() == "eventTime" {
                     in_event_time = true;
                     time_buf = None;
                 }
             }
             Ok(Event::Text(ref text)) if in_event_time => {
-                let t = text
-                    .decode()
-                    .map_err(|e| RpcError::ParseError(format!("failed to parse eventTime: {e}")))?;
-                time_buf.get_or_insert_with(String::new).push_str(&t);
+                time_buf.get_or_insert_with(String::new).push_str(text);
             }
             Ok(Event::GeneralRef(ref entity)) if in_event_time => {
                 if let Some(resolved) = resolve_entity_ref(entity) {
@@ -90,13 +87,10 @@ pub fn parse_notification(xml: &str) -> Result<Notification, RpcError> {
                 }
             }
             Ok(Event::CData(ref cdata)) if in_event_time => {
-                let t = cdata
-                    .decode()
-                    .map_err(|e| RpcError::ParseError(format!("failed to parse eventTime: {e}")))?;
-                time_buf.get_or_insert_with(String::new).push_str(&t);
+                time_buf.get_or_insert_with(String::new).push_str(cdata);
             }
             Ok(Event::End(ref tag)) => {
-                if tag.local_name().as_ref() == b"eventTime" {
+                if tag.local_name().as_ref() == "eventTime" {
                     in_event_time = false;
                     if let Some(t) = time_buf.take() {
                         event_time = Some(t.trim().to_string());
@@ -145,15 +139,15 @@ fn extract_event_content(xml: &str) -> String {
     loop {
         match reader.read_event_into(&mut buf) {
             Ok(Event::Start(ref tag)) => {
-                if tag.local_name().as_ref() == b"notification" {
+                if tag.local_name().as_ref() == "notification" {
                     in_notification = true;
                 }
             }
             Ok(Event::End(ref tag)) => {
                 let local = tag.local_name();
-                if local.as_ref() == b"eventTime" && in_notification {
+                if local.as_ref() == "eventTime" && in_notification {
                     event_time_end_offset = Some(reader.buffer_position() as usize);
-                } else if local.as_ref() == b"notification" && in_notification {
+                } else if local.as_ref() == "notification" && in_notification {
                     if let Some(start) = event_time_end_offset {
                         // Find the closing </...notification> tag start in the raw string
                         let pos = reader.buffer_position() as usize;
