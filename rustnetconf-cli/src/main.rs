@@ -108,6 +108,17 @@ enum Commands {
 
 #[tokio::main]
 async fn main() {
+    // Honour NO_COLOR ourselves rather than trusting a crate's detector.
+    // `console` checks it on Unix but its Windows detector does not, and
+    // `colored` -- which this replaced -- behaved the other way. Deciding it
+    // here makes the contract the same everywhere and independent of which
+    // styling crate is underneath.
+    //
+    // https://no-color.org: any non-empty value means disable.
+    if std::env::var_os("NO_COLOR").is_some_and(|value| !value.is_empty()) {
+        console::set_colors_enabled(false);
+    }
+
     let cli = Cli::parse();
     let project_dir = &cli.project_dir;
 

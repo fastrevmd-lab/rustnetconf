@@ -15,12 +15,12 @@ path = "src/main.rs"
 [dependencies]
 rustnetconf = { version = "0.16.2", path = ".." }
 clap = { version = "4", features = ["derive"] }
-colored = "3"
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 quick-xml = "0.42"
 tokio = { version = "1", features = ["full"] }
+console = "0.15"
 dialoguer = "0.11"
 zeroize = "1"
 
