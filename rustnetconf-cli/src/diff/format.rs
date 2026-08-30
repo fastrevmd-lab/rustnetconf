@@ -131,11 +131,12 @@ mod styling_tests {
 
     /// The structure of the diff output, independent of colour.
     ///
-    /// `console` disables styling when stdout is not a terminal, which is the
-    /// case under `cargo test`, so these assertions see the plain text an
-    /// operator gets when piping to a file. That is the half worth pinning: the
-    /// migration from `colored` changed which crate emits the escapes, and
-    /// nothing about what the lines say.
+    /// The escapes are stripped before asserting rather than relying on
+    /// styling being off. It is off under a piped `cargo test`, which is what
+    /// made the first version of this test pass -- and it fails on an
+    /// interactive terminal or under `CLICOLOR_FORCE=1`, where the resets land
+    /// between the sign, the path and the value. A test that only holds when
+    /// the harness is redirected is not testing the thing it names.
     #[test]
     fn the_diff_lines_keep_their_shape() {
         let entries = vec![
@@ -160,7 +161,8 @@ mod styling_tests {
             },
         ];
 
-        let out = format_colored(&entries, "junos.conf");
+        let styled = format_colored(&entries, "junos.conf");
+        let out = console::strip_ansi_codes(&styled);
         assert!(out.contains("junos.conf:"), "{out}");
         assert!(out.contains("+ system/host-name = fw01"), "{out}");
         assert!(out.contains("- system/domain-name = old.example"), "{out}");
@@ -172,7 +174,8 @@ mod styling_tests {
     /// The empty case is a distinct message, not an empty diff body.
     #[test]
     fn no_changes_says_so() {
-        let out = format_colored(&[], "junos.conf");
+        let styled = format_colored(&[], "junos.conf");
+        let out = console::strip_ansi_codes(&styled);
         assert!(out.contains("junos.conf: no changes"), "{out}");
         assert!(!out.contains('\n'), "the empty case is one line: {out}");
     }
