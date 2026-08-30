@@ -39,7 +39,18 @@ tracing = "0.1"
 async-trait = "0.1"
 zeroize = { version = "1", features = ["derive"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
-tokio-rustls = { version = "0.26", optional = true }
+# `default-features = false` and the features named explicitly, because
+# tokio-rustls 0.26's own default set includes `aws_lc_rs`, which forwards to
+# `rustls/aws_lc_rs`. Left at its defaults it silently overrides the
+# `default-features = false` on the rustls line above: whichever provider that
+# line asks for, this one adds aws-lc anyway. Today both name the same backend
+# so nothing differs -- but the provider choice was not actually ours, and a
+# future attempt to change it here would have been quietly ignored.
+tokio-rustls = { version = "0.26", optional = true, default-features = false, features = [
+    "logging",
+    "tls12",
+    "aws_lc_rs",
+] }
 webpki-roots = { version = "0.26", optional = true }
 roxmltree = { version = "0.20", optional = true }
 
