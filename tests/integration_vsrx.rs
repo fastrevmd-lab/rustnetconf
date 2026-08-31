@@ -8,7 +8,7 @@
 //!
 //! Run with:
 //! ```sh
-//! RUSTNETCONF_TEST_VSRX_HOST=192.168.1.227:830 \
+//! RUSTNETCONF_TEST_VSRX_HOST=192.168.1.227:22 \
 //!     cargo test --test integration_vsrx
 //! ```
 //!
@@ -26,7 +26,7 @@
 //! `authentication failed`, check with:
 //!
 //! ```sh
-//! ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -p 830 -s netconf@<host> netconf
+//! ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -p 22 -s netconf@<host> netconf
 //! ```
 //!
 //! A NETCONF `<hello>` on stdout means the credentials work. Silence on stdout

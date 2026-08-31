@@ -30,8 +30,8 @@ strict-validation = ["roxmltree"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-russh = { version = "0.62", default-features = false, features = ["flate2", "aws-lc-rs"] }
-aws-lc-rs = { version = "1", default-features = false, features = ["aws-lc-sys"] }
+russh = { version = "0.62", default-features = false, features = ["flate2", "ring"] }
+ring = "0.17"
 base64ct = { version = "1", features = ["std"] }
 quick-xml = "0.42"
 thiserror = "2"
@@ -40,12 +40,17 @@ async-trait = "0.1"
 zeroize = { version = "1", features = ["derive"] }
 rustls = { version = "0.23", optional = true, default-features = false, features = ["std", "tls12", "aws_lc_rs"] }
 # `default-features = false` and the features named explicitly, because
-# tokio-rustls 0.26's own default set includes `aws_lc_rs`, which forwards to
-# `rustls/aws_lc_rs`. Left at its defaults it silently overrides the
-# `default-features = false` on the rustls line above: whichever provider that
-# line asks for, this one adds aws-lc anyway. Today both name the same backend
-# so nothing differs -- but the provider choice was not actually ours, and a
-# future attempt to change it here would have been quietly ignored.
+# Both TLS lines name `aws_lc_rs` deliberately, and both must keep naming the
+# same provider: tokio-rustls 0.26's own default set forwards to
+# `rustls/aws_lc_rs`, so left at its defaults it silently overrides the
+# `default-features = false` above and the provider choice stops being ours.
+#
+# TLS keeps aws-lc while SSH moves to ring, because ring's default provider has
+# neither `X25519MLKEM768` nor `ECDSA_NISTP521_SHA512` -- measured, see
+# `src/transport/tls.rs`. `tls` is a non-default feature, so the common build is
+# ring-only and gets the whole saving; only a caller who opts into
+# NETCONF-over-TLS pays for aws-lc, and they get post-quantum key exchange and
+# P-521 for it.
 tokio-rustls = { version = "0.26", optional = true, default-features = false, features = [
     "logging",
     "tls12",

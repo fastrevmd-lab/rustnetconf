@@ -3,6 +3,31 @@
 //! Connects to a NETCONF device over TLS (default port 6513) and provides
 //! byte-stream read/write access to the TLS socket. Supports both server-only
 //! and mutual TLS authentication.
+//!
+//! # Why TLS keeps aws-lc while SSH moved to ring
+//!
+//! #77 moved this crate off `aws-lc-rs` to drop ~68 MB of vendored C and 2.2 MB
+//! of binary. The SSH transport and `known_hosts` now use `ring`. **TLS does
+//! not**, and the reason is measured rather than assumed:
+//!
+//! | | `ring` | `aws-lc-rs` |
+//! |---|---|---|
+//! | kx groups | X25519, secp256r1, secp384r1 | the same **plus `X25519MLKEM768`** |
+//! | ECDSA P-521 | absent | `ECDSA_NISTP521_SHA512` |
+//!
+//! Moving TLS to ring would silently drop hybrid post-quantum key exchange and
+//! P-521 certificates. Neither is something a tool that talks to network
+//! infrastructure should lose without saying so, and the saving does not justify
+//! it: `tls` is a **non-default** feature, so the ordinary build is ring-only and
+//! already gets the full reduction. Only a caller who opts into
+//! NETCONF-over-TLS links aws-lc, and they get those capabilities for it.
+//!
+//! `aws_lc_provider_keeps_ml_kem_and_p521` asserts the aws-lc side of that
+//! table, so if the provider ever loses either capability the rationale above
+//! fails a test rather than degrading a live handshake. The ring figures were
+//! measured by enumerating both providers; they are quoted here rather than
+//! asserted because rustls is built with only the aws-lc provider feature.
+//!
 
 use async_trait::async_trait;
 use rustls::pki_types::pem::PemObject;
@@ -177,7 +202,18 @@ fn build_client_config(config: &TlsConfig) -> Result<rustls::ClientConfig, Trans
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
 
-    let builder = rustls::ClientConfig::builder().with_root_certificates(root_store);
+    // `builder_with_provider`, not `builder()`. The bare builder infers its
+    // provider from rustls' enabled features, and Cargo unions features across
+    // the graph: with `ring` in the build for SSH and a downstream enabling
+    // default `rustls`/`tokio-rustls`, two providers are compiled in, the bare
+    // builder cannot choose, and it panics before any connection is attempted.
+    // Naming the provider makes the choice ours and unification irrelevant.
+    let builder = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_protocol_versions(rustls::DEFAULT_VERSIONS)
+    .map_err(|e| TransportError::Tls(format!("TLS provider setup failed: {e}")))?
+    .with_root_certificates(root_store);
 
     let mut tls_config =
         if let (Some(cert_path), Some(key_path)) = (&config.client_cert, &config.client_key) {
@@ -301,6 +337,30 @@ impl rustls::client::danger::ServerCertVerifier for DangerousVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The two capabilities that are the reason TLS did not move to ring.
+    ///
+    /// Asserted on the provider this transport actually uses. If aws-lc ever
+    /// loses either, the rationale in the module docs collapses and this fires;
+    /// the ring side of the comparison is not assertable here because rustls is
+    /// built with only the `aws_lc_rs` provider feature, which is deliberate --
+    /// see the manifest.
+    #[test]
+    fn aws_lc_provider_keeps_ml_kem_and_p521() {
+        let aws = rustls::crypto::aws_lc_rs::default_provider();
+
+        let groups = aws.kx_groups.iter().map(|g| g.name()).collect::<Vec<_>>();
+        assert!(
+            groups.contains(&rustls::NamedGroup::X25519MLKEM768),
+            "aws-lc lost hybrid ML-KEM: the TLS provider choice needs rethinking"
+        );
+
+        let schemes = aws.signature_verification_algorithms.supported_schemes();
+        assert!(
+            schemes.contains(&rustls::SignatureScheme::ECDSA_NISTP521_SHA512),
+            "aws-lc lost P-521: the TLS provider choice needs rethinking"
+        );
+    }
 
     #[test]
     fn test_tls_config_defaults() {
