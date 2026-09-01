@@ -24,9 +24,9 @@ Async NETCONF client library, YANG code generation, vendor profiles, connection 
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.16.2](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.16.2)** (quick-xml 0.42; no API change to `rustnetconf`, but a breaking one to `rustnetconf-yang`, which re-exports quick-xml's `Writer`).
-> On crates.io: `rustnetconf` 0.16.2 · `rustnetconf-cli` 0.3.9 · `rustnetconf-yang` 0.3.0.
-> See [What's New in v0.16.2](#whats-new-in-v0162) below.
+> **Latest release — [v0.17.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.17.0)** (SSH moves to the `ring` backend; the default build no longer links aws-lc at all, and is 23.5% smaller).
+> On crates.io: `rustnetconf` 0.17.0 · `rustnetconf-cli` 0.4.0 · `rustnetconf-yang` 0.4.0.
+> See [What's New in v0.17.0](#whats-new-in-v0170) below.
 
 ## Workspace
 
@@ -47,6 +47,52 @@ SSH is present as a *transport for NETCONF*, not as a general-purpose capability
 - Remote shell or command execution
 
 Consumers that need those should use a dedicated SSH crate alongside this one. A native SCP1 client was briefly added and then reverted before it was ever released (#52, reverted by #53) for exactly this reason; issues #47 and #51 were closed as not planned on the same grounds. The round trip is visible in `git log` between v0.13.2 and the next release — it was a deliberate reversal, not an accident.
+
+## What's New in v0.17.0
+
+**The SSH transport moves from `aws-lc-rs` to `ring`; TLS deliberately does not** (#102, part of #77).
+
+The default build now links no aws-lc at all:
+
+```
+$ cargo tree -i aws-lc-rs
+error: package ID specification `aws-lc-rs` did not match any packages
+```
+
+| build | size |
+|---|---|
+| before (aws-lc) | 9,816,520 B |
+| after (ring) | 7,505,472 B |
+| delta | **−2,311,048 B, 23.5% smaller** |
+
+Build artifacts on disk drop from 240 MB of `aws-lc-sys` build directories to ring's 21 MB. The crate count barely moves, 140 → 139 — worth stating plainly, since #77 opened on dependency count: the win is vendored C and binary size, not crate count.
+
+**TLS keeps aws-lc, on purpose.** Both providers were enumerated rather than assumed:
+
+```
+ring    kx groups: X25519, secp256r1, secp384r1
+aws-lc  kx groups: X25519, secp256r1, secp384r1, X25519MLKEM768
+ring    verify:    no ECDSA_NISTP521_SHA512
+aws-lc  verify:    ECDSA_NISTP521_SHA512
+```
+
+Moving TLS to ring would silently drop hybrid post-quantum key exchange and P-521 certificate verification. `tls` is a non-default feature, so the ordinary build is already ring-only and gets the whole reduction; only a caller opting into NETCONF-over-TLS links aws-lc, and they get those capabilities for it.
+
+**Why this is 0.17.0 and not 0.16.3.** No public signature changes. But which cryptographic provider a consumer links, and therefore which algorithms are available to the SSH transport, is not a patch-level detail — a consumer that depended on aws-lc being present in the default graph will no longer find it.
+
+### Interop
+
+Exercised against vSRX 24.4R1.9. Not yet run end-to-end against the lab's SRX345 at 21.2R3-S6.11, which #77 names as the interop condition, so **#77 stays open**. What was measured is that 21.2's SSH algorithm offer is a strict superset of 24.4's — host keys, ciphers and MACs byte-identical, plus group16/group18 — so the intersection ring already negotiates against 24.4 is present in full on 21.2. Evidence, not closure; recorded on #77.
+
+### Also in this release
+
+- **The rustls provider choice is now actually ours** (#100). `tokio-rustls` was left at default features, and tokio-rustls 0.26's `default` includes `aws_lc_rs`, forwarding to `rustls/aws_lc_rs`. That silently overrode the `default-features = false` on the rustls line directly above it. Nothing differed at the time — both named the same backend — which is exactly why it was worth fixing before it bit: a later attempt to change the provider on the rustls line alone would have been ignored. Same hazard as rustpanosmcp#149: what a manifest asks for is not what the graph resolves to.
+- **`argon2` and `blake2` are no longer release candidates** (#101, part of #64). Both reached stable, and `ssh-key`'s requirements were already loose enough to accept them; they were pinned to RCs in the lockfile only. Prerelease crates in the tree: 3 → 1. **`ssh-key` remains at `0.7.0-rc.11`**, so #64 stays open on that one crate.
+- **The CLI drops `colored`** (#99, #77 action 5). Its fourteen call sites in `diff/format.rs` moved to `console::style`, already in the tree via dialoguer — three styling stacks become two. Total crate count is unchanged at 243; the win is one fewer styling API to maintain, not bytes.
+
+### `rustnetconf-cli` 0.4.0 and `rustnetconf-yang` 0.4.0
+
+Both move only because they require `rustnetconf = "0.17.0"` exactly. `rustnetconf-yang` has no functional change in this release; `rustnetconf-cli`'s only change is the styling stack above. Pairing either with `rustnetconf` 0.16.x is not supported.
 
 ## What's New in v0.16.2
 
