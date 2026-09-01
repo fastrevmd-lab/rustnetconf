@@ -93,8 +93,8 @@ impl Entry {
 /// Matches the format produced by `russh::keys::PublicKey::fingerprint(Sha256)`
 /// and by `ssh-keygen -lf`.
 fn fingerprint_from_key_blob_b64(blob_b64: &str) -> Result<String, base64ct::Error> {
-    use aws_lc_rs::digest;
     use base64ct::{Base64, Base64Unpadded, Encoding};
+    use ring::digest;
     let raw = Base64::decode_vec(blob_b64)?;
     let digest = digest::digest(&digest::SHA256, &raw);
     Ok(format!(
@@ -105,10 +105,10 @@ fn fingerprint_from_key_blob_b64(blob_b64: &str) -> Result<String, base64ct::Err
 
 /// Constant-time compare of `HMAC-SHA1(salt, key)` against `expected_mac`.
 fn hashed_host_matches(salt: &[u8], expected_mac: &[u8], key: &[u8]) -> bool {
-    use aws_lc_rs::hmac;
+    use ring::hmac;
     let hmac_key = hmac::Key::new(hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY, salt);
     let computed = hmac::sign(&hmac_key, key);
-    // Length-then-bytewise compare; aws-lc-rs Tag impls AsRef<[u8]>.
+    // Length-then-bytewise compare; ring Tag impls AsRef<[u8]>.
     let computed_bytes = computed.as_ref();
     if computed_bytes.len() != expected_mac.len() {
         return false;

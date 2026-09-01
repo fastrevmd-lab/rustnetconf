@@ -21,7 +21,18 @@
 //!
 //! | Env var | Required | Default | Notes |
 //! |---|---|---|---|
-//! | `RUSTNETCONF_TEST_VSRX_HOST` | yes | — | e.g. `192.168.1.227:830` |
+//! | `RUSTNETCONF_TEST_VSRX_HOST` | yes | — | e.g. `192.168.1.227:22` |
+//!
+//! **Port 22, not 830.** This fleet serves NETCONF as an SSH *subsystem* on 22.
+//! Port 830 is open and authenticates, then returns nothing on stdout — which
+//! reads as a device or transport fault rather than a wrong port, and is what
+//! made an earlier attempt at this suite look credential-blocked. Check with:
+//!
+//! ```sh
+//! ssh -i <key> -o IdentitiesOnly=yes -p 22 -s netconf@<host> netconf
+//! ```
+//!
+//! A working target answers with `<nc:hello ...>` on stdout.
 //! | `RUSTNETCONF_TEST_VSRX_USER` | no | `netconf` | Junos username |
 //! | `RUSTNETCONF_TEST_VSRX_KEY` | no | `$HOME/.ssh/id_ed25519` | SSH private key path |
 //! | `RUSTNETCONF_TEST_VSRX_REQUIRED` | no | unset | `1`/`true`/`yes` — turn every skip into a failure |
@@ -30,10 +41,10 @@
 //!
 //! ```sh
 //! # Run all integration tests against VM114 (CI-tester-vSRX):
-//! RUSTNETCONF_TEST_VSRX_HOST=192.168.1.227:830 cargo test --test integration_vsrx
+//! RUSTNETCONF_TEST_VSRX_HOST=192.168.1.227:22 cargo test --test integration_vsrx
 //!
 //! # Use a different SSH key and user:
-//! RUSTNETCONF_TEST_VSRX_HOST=10.0.0.1:830 \
+//! RUSTNETCONF_TEST_VSRX_HOST=10.0.0.1:22 \
 //!     RUSTNETCONF_TEST_VSRX_USER=netconf \
 //!     RUSTNETCONF_TEST_VSRX_KEY=~/.ssh/netconf_ed25519 \
 //!     cargo test --test integration_vendor_pool
