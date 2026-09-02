@@ -34,7 +34,8 @@
 //!
 //! ## Which models are available?
 //!
-//! The crate **bundles** these IETF models, generated at build time:
+//! The crate **bundles** these IETF models, pregenerated into
+//! `src/generated.rs` and committed:
 //!
 //! - `ietf_interfaces` (from `ietf-interfaces.yang`)
 //! - `ietf_ip` (from `ietf-ip.yang`)
@@ -47,18 +48,28 @@
 //!
 //! ## Using your own YANG models
 //!
-//! Code is generated from the `yang-models/` directory **of this crate**, not
-//! of your project: the build script reads `$CARGO_MANIFEST_DIR/yang-models`,
-//! which resolves to this crate's source in the Cargo registry cache when used
-//! as a dependency. To generate types from custom `.yang` files you must vendor
-//! this crate (e.g. a git/path dependency or fork) and add your models to its
-//! `yang-models/` directory.
+//! Not from your own project's directory. The types ship pregenerated, so
+//! nothing reads your `.yang` files — there is no build script left to read
+//! them with. To generate types from custom models, vendor this crate (a git or
+//! path dependency, or a fork), drop your `.yang` files into its
+//! `yang-models/` directory, and re-run the generator:
+//!
+//! ```sh
+//! cargo run -p rustnetconf-yang --features regenerate --bin codegen
+//! ```
+//!
+//! That is the one path that needs `cmake` and libyang2; building against the
+//! committed types needs neither.
 //!
 //! [`rustnetconf`]: https://docs.rs/rustnetconf
 
 pub mod serialize;
 
-// Re-export generated types when available
-// The build.rs generates code into OUT_DIR, which is included here.
+// Re-export generated types when available.
+//
+// `generated.rs` is committed rather than produced by a build script: libyang2
+// is a ~44 MB C build with a `cmake` prerequisite, and making every consumer pay
+// it to regenerate a file that changes only when `yang-models/` does was a bad
+// trade (#105). Refresh it with the `regenerate` feature; CI fails on drift.
 #[cfg(feature = "generated")]
-include!(concat!(env!("OUT_DIR"), "/yang_generated.rs"));
+include!("generated.rs");

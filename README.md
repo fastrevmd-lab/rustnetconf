@@ -200,6 +200,8 @@ Four gaps closed, each one an operation the module docs already implied existed.
 
 - **`libyang2` bundling is now opt-out** (#81). `rustnetconf-yang` built libyang2 from source unconditionally, costing ~44 MB of build artifacts and making `cmake` a hard prerequisite. `default = ["bundled"]` keeps that behaviour; `--no-default-features` links a system libyang2 via pkg-config instead.
 
+- **YANG generated code is now committed; libyang2 becomes maintainer-only** (#105). The build script that ran libyang2 on every build is deleted. Generated Rust types live committed at `rustnetconf-yang/src/generated.rs` and ship with the published crate. Consumers link no libyang2 and need no cmake. The code generator moved to a bin target gated on a new `regenerate` feature — regenerate with `cargo run -p rustnetconf-yang --features regenerate --bin codegen`. CI runs it and fails on drift, so a stale committed file cannot merge. The `bundled` feature is now inert unless `regenerate` is also enabled; system-libyang is `--no-default-features --features regenerate`.
+
 - **`unsafe_code = "forbid"` is enforced workspace-wide** (#79). The README claimed no unsafe code; a crate-root `#![forbid(unsafe_code)]` does not reach build scripts, examples or integration tests, which are separate crates. It is now a `[workspace.lints]` entry, so the claim is enforced everywhere it was being made.
 
 ## What's New in v0.15.0
@@ -729,7 +731,8 @@ let config = conn.get_config(Datastore::Running).await?;
 - Connection reuse from idle pool
 
 ### YANG Code Generation
-- Build-time generation from `.yang` model files via libyang2
+- Pregenerated Rust types committed at `rustnetconf-yang/src/generated.rs` — no libyang2 or cmake needed to build or use the crate
+- Regeneration via `cargo run -p rustnetconf-yang --features regenerate --bin codegen` when `yang-models/` changes — libyang2 and cmake required only then
 - Typed Rust structs with serde Serialize/Deserialize
 - Full XML serialization — leaves, containers, and lists
 - Correct type mapping (string, bool, uint32, etc.)
@@ -799,7 +802,29 @@ harnesses plus 15 doc-tests:
 
 ### Prerequisites
 
-The `rustnetconf-yang` subcrate builds `libyang2` from source via `yang2`'s `bundled` feature, which requires `cmake`. Install it before running workspace-wide tests or clippy:
+None for building, testing, or using this crate. `rustnetconf-yang` ships
+with pregenerated Rust types committed at
+`rustnetconf-yang/src/generated.rs`, so consumers link no libyang and need
+no cmake:
+
+```bash
+cargo tree -p rustnetconf-yang --features generated -i libyang2-sys   # finds nothing
+cargo test --workspace                                                 # works without cmake
+```
+
+**cmake and libyang2 are needed only to regenerate** — when `yang-models/`
+changes, or when maintaining the crate itself. The generator is now a bin
+target gated on the `regenerate` feature:
+
+```bash
+cargo run -p rustnetconf-yang --features regenerate --bin codegen
+```
+
+This rewrites `rustnetconf-yang/src/generated.rs` and runs rustfmt on it. CI
+has a `yang-codegen-drift` job that re-runs it and fails on any diff, so a
+stale committed file cannot merge.
+
+**Install cmake only if you need to regenerate:**
 
 ```bash
 # Debian/Ubuntu
@@ -812,35 +837,33 @@ brew install cmake
 sudo dnf install cmake
 ```
 
-The core `rustnetconf` and `rustnetconf-cli` crates do not require `cmake`; `cargo test -p rustnetconf` works without it.
-
-`bundled` is a default-on feature of `rustnetconf-yang`, not a hard requirement.
-If you already have libyang2 installed system-wide, opt out and link it instead —
-this skips the source build entirely (~44 MB of build artifacts) and drops the
-`cmake` prerequisite:
+The `bundled` feature, still in `default`, now compiles libyang2 from source
+when regenerating. It is inert unless `regenerate` is also enabled. To use a
+system libyang2 instead (~44 MB of build artifacts saved), opt out:
 
 ```bash
-cargo build -p rustnetconf-yang --no-default-features   # links system libyang
+cargo run -p rustnetconf-yang --no-default-features --features regenerate --bin codegen
 ```
 
 **This path needs a libyang providing `libyang.so.3`** — SONAME 3, not
 SONAME 2. The two are binary-incompatible.
 
-The reason matters: `libyang2-sys` probes for `libyang` with no version
-constraint and falls back to a bare `-lyang`, while the bindings it ships are
-generated against SONAME 3. An ABI-2 library would therefore link without
-complaint and then feed our `build.rs` wrong struct offsets while it walks
-libyang's C types — silent undefined behaviour during code generation rather
-than a build failure.
+The reason still matters, even though the risk is now maintainer-only:
+`libyang2-sys` probes for `libyang` with no version constraint and falls
+back to a bare `-lyang`, while the bindings it ships are generated against
+SONAME 3. An ABI-2 library would therefore link without complaint and then
+feed the generator wrong struct offsets while it walks libyang's C types —
+silent undefined behaviour during code generation rather than a build
+failure.
 
-**We do not verify this for you, and the build says so.** Checking it properly
-means knowing which file `-lyang` actually resolves to, which depends on `-L`
-ordering, symlink targets, platform library naming, and — because a build
-script is a host binary — on host rather than target settings when
-cross-compiling. libyang exposes no runtime soversion accessor through these
-bindings to settle it. A check that guessed and reported "OK" would be worse
-than none, so `build.rs` emits a warning stating the ABI was not verified and
-leaves the responsibility with you.
+**We do not verify this for you, and the build says so.** Checking it
+properly means knowing which file `-lyang` actually resolves to, which
+depends on `-L` ordering, symlink targets, platform library naming, and —
+because the generator is a host binary — on host rather than target settings
+when cross-compiling. libyang exposes no runtime soversion accessor through
+these bindings to settle it. A check that guessed and reported "OK" would be
+worse than none, so the build emits a warning stating the ABI was not
+verified and leaves the responsibility with you.
 
 Check the **soname**, not the package version:
 
@@ -848,22 +871,18 @@ Check the **soname**, not the package version:
 ls $(pkg-config --variable=libdir libyang)/libyang.so.*   # want libyang.so.3
 ```
 
-`pkg-config --modversion libyang` is *not* the right check. libyang carries a
-project version and a soversion that deliberately disagree — the release
-vendored here is `LIBYANG_VERSION 2.2.8` with `LIBYANG_MAJOR_SOVERSION 3`, and
-`libyang.pc` publishes the former. Gating on the package version rejects
+`pkg-config --modversion libyang` is *not* the right check. libyang carries
+a project version and a soversion that deliberately disagree — the release
+vendored here is `LIBYANG_VERSION 2.2.8` with `LIBYANG_MAJOR_SOVERSION 3`,
+and `libyang.pc` publishes the former. Gating on the package version rejects
 exactly the library you want.
 
-Without any system libyang on the linker path, the build fails with
-`unable to find library -lyang`. That and the explicit ABI error are both
-expected outcomes — install a libyang providing SONAME 3, or keep the default.
-
-Note that `yang2` is a **build-dependency**: it runs `build.rs` code generation
-and is not linked into anything that depends on `rustnetconf-yang`, so it never
-appears in a consumer's runtime dependency graph.
+Without any system libyang on the linker path, the build fails with `unable
+to find library -lyang`. That and the explicit ABI error are both expected
+outcomes — install a libyang providing SONAME 3, or stay on `bundled`.
 
 ```bash
-cargo test --workspace                    # Run all tests (requires cmake)
+cargo test --workspace                    # Run all tests (no cmake needed)
 cargo test --test integration_vsrx        # Run vSRX integration tests only
 SKIP_INTEGRATION=1 cargo test             # Skip tests requiring a device
 ```
