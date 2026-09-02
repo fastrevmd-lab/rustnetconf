@@ -48,11 +48,11 @@
 //!
 //! ## Using your own YANG models
 //!
-//! You cannot. The types ship pregenerated, so nothing reads your project's
-//! `.yang` files — there is no build script left to read them with. To generate
-//! types from custom models you must vendor this crate (a git or path
-//! dependency, or a fork), drop your `.yang` files into its `yang-models/`
-//! directory, and re-run the generator:
+//! Not from your own project's directory. The types ship pregenerated, so
+//! nothing reads your `.yang` files — there is no build script left to read
+//! them with. To generate types from custom models, vendor this crate (a git or
+//! path dependency, or a fork), drop your `.yang` files into its
+//! `yang-models/` directory, and re-run the generator:
 //!
 //! ```sh
 //! cargo run -p rustnetconf-yang --features regenerate --bin codegen
