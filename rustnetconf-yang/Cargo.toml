@@ -11,11 +11,19 @@ categories = ["network-programming"]
 
 [features]
 default = ["bundled"]
+# The generated model types. Free since #105: `src/generated.rs` is committed,
+# so enabling this compiles ~440 lines of ordinary Rust and pulls in no C.
 generated = []
-# Compile libyang2 from source. Costs ~44 MB of build artifacts and makes
-# `cmake` a hard prerequisite, so it is opt-out: build with
-# `--no-default-features` to link a system libyang2 via pkg-config instead.
-bundled = ["yang2/bundled"]
+# Maintainer-only. Rebuilds `src/generated.rs` from `yang-models/` with
+# libyang2, which is the only thing in this crate that needs `cmake` or a
+# system libyang. Consumers never enable it:
+#   cargo run -p rustnetconf-yang --features regenerate --bin codegen
+regenerate = ["dep:yang2"]
+# Compile libyang2 from source rather than linking a system one via pkg-config.
+# Costs ~44 MB of build artifacts and makes `cmake` a prerequisite, so it is
+# opt-out: add `--no-default-features` to link a system libyang2 instead. Inert
+# without `regenerate` — the `?` keeps it from pulling `yang2` back in.
+bundled = ["yang2?/bundled"]
 
 [dependencies]
 rustnetconf = { version = "0.17.0", path = ".." }
@@ -23,11 +31,16 @@ serde = { version = "1", features = ["derive"] }
 quick-xml = "0.42"
 thiserror = "2"
 
+# Only reachable through `regenerate`; see the feature comment above.
+yang2 = { version = "0.18", optional = true }
+
 [dev-dependencies]
 serde_json = "1"
 
-[build-dependencies]
-yang2 = "0.18"
+[[bin]]
+name = "codegen"
+path = "src/bin/codegen.rs"
+required-features = ["regenerate"]
 
 [lints]
 workspace = true

@@ -1,10 +1,27 @@
-//! Build script: generates Rust structs from YANG models using libyang2.
+//! Regenerates `src/generated.rs` from the YANG models in `yang-models/`.
+//!
+//! This used to be a build script, which meant every consumer of
+//! `rustnetconf-yang` compiled libyang2 — ~44 MB of build artifacts and a hard
+//! `cmake` prerequisite — to produce a file that is 436 lines of ordinary Rust
+//! and changes only when `yang-models/` does. The generated code is now
+//! committed and included directly, so libyang2 is a maintainer's tool rather
+//! than a consumer's dependency (#105).
+//!
+//! Run it after editing anything under `yang-models/`:
+//!
+//! ```sh
+//! cargo run -p rustnetconf-yang --features regenerate --bin codegen
+//! ```
+//!
+//! CI re-runs this and fails on a dirty tree, so a stale `src/generated.rs`
+//! cannot merge.
 
 use std::collections::HashSet;
 use std::env;
 use std::fmt::Write as FmtWrite;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use yang2::context::{Context, ContextFlags};
 use yang2::schema::{DataValueType, SchemaNode, SchemaNodeKind};
@@ -15,25 +32,25 @@ use yang2::schema::{DataValueType, SchemaNode, SchemaNodeKind};
 /// `libyang2-sys` 0.9.0 probes with a bare `probe("libyang")` and falls back to
 /// `-lyang`, neither of which constrains the version, while the bindings it
 /// ships target `LIBYANG_MAJOR_SOVERSION 3`. An ABI-2 libyang links cleanly and
-/// then hands this build script wrong struct offsets as it walks `Context` and
+/// then hands this generator wrong struct offsets as it walks `Context` and
 /// `SchemaNode` — silent UB at codegen time rather than a link error.
 ///
 /// Deliberately a warning and nothing more. Verifying this properly means
 /// knowing which file `-lyang` actually resolves to, which depends on `-L`
-/// ordering, symlink targets, platform naming (`.so.3` vs `.3.dylib`), and —
-/// because a build script is a *host* binary — on host rather than target
-/// pkg-config settings when cross-compiling. Earlier drafts of this check got
-/// each of those wrong in turn. libyang exposes no runtime soversion accessor
-/// through these bindings to settle it, so any check here is a guess, and a
-/// guess that reports "OK" is worse than no check: it manufactures confidence
-/// about memory-safety-relevant layout.
+/// ordering, symlink targets, and platform naming (`.so.3` vs `.3.dylib`).
+/// Earlier drafts of this check got each of those wrong in turn. libyang
+/// exposes no runtime soversion accessor through these bindings to settle it,
+/// so any check here is a guess, and a guess that reports "OK" is worse than no
+/// check: it manufactures confidence about memory-safety-relevant layout.
 ///
 /// The honest contract is therefore: this path is opt-in, the ABI requirement
-/// is documented, and the build says out loud that it did not check.
+/// is documented, and the generator says out loud that it did not check. Since
+/// #105 this is a maintainer-only risk — a consumer of the crate never links
+/// libyang at all.
 #[cfg(not(feature = "bundled"))]
 fn warn_system_libyang_abi_unverified() {
-    println!(
-        "cargo:warning=rustnetconf-yang: building against a system libyang; its ABI is NOT \
+    eprintln!(
+        "warning: rustnetconf-yang: building against a system libyang; its ABI is NOT \
          verified. libyang2-sys ships bindings for soname 3, and an soname-2 library will \
          link successfully and then be misread during code generation. Confirm with \
          `ls $(pkg-config --variable=libdir libyang)/libyang.so.*` that you have \
@@ -42,29 +59,55 @@ fn warn_system_libyang_abi_unverified() {
     );
 }
 
+/// Format the generated file in place with the same `rustfmt` that
+/// `cargo fmt --all -- --check` will judge it by.
+///
+/// Without this the committed file is whatever the string-building below
+/// happens to emit, `cargo fmt --check` fails on it in CI, and formatting it by
+/// hand makes the drift check below report a spurious diff on every run.
+fn format_in_place(path: &Path) {
+    match Command::new("rustfmt")
+        .arg("--edition")
+        .arg("2021")
+        .arg(path)
+        .status()
+    {
+        Ok(status) if status.success() => {}
+        Ok(status) => panic!("rustfmt failed on {} with {status}", path.display()),
+        Err(e) => panic!(
+            "could not run rustfmt on {} ({e}). Install it with `rustup component add rustfmt`.",
+            path.display()
+        ),
+    }
+}
+
 fn main() {
     #[cfg(not(feature = "bundled"))]
     warn_system_libyang_abi_unverified();
 
-    let yang_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("yang-models");
-    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let output_file = out_dir.join("yang_generated.rs");
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    let yang_dir = manifest_dir.join("yang-models");
+    let output_file = manifest_dir.join("src").join("generated.rs");
 
-    println!("cargo:rerun-if-changed={}", yang_dir.display());
+    assert!(
+        yang_dir.exists(),
+        "no yang-models/ directory at {}",
+        yang_dir.display()
+    );
 
-    if !yang_dir.exists() {
-        fs::write(&output_file, "// No yang-models/ directory found.\n").unwrap();
-        return;
-    }
-
-    // Collect .yang filenames (just the module names, not full paths)
-    let yang_files: Vec<(String, Option<String>)> = fs::read_dir(&yang_dir)
+    // Collect .yang filenames (just the module names, not full paths).
+    //
+    // Sorted below, because `read_dir` yields in filesystem order and libyang
+    // returns modules from `ctx.modules()` in the order they were loaded. Left
+    // unsorted, the same models generate the same code in a different order on
+    // a different filesystem, and CI's drift check fails on a checkout that is
+    // in fact correct.
+    let mut yang_files: Vec<(String, Option<String>)> = fs::read_dir(&yang_dir)
         .unwrap()
         .filter_map(|entry| {
             let entry = entry.ok()?;
             let path = entry.path();
             if path.extension().map(|e| e == "yang").unwrap_or(false) {
-                println!("cargo:rerun-if-changed={}", path.display());
                 let stem = path.file_stem()?.to_str()?.to_string();
                 // Parse "module-name@revision" format
                 if let Some((name, rev)) = stem.split_once('@') {
@@ -77,11 +120,13 @@ fn main() {
             }
         })
         .collect();
+    yang_files.sort();
 
-    if yang_files.is_empty() {
-        fs::write(&output_file, "// No YANG models found in yang-models/\n").unwrap();
-        return;
-    }
+    assert!(
+        !yang_files.is_empty(),
+        "no YANG models found in {}",
+        yang_dir.display()
+    );
 
     // Create libyang2 context with search path
     let mut ctx =
@@ -96,12 +141,12 @@ fn main() {
     for (name, revision) in &yang_files {
         match ctx.load_module(name, revision.as_deref(), &[]) {
             Ok(_module) => {
-                println!("cargo:warning=Loaded YANG module: {name}");
+                eprintln!("Loaded YANG module: {name}");
                 module_names.push(name.clone());
             }
             Err(e) => {
                 let msg = format!("Failed to load YANG module '{name}': {e}");
-                println!("cargo:warning={msg}");
+                eprintln!("{msg}");
                 load_errors.push(msg);
             }
         }
@@ -117,7 +162,11 @@ fn main() {
     // Generate Rust code
     let mut output = String::new();
     writeln!(output, "// Auto-generated from YANG models. Do not edit.").unwrap();
-    writeln!(output, "// Generated by rustnetconf-yang build.rs").unwrap();
+    writeln!(
+        output,
+        "// Regenerate with: cargo run -p rustnetconf-yang --features regenerate --bin codegen"
+    )
+    .unwrap();
     writeln!(output).unwrap();
     writeln!(output, "use serde::{{Serialize, Deserialize}};").unwrap();
     writeln!(output).unwrap();
@@ -155,10 +204,8 @@ fn main() {
     }
 
     fs::write(&output_file, &output).unwrap();
-    eprintln!(
-        "cargo:warning=Generated YANG types to {}",
-        output_file.display()
-    );
+    format_in_place(&output_file);
+    eprintln!("Generated YANG types to {}", output_file.display());
 }
 
 /// Generate a Rust struct for a YANG container or list node.
