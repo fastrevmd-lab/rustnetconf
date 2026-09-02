@@ -17,7 +17,6 @@
 //! cannot merge.
 
 use std::collections::HashSet;
-use std::env;
 use std::fmt::Write as FmtWrite;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -85,7 +84,13 @@ fn main() {
     #[cfg(not(feature = "bundled"))]
     warn_system_libyang_abi_unverified();
 
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
+    // `env!`, not `env::var`. As a build script this read `CARGO_MANIFEST_DIR`
+    // from the environment, which Cargo always set; a bin only gets it under
+    // `cargo run`, so a maintainer invoking `target/debug/codegen` directly hit
+    // a bare `NotPresent` panic. The manifest directory is a compile-time
+    // constant for this crate anyway, and it is the crate's own source tree we
+    // want to write into regardless of where the binary is launched from.
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let yang_dir = manifest_dir.join("yang-models");
     let output_file = manifest_dir.join("src").join("generated.rs");
 
