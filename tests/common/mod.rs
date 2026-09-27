@@ -21,7 +21,7 @@
 //!
 //! | Env var | Required | Default | Notes |
 //! |---|---|---|---|
-//! | `RUSTNETCONF_TEST_VSRX_HOST` | yes | — | e.g. `192.168.1.227:22` |
+//! | `RUSTNETCONF_TEST_VSRX_HOST` | yes | — | e.g. `192.0.2.227:22` |
 //!
 //! **Port 22, not 830.** This fleet serves NETCONF as an SSH *subsystem* on 22.
 //! Port 830 is open and authenticates, then returns nothing on stdout — which
@@ -41,7 +41,7 @@
 //!
 //! ```sh
 //! # Run all integration tests against VM114 (CI-tester-vSRX):
-//! RUSTNETCONF_TEST_VSRX_HOST=192.168.1.227:22 cargo test --test integration_vsrx
+//! RUSTNETCONF_TEST_VSRX_HOST=192.0.2.227:22 cargo test --test integration_vsrx
 //!
 //! # Use a different SSH key and user:
 //! RUSTNETCONF_TEST_VSRX_HOST=10.0.0.1:22 \
@@ -125,7 +125,7 @@ pub fn vsrx_target() -> Option<VsrxTarget> {
         std::env::var("RUSTNETCONF_TEST_VSRX_USER").unwrap_or_else(|_| "netconf".to_string());
     let key_path = expand_tilde(
         &std::env::var("RUSTNETCONF_TEST_VSRX_KEY").unwrap_or_else(|_| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/mharman".to_string());
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/home/user".to_string());
             format!("{home}/.ssh/id_ed25519")
         }),
     );
