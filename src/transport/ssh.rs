@@ -108,6 +108,45 @@ pub enum HostKeyVerification {
     /// `@cert-authority` lines are silently skipped (SSH host certs not yet
     /// supported).
     KnownHosts(std::path::PathBuf),
+
+    /// Trust-on-first-use (TOFU): validate against a `known_hosts` file, and
+    /// automatically pin (append) an unknown host's key on first contact,
+    /// following OpenSSH's `StrictHostKeyChecking=accept-new`.
+    ///
+    /// - Unknown host → the key is accepted **and appended** to
+    ///   `known_hosts` (file created at mode `0600` if it doesn't already
+    ///   exist). A `warn`-level log records the host and fingerprint being
+    ///   pinned.
+    /// - Known host, **same** key → accepted, silently.
+    /// - Known host, **different** key → rejected with
+    ///   [`TransportError::HostKeyMismatch`] (possible MITM or a rotated
+    ///   key the operator hasn't re-pinned) — the file is left unchanged.
+    /// - `@revoked` entry matching the presented key → rejected with
+    ///   [`TransportError::HostKeyRevoked`], even if a non-revoked match
+    ///   also exists.
+    ///
+    /// **TOFU risk:** the *first* connection to a given host is
+    /// unauthenticated — there is nothing on file yet to check the
+    /// presented key against, so an attacker positioned as a MITM on that
+    /// first connection can plant their own key and it will be pinned as
+    /// if legitimate. Every connection *after* the first is then protected
+    /// exactly like [`Self::KnownHosts`]. Prefer this for auto-provisioning
+    /// or bulk fleet enrollment where nobody is verifying each device's
+    /// fingerprint out of band before the first connection; prefer
+    /// [`Self::Fingerprint`] or a pre-populated [`Self::KnownHosts`] file
+    /// when that risk isn't acceptable.
+    ///
+    /// Reuses [`Self::KnownHosts`]'s file format and lookup semantics
+    /// (hashed entries, `[host]:port`, wildcards, `@revoked`) — only the
+    /// "no entry found" outcome differs: pin-and-append instead of fail
+    /// closed. New entries are written in plain (unhashed) `[host]:port
+    /// keytype base64` form (or bare `host` for the default port 22),
+    /// regardless of whether other entries in the file are hashed.
+    AcceptNew {
+        /// Path to the `known_hosts` file to check and, on first contact
+        /// with an unknown host, append to.
+        known_hosts: std::path::PathBuf,
+    },
 }
 
 /// Configuration for establishing an SSH transport.
@@ -234,52 +273,51 @@ impl client::Handler for SshHandler {
                 false
             }
             HostKeyVerification::KnownHosts(path) => {
-                match crate::transport::known_hosts::lookup(
+                match evaluate_known_hosts_policy(
                     path,
                     &self.host,
                     self.port,
+                    server_public_key,
                     &fingerprint,
+                    false,
                 ) {
-                    Ok(outcome) => {
-                        let res = known_hosts_outcome_to_result(
-                            outcome,
-                            &self.host,
-                            self.port,
-                            path,
-                            &fingerprint,
+                    Ok(()) => {
+                        tracing::debug!(
+                            file = %path.display(),
+                            "SSH host key verified via known_hosts"
                         );
-                        match res {
-                            Ok(()) => {
-                                tracing::debug!(
-                                    file = %path.display(),
-                                    "SSH host key verified via known_hosts"
-                                );
-                                true
-                            }
-                            Err(err) => {
-                                tracing::error!(
-                                    file = %path.display(),
-                                    host = %self.host,
-                                    error = %err,
-                                    "SSH host key rejected by known_hosts policy"
-                                );
-                                self.error_slot.set(err);
-                                false
-                            }
-                        }
+                        true
                     }
                     Err(err) => {
-                        // I/O or unrecoverable error reading the file.
-                        let transport_err = TransportError::Io(std::io::Error::other(format!(
-                            "known_hosts file {path}: {err}",
-                            path = path.display()
-                        )));
                         tracing::error!(
                             file = %path.display(),
+                            host = %self.host,
                             error = %err,
-                            "could not read known_hosts file — failing closed"
+                            "SSH host key rejected by known_hosts policy"
                         );
-                        self.error_slot.set(transport_err);
+                        self.error_slot.set(err);
+                        false
+                    }
+                }
+            }
+            HostKeyVerification::AcceptNew { known_hosts: path } => {
+                match evaluate_known_hosts_policy(
+                    path,
+                    &self.host,
+                    self.port,
+                    server_public_key,
+                    &fingerprint,
+                    true,
+                ) {
+                    Ok(()) => true,
+                    Err(err) => {
+                        tracing::error!(
+                            file = %path.display(),
+                            host = %self.host,
+                            error = %err,
+                            "SSH host key rejected by known_hosts (accept-new) policy"
+                        );
+                        self.error_slot.set(err);
                         false
                     }
                 }
@@ -318,6 +356,81 @@ fn known_hosts_outcome_to_result(
     }
 }
 
+/// Evaluate the `KnownHosts` / `AcceptNew` policy for `host:port` against
+/// `path`, returning `Ok(())` to accept the connection or a structured
+/// [`TransportError`] to reject it.
+///
+/// When `accept_new` is `true` and the host has no matching entry
+/// ([`crate::transport::known_hosts::LookupOutcome::NotFound`]), the
+/// presented key is pinned: appended to `path` (created at mode `0600` if
+/// absent) and a `warn`-level log records the first-contact host and
+/// fingerprint. This is the *only* behavioral difference from strict
+/// `KnownHosts`, which fails closed with
+/// [`TransportError::HostKeyNotInKnownHosts`] on the same outcome — a
+/// mismatched or `@revoked` key is rejected identically either way.
+fn evaluate_known_hosts_policy(
+    path: &Path,
+    host: &str,
+    port: u16,
+    server_public_key: &keys::PublicKey,
+    fingerprint: &str,
+    accept_new: bool,
+) -> Result<(), TransportError> {
+    use crate::transport::known_hosts::{KnownHostsError, LookupOutcome};
+
+    let outcome = match crate::transport::known_hosts::lookup(path, host, port, fingerprint) {
+        Ok(outcome) => outcome,
+        // A known_hosts file that doesn't exist yet is the common case for
+        // AcceptNew's very first pin ever (nothing has been provisioned).
+        // Treat it as "no entry" rather than a read failure so the pin path
+        // below creates the file; any other I/O error (e.g. permission
+        // denied on an existing file) still fails closed.
+        Err(KnownHostsError::Io(io_err))
+            if accept_new && io_err.kind() == std::io::ErrorKind::NotFound =>
+        {
+            LookupOutcome::NotFound
+        }
+        Err(err) => {
+            return Err(TransportError::Io(std::io::Error::other(format!(
+                "known_hosts file {path}: {err}",
+                path = path.display()
+            ))));
+        }
+    };
+
+    if accept_new && outcome == LookupOutcome::NotFound {
+        use keys::PublicKeyBase64;
+        let key_type = server_public_key.algorithm().to_string();
+        let key_blob_b64 = server_public_key.public_key_base64();
+
+        tracing::warn!(
+            host,
+            port,
+            fingerprint,
+            file = %path.display(),
+            "pinning new SSH host key on first contact (trust-on-first-use) — \
+             this connection was unauthenticated up to this point; verify the \
+             fingerprint out of band if possible"
+        );
+
+        return crate::transport::known_hosts::pin_new_host_key(
+            path,
+            host,
+            port,
+            &key_type,
+            &key_blob_b64,
+        )
+        .map_err(|err| {
+            TransportError::Io(std::io::Error::other(format!(
+                "failed to pin new SSH host key to known_hosts file {path}: {err}",
+                path = path.display()
+            )))
+        });
+    }
+
+    known_hosts_outcome_to_result(outcome, host, port, path, fingerprint)
+}
+
 /// Decide whether an SSH host key with the given SHA-256 fingerprint should
 /// be accepted under `policy`.
 ///
@@ -330,6 +443,7 @@ fn known_hosts_outcome_to_result(
 fn evaluate_host_key_policy(policy: &HostKeyVerification, actual_fingerprint: &str) -> bool {
     match policy {
         HostKeyVerification::KnownHosts(_) => false,
+        HostKeyVerification::AcceptNew { .. } => false,
         HostKeyVerification::AcceptAll => true,
         HostKeyVerification::RejectAll => false,
         HostKeyVerification::Fingerprint(expected) => {
@@ -1164,5 +1278,180 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, TransportError::HostKeyRevoked { host } if host == "device-a.lab"));
+    }
+
+    // ───────── evaluate_known_hosts_policy() — AcceptNew end-to-end ─────────
+    //
+    // Exercises the actual dispatch used by both `KnownHosts` and
+    // `AcceptNew`, with real `keys::PublicKey` values (not just fingerprint
+    // strings), against real temp-file known_hosts state.
+
+    /// Generate a throwaway ed25519 keypair for test fixtures.
+    fn test_public_key() -> keys::PublicKey {
+        let mut rng = keys::key::safe_rng();
+        let private =
+            keys::PrivateKey::random(&mut rng, keys::Algorithm::Ed25519).expect("ed25519 keygen");
+        private.public_key().clone()
+    }
+
+    fn known_hosts_line(host: &str, port: u16, key: &keys::PublicKey) -> String {
+        use keys::PublicKeyBase64;
+        let host_field = if port == 22 {
+            host.to_string()
+        } else {
+            format!("[{host}]:{port}")
+        };
+        format!(
+            "{host_field} {} {}",
+            key.algorithm(),
+            key.public_key_base64()
+        )
+    }
+
+    #[test]
+    fn accept_new_unknown_host_is_accepted_and_appended() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let key = test_public_key();
+        let fp = key.fingerprint(keys::HashAlg::Sha256).to_string();
+
+        let res = evaluate_known_hosts_policy(&path, "device-a.lab", 22, &key, &fp, true);
+        assert!(res.is_ok(), "unknown host must be accepted: {res:?}");
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents.lines().count(), 1);
+        assert_eq!(
+            contents.trim_end(),
+            known_hosts_line("device-a.lab", 22, &key)
+        );
+    }
+
+    #[test]
+    fn accept_new_missing_file_is_created_mode_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        assert!(!path.exists());
+        let key = test_public_key();
+        let fp = key.fingerprint(keys::HashAlg::Sha256).to_string();
+
+        evaluate_known_hosts_policy(&path, "device-a.lab", 22, &key, &fp, true).unwrap();
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+    }
+
+    #[test]
+    fn accept_new_matching_key_is_accepted_no_duplicate_line() {
+        let key = test_public_key();
+        let line = known_hosts_line("device-a.lab", 22, &key);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+
+        let fp = key.fingerprint(keys::HashAlg::Sha256).to_string();
+        let res = evaluate_known_hosts_policy(&path, "device-a.lab", 22, &key, &fp, true);
+        assert!(res.is_ok(), "matching key must be accepted: {res:?}");
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents.lines().count(),
+            1,
+            "matching key must not be re-appended as a duplicate: {contents:?}"
+        );
+    }
+
+    #[test]
+    fn accept_new_mismatched_key_is_rejected_file_unchanged() {
+        let on_file_key = test_public_key();
+        let presented_key = test_public_key();
+        let line = known_hosts_line("device-a.lab", 22, &on_file_key);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+        let original_contents = std::fs::read_to_string(&path).unwrap();
+
+        let presented_fp = presented_key.fingerprint(keys::HashAlg::Sha256).to_string();
+        let res = evaluate_known_hosts_policy(
+            &path,
+            "device-a.lab",
+            22,
+            &presented_key,
+            &presented_fp,
+            true,
+        );
+
+        match res {
+            Err(TransportError::HostKeyMismatch { host, .. }) => {
+                assert_eq!(host, "device-a.lab");
+            }
+            other => panic!("expected HostKeyMismatch, got {other:?}"),
+        }
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents, original_contents,
+            "file must be unchanged on a mismatched key"
+        );
+    }
+
+    #[test]
+    fn accept_new_revoked_key_is_rejected_even_though_unmatched_otherwise() {
+        let key = test_public_key();
+        use keys::PublicKeyBase64;
+        let line = format!(
+            "@revoked device-a.lab {} {}",
+            key.algorithm(),
+            key.public_key_base64()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        std::fs::write(&path, format!("{line}\n")).unwrap();
+
+        let fp = key.fingerprint(keys::HashAlg::Sha256).to_string();
+        let res = evaluate_known_hosts_policy(&path, "device-a.lab", 22, &key, &fp, true);
+        assert!(
+            matches!(res, Err(TransportError::HostKeyRevoked { .. })),
+            "expected HostKeyRevoked, got {res:?}"
+        );
+    }
+
+    #[test]
+    fn known_hosts_strict_mode_still_fails_closed_on_missing_file() {
+        // accept_new = false is what backs plain `KnownHosts` — make sure the
+        // shared "missing file" carve-out added for AcceptNew didn't
+        // accidentally make strict mode permissive too. A missing file
+        // surfaces as an I/O error (existing `lookup()` behavior, unchanged
+        // here), and strict mode must never create it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let key = test_public_key();
+        let fp = key.fingerprint(keys::HashAlg::Sha256).to_string();
+
+        let res = evaluate_known_hosts_policy(&path, "device-a.lab", 22, &key, &fp, false);
+        assert!(
+            matches!(res, Err(TransportError::Io(_))),
+            "expected Io error, got {res:?}"
+        );
+        assert!(!path.exists(), "strict KnownHosts must not create the file");
+    }
+
+    #[test]
+    fn known_hosts_strict_mode_fails_closed_on_unknown_host_in_existing_file() {
+        // With the file present but no entry for this host, strict mode must
+        // reject with the structured HostKeyNotInKnownHosts error.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        std::fs::write(&path, "").unwrap();
+        let key = test_public_key();
+        let fp = key.fingerprint(keys::HashAlg::Sha256).to_string();
+
+        let res = evaluate_known_hosts_policy(&path, "device-a.lab", 22, &key, &fp, false);
+        assert!(
+            matches!(res, Err(TransportError::HostKeyNotInKnownHosts { .. })),
+            "expected HostKeyNotInKnownHosts, got {res:?}"
+        );
     }
 }
