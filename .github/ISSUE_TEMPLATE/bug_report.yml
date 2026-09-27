@@ -40,7 +40,7 @@ body:
     id: logs
     attributes:
       label: Relevant log output
-      description: Sanitized `tracing` output or error text, if any
+      description: Sanitized `tracing` output or error text, if any. Debug/trace logs can contain full config payloads, including password hashes and keys — redact before pasting.
       render: shell
     validations:
       required: false
