@@ -8,7 +8,7 @@
 //!
 //! Run with:
 //! ```sh
-//! RUSTNETCONF_TEST_VSRX_HOST=192.168.1.227:22 \
+//! RUSTNETCONF_TEST_VSRX_HOST=192.0.2.227:22 \
 //!     cargo test --test integration_vsrx
 //! ```
 //!

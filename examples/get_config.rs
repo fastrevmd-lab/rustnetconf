@@ -4,7 +4,7 @@
 //!   cargo run --example get_config -- <host> <username> [--password <pass>] [--key <path>] [--filter <xml>]
 //!
 //! Examples:
-//!   cargo run --example get_config -- 192.168.1.226 admin --key ~/.ssh/id_ed25519
+//!   cargo run --example get_config -- 192.0.2.226 admin --key ~/.ssh/id_ed25519
 //!   cargo run --example get_config -- 10.0.0.1:830 admin --password secret
 //!   cargo run --example get_config -- 10.0.0.1 admin --key ~/.ssh/id_ed25519 --filter "<configuration><system><host-name/></system></configuration>"
 
