@@ -4,7 +4,7 @@
 //!   cargo run --example edit_config -- <host> <username> --key <path> --config <xml>
 //!
 //! Examples:
-//!   cargo run --example edit_config -- 192.168.1.226 admin --key ~/.ssh/id_ed25519 \
+//!   cargo run --example edit_config -- 192.0.2.226 admin --key ~/.ssh/id_ed25519 \
 //!     --config "<configuration><system><location><building>Lab-A</building></location></system></configuration>"
 
 use rustnetconf::{Client, Datastore, DefaultOperation};

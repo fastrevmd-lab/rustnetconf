@@ -3,8 +3,8 @@
 This document describes the internal architecture of rustnetconf. It serves as the implementation guide and contributor reference.
 
 **Design docs:**
-- v0.1: `~/.gstack/projects/rustnetconf/mharman-main-design-20260319-130037.md`
-- v0.2: `~/.gstack/projects/rustnetconf/mharman-main-design-20260319-170927.md`
+- v0.1: `~/.gstack/projects/rustnetconf/author-main-design-20260319-130037.md`
+- v0.2: `~/.gstack/projects/rustnetconf/author-main-design-20260319-170927.md`
 
 ## System Overview
 
