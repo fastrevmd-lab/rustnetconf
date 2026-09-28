@@ -400,6 +400,20 @@ fn evaluate_known_hosts_policy(
 
     if accept_new && outcome == LookupOutcome::NotFound {
         use keys::PublicKeyBase64;
+
+        // `host` can come from untrusted input on paths that don't resolve
+        // it locally (jump-host direct-tcpip, ProxyCommand). A host field
+        // with whitespace, commas, or glob characters could turn one pin
+        // into an extra known_hosts line, a multi-host entry, or a wildcard
+        // pattern pinned to whatever key is presented. Fail closed instead
+        // of writing it.
+        if !crate::transport::known_hosts::is_pinnable_host(host) {
+            return Err(TransportError::Connect(format!(
+                "refusing to pin known_hosts entry: host {host:?} is not a plain hostname or \
+                 IP literal"
+            )));
+        }
+
         let key_type = server_public_key.algorithm().to_string();
         let key_blob_b64 = server_public_key.public_key_base64();
 
@@ -413,19 +427,32 @@ fn evaluate_known_hosts_policy(
              fingerprint out of band if possible"
         );
 
-        return crate::transport::known_hosts::pin_new_host_key(
-            path,
-            host,
-            port,
-            &key_type,
-            &key_blob_b64,
-        )
-        .map_err(|err| {
-            TransportError::Io(std::io::Error::other(format!(
-                "failed to pin new SSH host key to known_hosts file {path}: {err}",
+        crate::transport::known_hosts::pin_new_host_key(path, host, port, &key_type, &key_blob_b64)
+            .map_err(|err| {
+                TransportError::Io(std::io::Error::other(format!(
+                    "failed to pin new SSH host key to known_hosts file {path}: {err}",
+                    path = path.display()
+                )))
+            })?;
+
+        // Defense in depth: re-read the file we just wrote and require that
+        // it now reports a match. This catches any pin-corruption bug (not
+        // just the trailing-newline case fixed above) by refusing to trust
+        // our own write blindly — if the file doesn't parse back to a
+        // match, fail closed rather than silently letting a broken pin
+        // through as an accepted connection.
+        return match crate::transport::known_hosts::lookup(path, host, port, fingerprint) {
+            Ok(LookupOutcome::Match) => Ok(()),
+            Ok(other) => Err(TransportError::Io(std::io::Error::other(format!(
+                "known_hosts file {path} did not verify the key just pinned for {host} \
+                 (got {other:?}) — refusing to trust a possibly-corrupted pin",
                 path = path.display()
-            )))
-        });
+            )))),
+            Err(err) => Err(TransportError::Io(std::io::Error::other(format!(
+                "failed to re-verify pinned SSH host key in known_hosts file {path}: {err}",
+                path = path.display()
+            )))),
+        };
     }
 
     known_hosts_outcome_to_result(outcome, host, port, path, fingerprint)
@@ -1394,6 +1421,28 @@ mod tests {
         assert_eq!(
             contents, original_contents,
             "file must be unchanged on a mismatched key"
+        );
+    }
+
+    #[test]
+    fn accept_new_unpinnable_host_is_rejected_file_left_untouched() {
+        // F2 regression: a host string that isn't a plain hostname/IP
+        // literal must never be written to known_hosts — it could inject
+        // an extra line, a multi-host entry, or a wildcard pattern.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let key = test_public_key();
+        let fp = key.fingerprint(keys::HashAlg::Sha256).to_string();
+
+        let res =
+            evaluate_known_hosts_policy(&path, "a.lab\n* ssh-ed25519 AAAA", 22, &key, &fp, true);
+        assert!(
+            matches!(res, Err(TransportError::Connect(_))),
+            "expected Connect error for an unpinnable host, got {res:?}"
+        );
+        assert!(
+            !path.exists(),
+            "known_hosts file must not be created for a rejected host"
         );
     }
 
