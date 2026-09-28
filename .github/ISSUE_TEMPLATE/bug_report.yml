@@ -1,0 +1,46 @@
+name: Bug report
+description: Report something that isn't working as expected
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. If this is a security vulnerability, please use "Report a vulnerability" below instead — do not file it here.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Crate version (or commit SHA) you're using
+      placeholder: "0.17.0"
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal code or CLI invocation that reproduces the issue. Please sanitize any device output — no real hostnames, credentials, or serials.
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Rust version (`rustc --version`), OS, and target device platform/version if relevant
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log output
+      description: Sanitized `tracing` output or error text, if any. Debug/trace logs can contain full config payloads, including password hashes and keys — redact before pasting.
+      render: shell
+    validations:
+      required: false
