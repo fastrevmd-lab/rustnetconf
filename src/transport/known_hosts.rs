@@ -456,6 +456,91 @@ pub(crate) fn lookup(
     })
 }
 
+/// Append a newly-seen host key to `path`, creating the file at mode
+/// `0600` if it doesn't exist yet (Unix only — the mode is a no-op on
+/// other platforms). Used only by
+/// [`crate::transport::ssh::HostKeyVerification::AcceptNew`]'s
+/// pin-on-first-contact path; callers must have already confirmed via
+/// [`lookup`] that the host has no existing entry (`LookupOutcome::NotFound`)
+/// — a host with a *different* key on file must fail closed instead, never
+/// reach this function.
+///
+/// Writes a plain `host` or `[host]:port` (non-default port) entry, unhashed
+/// — the same format `ssh-keyscan` produces without `-H`.
+///
+/// Opened with `O_APPEND` and written via a single `write_all` call, so
+/// concurrent first-contact pins (from independent connections or
+/// processes) land as distinct, non-interleaved lines instead of
+/// corrupting the file: POSIX guarantees that on a local filesystem, each
+/// `write()` to an `O_APPEND`-opened file atomically seeks to the current
+/// end and writes, with no other writer's data able to land in between —
+/// and a known_hosts line is far smaller than the write sizes where that
+/// guarantee could become questionable.
+pub(crate) fn pin_new_host_key(
+    path: &Path,
+    host: &str,
+    port: u16,
+    key_type: &str,
+    key_blob_b64: &str,
+) -> std::io::Result<()> {
+    use std::fs::OpenOptions;
+    use std::io::{Read, Seek, SeekFrom, Write};
+
+    let mut opts = OpenOptions::new();
+    opts.create(true).read(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    let mut file = opts.open(path)?;
+
+    // An existing file that doesn't end in a newline would otherwise glue
+    // our appended line onto its last line, corrupting both entries (the
+    // previous host silently stops resolving, and this pin is lost — see
+    // the AcceptNew rustdoc: every connection after the first must be
+    // checked, which requires this line to parse on its own). `O_APPEND`
+    // only affects where writes land, not reads, so seeking here is safe.
+    let len = file.metadata()?.len();
+    let needs_leading_newline = if len == 0 {
+        false
+    } else {
+        file.seek(SeekFrom::End(-1))?;
+        let mut last_byte = [0u8; 1];
+        file.read_exact(&mut last_byte)?;
+        last_byte[0] != b'\n'
+    };
+
+    let host_field = if port == 22 {
+        host.to_string()
+    } else {
+        format!("[{host}]:{port}")
+    };
+    let line = format!(
+        "{prefix}{host_field} {key_type} {key_blob_b64}\n",
+        prefix = if needs_leading_newline { "\n" } else { "" }
+    );
+    file.write_all(line.as_bytes())
+}
+
+/// Characters allowed in a hostname we're willing to write into a
+/// `known_hosts` file. Deliberately narrow: letters, digits, `.`, `-`,
+/// `_`, and `:` (for literal IPv6 addresses) — no whitespace, commas,
+/// brackets, glob characters, or `@`, any of which could turn one pinned
+/// line into a multi-host entry, a wildcard pattern, or an extra line.
+///
+/// `host` here can come from untrusted input (e.g. an MCP tool argument
+/// derived from model output) when the connection doesn't resolve the
+/// name locally — a jump-host `direct-tcpip` hop or a `ProxyCommand`
+/// target. Called before every [`pin_new_host_key`] write.
+pub(crate) fn is_pinnable_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.len() <= 253
+        && host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_' | ':'))
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -722,5 +807,195 @@ mod tests {
         assert!(entry.host_matches("b.lab", 22));
         assert!(entry.host_matches("c.lab", 22));
         assert!(!entry.host_matches("d.lab", 22));
+    }
+
+    // ---------- pin_new_host_key() ----------
+
+    #[test]
+    fn pin_new_host_key_creates_missing_file_mode_0600() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        assert!(!path.exists());
+
+        let (blob_b64, _fp) = blob_and_fp(b"first-contact-key");
+        super::pin_new_host_key(&path, "device-a.lab", 22, "ssh-ed25519", &blob_b64).unwrap();
+
+        assert!(path.exists());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "expected mode 0600, got {mode:o}");
+        }
+    }
+
+    #[test]
+    fn pin_new_host_key_writes_plain_host_for_default_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let (blob_b64, _fp) = blob_and_fp(b"a-key");
+        super::pin_new_host_key(&path, "device-a.lab", 22, "ssh-ed25519", &blob_b64).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents,
+            format!("device-a.lab ssh-ed25519 {blob_b64}\n"),
+            "port 22 must be written as a plain host, no [host]:port form"
+        );
+    }
+
+    #[test]
+    fn pin_new_host_key_writes_host_port_form_for_non_default_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let (blob_b64, _fp) = blob_and_fp(b"a-key");
+        super::pin_new_host_key(&path, "device-a.lab", 830, "ssh-ed25519", &blob_b64).unwrap();
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            contents,
+            format!("[device-a.lab]:830 ssh-ed25519 {blob_b64}\n")
+        );
+    }
+
+    #[test]
+    fn pin_new_host_key_then_lookup_matches() {
+        // Round-trip: pin a key, then confirm lookup() finds it as a Match —
+        // proves the written line is valid known_hosts syntax, not just bytes
+        // on disk.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        let (blob_b64, fp) = blob_and_fp(b"pinned-key");
+        super::pin_new_host_key(&path, "device-a.lab", 830, "ssh-ed25519", &blob_b64).unwrap();
+
+        let out = super::lookup(&path, "device-a.lab", 830, &fp).unwrap();
+        assert_eq!(out, super::LookupOutcome::Match);
+    }
+
+    #[test]
+    fn pin_new_host_key_appends_without_disturbing_existing_entries() {
+        let (existing_blob, existing_fp) = blob_and_fp(b"existing-key");
+        let (_dir, path) =
+            write_known_hosts(&[&format!("device-a.lab ssh-ed25519 {existing_blob}")]);
+
+        let (new_blob, new_fp) = blob_and_fp(b"new-key");
+        super::pin_new_host_key(&path, "device-b.lab", 22, "ssh-ed25519", &new_blob).unwrap();
+
+        // Both the pre-existing and the newly-pinned entry must resolve.
+        assert_eq!(
+            super::lookup(&path, "device-a.lab", 22, &existing_fp).unwrap(),
+            super::LookupOutcome::Match
+        );
+        assert_eq!(
+            super::lookup(&path, "device-b.lab", 22, &new_fp).unwrap(),
+            super::LookupOutcome::Match
+        );
+    }
+
+    #[test]
+    fn pin_new_host_key_concurrent_first_contacts_do_not_corrupt_file() {
+        // Several independent "first contact" pins racing to append to the
+        // same (initially missing) file. None may be lost or interleaved
+        // into a malformed line — every host must resolve afterward and the
+        // line count must match exactly.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+
+        const N: usize = 16;
+        let entries: Vec<(String, String, String)> = (0..N)
+            .map(|i| {
+                let (blob, fp) = blob_and_fp(format!("concurrent-key-{i}").as_bytes());
+                (format!("device-{i}.lab"), blob, fp)
+            })
+            .collect();
+
+        std::thread::scope(|scope| {
+            for (host, blob, _fp) in &entries {
+                let path = &path;
+                scope.spawn(move || {
+                    super::pin_new_host_key(path, host, 22, "ssh-ed25519", blob).unwrap();
+                });
+            }
+        });
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(
+            lines.len(),
+            N,
+            "expected exactly {N} lines, file may be corrupted:\n{contents}"
+        );
+
+        for (host, _blob, fp) in &entries {
+            assert_eq!(
+                super::lookup(&path, host, 22, fp).unwrap(),
+                super::LookupOutcome::Match,
+                "host {host} did not resolve after concurrent pin"
+            );
+        }
+    }
+
+    #[test]
+    fn pin_new_host_key_no_trailing_newline_does_not_corrupt_existing_or_new_entry() {
+        // F1 regression: a hand-edited or `echo -n`/`printf`-written file
+        // whose last line has no trailing newline used to get glued to the
+        // freshly appended line, corrupting both entries.
+        use std::io::Write;
+        let (existing_blob, existing_fp) = blob_and_fp(b"device-a-key");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("known_hosts");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            // No trailing '\n' — write! not writeln!.
+            write!(f, "device-a.lab ssh-ed25519 {existing_blob}").unwrap();
+        }
+
+        let (new_blob, new_fp) = blob_and_fp(b"device-b-key");
+        super::pin_new_host_key(&path, "device-b.lab", 22, "ssh-ed25519", &new_blob).unwrap();
+
+        // Both the pre-existing entry (unaffected) and the new pin must
+        // resolve to a Match.
+        assert_eq!(
+            super::lookup(&path, "device-a.lab", 22, &existing_fp).unwrap(),
+            super::LookupOutcome::Match,
+            "pre-existing entry must survive a pin onto a newline-less file"
+        );
+        assert_eq!(
+            super::lookup(&path, "device-b.lab", 22, &new_fp).unwrap(),
+            super::LookupOutcome::Match,
+            "newly pinned entry must resolve"
+        );
+
+        // A different key for device-b must now be rejected as a mismatch,
+        // not silently re-TOFU'd — proves the pin actually landed as its
+        // own line rather than being lost into the corrupted blob.
+        let (_, other_fp) = blob_and_fp(b"a-different-key-entirely");
+        assert!(matches!(
+            super::lookup(&path, "device-b.lab", 22, &other_fp).unwrap(),
+            super::LookupOutcome::Mismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn is_pinnable_host_accepts_plain_hostnames_and_ip_literals() {
+        assert!(super::is_pinnable_host("device-a.lab"));
+        assert!(super::is_pinnable_host("192.168.1.10"));
+        assert!(super::is_pinnable_host("2001:db8::1"));
+        assert!(super::is_pinnable_host("under_score.lab"));
+    }
+
+    #[test]
+    fn is_pinnable_host_rejects_injection_shaped_input() {
+        // F2 regression: none of these may reach pin_new_host_key — each
+        // could turn one pin into an extra line, a multi-host entry, or a
+        // wildcard pattern.
+        assert!(!super::is_pinnable_host(""));
+        assert!(!super::is_pinnable_host("a.lab\n* ssh-ed25519 AAAA"));
+        assert!(!super::is_pinnable_host("*"));
+        assert!(!super::is_pinnable_host("a,b"));
+        assert!(!super::is_pinnable_host("a.lab "));
+        assert!(!super::is_pinnable_host("[a.lab]"));
+        assert!(!super::is_pinnable_host("a@b"));
+        assert!(!super::is_pinnable_host(&"a".repeat(254)));
     }
 }
