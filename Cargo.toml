@@ -15,7 +15,7 @@ edition = "2021"
 authors = ["fastrevmd-lab"]
 description = "An async-first NETCONF 1.0/1.1 client library for Rust"
 license = "MIT"
-repository = "https://github.com/fastrevmd-lab/rustnetconf"
+repository = "https://github.com/mechubsec/rustnetconf"
 keywords = ["netconf", "network", "automation", "ssh", "async"]
 categories = ["network-programming"]
 
