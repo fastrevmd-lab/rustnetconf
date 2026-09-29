@@ -22,6 +22,13 @@ jobs:
   cargo:
     name: cargo-audit + cargo-deny
     runs-on: ubuntu-latest
+    # rustsec/audit-check publishes its findings as a check run; without
+    # checks: write it fails with "Resource not accessible by integration"
+    # whenever it has anything to report, even informational warnings.
+    # Scoped to this job so the secret scan stays read-only.
+    permissions:
+      contents: read
+      checks: write
     timeout-minutes: 15
     steps:
       - name: Check out repository
