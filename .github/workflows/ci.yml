@@ -10,6 +10,12 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: -D warnings
 
+concurrency:
+  # Cancel superseded runs on pull requests (each push / branch update restarts CI);
+  # runs on the default branch always finish.
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   test:
     name: Test (workspace, all features)
