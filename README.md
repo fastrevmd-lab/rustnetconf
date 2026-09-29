@@ -14,7 +14,7 @@
   <a href="https://crates.io/crates/rustnetconf"><img alt="crates.io — rustnetconf" src="https://img.shields.io/crates/v/rustnetconf.svg?label=rustnetconf&color=0D9488"></a>
   <a href="https://crates.io/crates/rustnetconf-cli"><img alt="crates.io — rustnetconf-cli" src="https://img.shields.io/crates/v/rustnetconf-cli.svg?label=rustnetconf-cli&color=262B38"></a>
   <a href="https://crates.io/crates/rustnetconf-yang"><img alt="crates.io — rustnetconf-yang" src="https://img.shields.io/crates/v/rustnetconf-yang.svg?label=rustnetconf-yang&color=262B38"></a>
-  <a href="https://github.com/fastrevmd-lab/rustnetconf/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/fastrevmd-lab/rustnetconf/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/mechubsec/rustnetconf/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/mechubsec/rustnetconf/actions/workflows/ci.yml/badge.svg"></a>
   <a href="#license"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-262B38.svg"></a>
 </p>
 
@@ -24,7 +24,7 @@ Async NETCONF client library, YANG code generation, vendor profiles, connection 
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.17.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.17.0)** (SSH moves to the `ring` backend; the default build no longer links aws-lc at all, and is 23.5% smaller).
+> **Latest release — [v0.17.0](https://github.com/mechubsec/rustnetconf/releases/tag/v0.17.0)** (SSH moves to the `ring` backend; the default build no longer links aws-lc at all, and is 23.5% smaller).
 > On crates.io: `rustnetconf` 0.17.0 · `rustnetconf-cli` 0.4.0 · `rustnetconf-yang` 0.4.0.
 > See [What's New in v0.17.0](#whats-new-in-v0170) below.
 
@@ -242,7 +242,7 @@ Bug-fix release (#67). `rustnetconf-cli` and `rustnetconf-yang` are unchanged. N
 
 Bug-fix release (#65). `rustnetconf-cli` and `rustnetconf-yang` are unchanged. No API changes — a drop-in patch upgrade from 0.14.3.
 
-- **Fixed: a standalone SRX's commit-check verdict was lost.** A single-RE SRX345 answers a commit-check with a closed `<commit-results>` followed by a sibling `<ok/>`. RFC 6241 does not allow a payload and `<ok/>` together, so the reply failed to parse with "`<ok/>` conflicts with an existing payload" and the verdict was discarded even though the check had passed. This made the governed write path unusable on the lab's physical SRX345 while the ungoverned one worked ([rustjunosmcp#358](https://github.com/fastrevmd-lab/rustjunosmcp/issues/358)).
+- **Fixed: a standalone SRX's commit-check verdict was lost.** A single-RE SRX345 answers a commit-check with a closed `<commit-results>` followed by a sibling `<ok/>`. RFC 6241 does not allow a payload and `<ok/>` together, so the reply failed to parse with "`<ok/>` conflicts with an existing payload" and the verdict was discarded even though the check had passed. This made the governed write path unusable on the lab's physical SRX345 while the ungoverned one worked ([rustjunosmcp#358](https://github.com/mechubsec/rustjunosmcp/issues/358)).
 
   The chassis-cluster form of the same reply already parsed, because there Junos leaves `<routing-engine>` unclosed — the payload is still open when `<ok/>` arrives. That existing tolerance was keyed on depth > 0, so it covered only the malformed shape: a device that closed the element correctly fared *worse* than one that did not.
 
@@ -266,7 +266,7 @@ Bug-fix release (#61). `rustnetconf-cli` and `rustnetconf-yang` are unchanged. N
 
 ## What's New in v0.14.2
 
-Follow-up to 0.14.1, from wiring the consumer side in [rustez#41](https://github.com/fastrevmd-lab/rustez/issues/41) (#60). `rustnetconf-cli` and `rustnetconf-yang` are unchanged — their `rustnetconf = "0.14"` requirement already matches.
+Follow-up to 0.14.1, from wiring the consumer side in [rustez#41](https://github.com/mechubsec/rustez/issues/41) (#60). `rustnetconf-cli` and `rustnetconf-yang` are unchanged — their `rustnetconf = "0.14"` requirement already matches.
 
 No API removals and no source-breaking changes, so a drop-in patch upgrade. One deliberate behaviour change, on an error path only: a Junos `commit-configuration` that disconnects before its reply now reports `CommitUnknown` instead of a generic transport error — see the second bullet.
 
@@ -280,7 +280,7 @@ No API removals and no source-breaking changes, so a drop-in patch upgrade. One 
 
 ## What's New in v0.14.1
 
-Additive follow-up to 0.14.0 for `rustnetconf` (0.14.1), from wiring the consumer side in [rustez#36](https://github.com/fastrevmd-lab/rustez/issues/36) (#58). `rustnetconf-cli` (0.3.5) and `rustnetconf-yang` (0.1.5) are unchanged — their `rustnetconf = "0.14"` requirement already matches. No behaviour changes and no API removals: a drop-in patch upgrade from 0.14.0.
+Additive follow-up to 0.14.0 for `rustnetconf` (0.14.1), from wiring the consumer side in [rustez#36](https://github.com/mechubsec/rustez/issues/36) (#58). `rustnetconf-cli` (0.3.5) and `rustnetconf-yang` (0.1.5) are unchanged — their `rustnetconf = "0.14"` requirement already matches. No behaviour changes and no API removals: a drop-in patch upgrade from 0.14.0.
 
 - **New `Session::rpc_candidate_change_with_warnings()` / `Client::rpc_candidate_change_with_warnings()`** — additive. The warnings-returning counterpart of `rpc_candidate_change()`, returning the same `(String, Vec<RpcErrorInfo>)` tuple as `rpc_with_warnings()` with the same preflight-then-mark ordering.
 
@@ -495,7 +495,7 @@ from `Debug` output, but the on-disk file itself is plaintext.
 
 ```toml
 [dependencies]
-rustnetconf = { git = "https://github.com/fastrevmd-lab/rustnetconf.git" }
+rustnetconf = { git = "https://github.com/mechubsec/rustnetconf.git" }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -503,7 +503,7 @@ For TLS transport (RFC 7589), enable the `tls` feature:
 
 ```toml
 [dependencies]
-rustnetconf = { git = "https://github.com/fastrevmd-lab/rustnetconf.git", features = ["tls"] }
+rustnetconf = { git = "https://github.com/mechubsec/rustnetconf.git", features = ["tls"] }
 ```
 
 ### Fetch running config

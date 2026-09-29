@@ -32,7 +32,7 @@
 //! Client (thin wrapper) → Session (protocol state) → Framing → Transport (SSH)
 //! ```
 //!
-//! See [ARCHITECTURE.md](https://github.com/fastrevmd-lab/rustnetconf/blob/main/ARCHITECTURE.md)
+//! See [ARCHITECTURE.md](https://github.com/mechubsec/rustnetconf/blob/main/ARCHITECTURE.md)
 //! for full design details.
 
 pub mod capability;
