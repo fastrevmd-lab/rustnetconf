@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["fastrevmd-lab"]
 description = "YANG model code generation for rustnetconf — compile-time config validation"
 license = "MIT"
-repository = "https://github.com/fastrevmd-lab/rustnetconf"
+repository = "https://github.com/mechubsec/rustnetconf"
 keywords = ["yang", "netconf", "network", "codegen"]
 categories = ["network-programming"]
 

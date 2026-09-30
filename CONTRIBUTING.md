@@ -1,6 +1,6 @@
 # Contributing to rustnetconf
 
-Thanks for considering a contribution. rustnetconf is an async-first NETCONF 1.0/1.1 client library for Rust — part of the [mechub](https://github.com/fastrevmd-lab) family of open-source, self-hosted network automation tooling. See [README.md](README.md) for what the library does and [ARCHITECTURE.md](ARCHITECTURE.md) for how it's put together.
+Thanks for considering a contribution. rustnetconf is an async-first NETCONF 1.0/1.1 client library for Rust — part of the [mechub](https://github.com/mechubsec) family of open-source, self-hosted network automation tooling. See [README.md](README.md) for what the library does and [ARCHITECTURE.md](ARCHITECTURE.md) for how it's put together.
 
 ## Before you start
 

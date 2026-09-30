@@ -6,7 +6,7 @@ Please **do not** open a public GitHub issue for a security vulnerability.
 
 Instead, use GitHub's private vulnerability reporting for this repository:
 
-https://github.com/fastrevmd-lab/rustnetconf/security/advisories/new
+https://github.com/mechubsec/rustnetconf/security/advisories/new
 
 Include what you'd include in a bug report — affected version, reproduction steps, and impact — but keep it in the private report, not a public issue, PR, or discussion.
 
