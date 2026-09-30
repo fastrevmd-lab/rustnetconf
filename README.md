@@ -24,9 +24,9 @@ Async NETCONF client library, YANG code generation, vendor profiles, connection 
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.17.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.17.0)** (SSH moves to the `ring` backend; the default build no longer links aws-lc at all, and is 23.5% smaller).
-> On crates.io: `rustnetconf` 0.17.0 · `rustnetconf-cli` 0.4.0 · `rustnetconf-yang` 0.4.0.
-> See [What's New in v0.17.0](#whats-new-in-v0170) below.
+> **Latest release — [v0.18.0](https://github.com/fastrevmd-lab/rustnetconf/releases/tag/v0.18.0)** (SSH gains a real trust-on-first-use host key mode, `HostKeyVerification::AcceptNew`).
+> On crates.io: `rustnetconf` 0.18.0 · `rustnetconf-cli` 0.5.0 · `rustnetconf-yang` 0.5.0.
+> See [What's New in v0.18.0](#whats-new-in-v0180) below.
 
 ## Workspace
 
@@ -47,6 +47,24 @@ SSH is present as a *transport for NETCONF*, not as a general-purpose capability
 - Remote shell or command execution
 
 Consumers that need those should use a dedicated SSH crate alongside this one. A native SCP1 client was briefly added and then reverted before it was ever released (#52, reverted by #53) for exactly this reason; issues #47 and #51 were closed as not planned on the same grounds. The round trip is visible in `git log` between v0.13.2 and the next release — it was a deliberate reversal, not an accident.
+
+## What's New in v0.18.0
+
+**`HostKeyVerification` gains `AcceptNew`, a real trust-on-first-use mode** (#108, MEC-43).
+
+Previously `HostKeyVerification` had no TOFU mode: `KnownHosts` fails closed on an unknown host, and `AcceptAll` pins nothing at all. Consumers that wanted "accept new hosts, but still pin them" — rustjunosmcp's "accept new host keys" flag among them — had nothing better to map to than `AcceptAll`, silently giving up pinning entirely.
+
+`AcceptNew { known_hosts: PathBuf }` follows OpenSSH's `StrictHostKeyChecking=accept-new`: an unknown host is accepted and its key appended to the known-hosts file (created at mode `0600` if absent, in the plain `[host]:port keytype base64` form), while a known host presenting a different key still rejects with `HostKeyMismatch`, and `@revoked` entries still reject — identical behavior to `KnownHosts` for hosts already on file. Every first-contact pin logs a `warn` with the host and fingerprint.
+
+### Also in this release
+
+- **`rustnetconf-yang`'s generated code is now committed, and `libyang2` is maintainer-only** (#105, #106). The YANG codegen build script previously ran unconditionally, charging every build a hard `cmake` prerequisite and ~44 MB of vendored C per build directory to regenerate 441 lines of Rust that only change when `yang-models/` changes. That output is now committed (`rustnetconf-yang/src/generated.rs`); the generator moves to a `regenerate`-feature-gated `codegen` bin target. Ordinary consumers of `rustnetconf-yang` no longer need `cmake` or `libyang2` at all — only someone regenerating the bindings does. CI gained a `yang-codegen-drift` job so a stale `generated.rs` can't merge.
+- **`fix(deps)`: rustls bumped to 0.23.45** for RUSTSEC-2026-0285 (#111).
+- Hygiene: extended the shared gitleaks vendor allowlist (#110), replaced lab identifiers with synthetic values across fixtures and docs (#112), and added `CONTRIBUTING.md`, issue/PR templates, and `SECURITY.md` as a release baseline (#109). No functional change in any of these.
+
+### `rustnetconf-cli` 0.5.0 and `rustnetconf-yang` 0.5.0
+
+Both move only because they require `rustnetconf = "0.18.0"` exactly — neither has a functional change of its own in this release. Pairing either with `rustnetconf` 0.17.x is not supported.
 
 ## What's New in v0.17.0
 

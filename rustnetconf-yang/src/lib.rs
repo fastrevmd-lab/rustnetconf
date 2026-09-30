@@ -10,7 +10,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! rustnetconf-yang = { version = "0.4", features = ["generated"] }
+//! rustnetconf-yang = { version = "0.5", features = ["generated"] }
 //! ```
 //!
 //! Then use a bundled model:
