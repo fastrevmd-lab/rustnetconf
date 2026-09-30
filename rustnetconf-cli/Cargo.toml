@@ -1,6 +1,6 @@
 [package]
 name = "rustnetconf-cli"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 authors = ["fastrevmd-lab"]
 description = "Terraform-like CLI for declarative NETCONF network config management"
@@ -13,7 +13,7 @@ name = "netconf"
 path = "src/main.rs"
 
 [dependencies]
-rustnetconf = { version = "0.17.0", path = ".." }
+rustnetconf = { version = "0.18.0", path = ".." }
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 serde = { version = "1", features = ["derive"] }
