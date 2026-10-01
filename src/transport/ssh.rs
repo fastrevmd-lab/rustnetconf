@@ -238,8 +238,13 @@ impl client::Handler for SshHandler {
 
     fn check_server_key(
         &mut self,
-        server_public_key: &keys::PublicKey,
+        server_public_key: &keys::PublicKeyOrCertificate,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
+        // Certificates and bare keys both resolve to the signing public key;
+        // `public_key()` fingerprints either case identically, so a pinned
+        // host-key fingerprint still matches a device that switches to a
+        // certificate-signed key for the same underlying identity.
+        let server_public_key = server_public_key.public_key();
         let fingerprint = server_public_key
             .fingerprint(keys::HashAlg::Sha256)
             .to_string();
@@ -277,7 +282,7 @@ impl client::Handler for SshHandler {
                     path,
                     &self.host,
                     self.port,
-                    server_public_key,
+                    &server_public_key,
                     &fingerprint,
                     false,
                 ) {
@@ -305,7 +310,7 @@ impl client::Handler for SshHandler {
                     path,
                     &self.host,
                     self.port,
-                    server_public_key,
+                    &server_public_key,
                     &fingerprint,
                     true,
                 ) {
