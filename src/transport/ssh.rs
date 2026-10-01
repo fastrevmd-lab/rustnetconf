@@ -238,8 +238,14 @@ impl client::Handler for SshHandler {
 
     fn check_server_key(
         &mut self,
-        server_public_key: &keys::PublicKey,
+        server_public_key: &keys::PublicKeyOrCertificate,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
+        // For a certificate, `public_key()` returns the certified subject
+        // key — the same key russh verified the KEX signature against, not
+        // the CA key. The certificate's CA signature, validity window, and
+        // principals are not checked here and confer no trust; pinning
+        // applies to the subject key exactly as it does for a bare key.
+        let server_public_key = server_public_key.public_key();
         let fingerprint = server_public_key
             .fingerprint(keys::HashAlg::Sha256)
             .to_string();
@@ -277,7 +283,7 @@ impl client::Handler for SshHandler {
                     path,
                     &self.host,
                     self.port,
-                    server_public_key,
+                    &server_public_key,
                     &fingerprint,
                     false,
                 ) {
@@ -305,7 +311,7 @@ impl client::Handler for SshHandler {
                     path,
                     &self.host,
                     self.port,
-                    server_public_key,
+                    &server_public_key,
                     &fingerprint,
                     true,
                 ) {

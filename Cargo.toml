@@ -30,7 +30,7 @@ strict-validation = ["roxmltree"]
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-russh = { version = "0.62", default-features = false, features = ["flate2", "ring"] }
+russh = { version = ">=0.63.2, <0.64", default-features = false, features = ["flate2", "ring"] }
 ring = "0.17"
 base64ct = { version = "1", features = ["std"] }
 quick-xml = "0.42"
