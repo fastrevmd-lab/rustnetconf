@@ -240,10 +240,11 @@ impl client::Handler for SshHandler {
         &mut self,
         server_public_key: &keys::PublicKeyOrCertificate,
     ) -> impl std::future::Future<Output = Result<bool, Self::Error>> + Send {
-        // Certificates and bare keys both resolve to the signing public key;
-        // `public_key()` fingerprints either case identically, so a pinned
-        // host-key fingerprint still matches a device that switches to a
-        // certificate-signed key for the same underlying identity.
+        // For a certificate, `public_key()` returns the certified subject
+        // key — the same key russh verified the KEX signature against, not
+        // the CA key. The certificate's CA signature, validity window, and
+        // principals are not checked here and confer no trust; pinning
+        // applies to the subject key exactly as it does for a bare key.
         let server_public_key = server_public_key.public_key();
         let fingerprint = server_public_key
             .fingerprint(keys::HashAlg::Sha256)
