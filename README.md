@@ -24,9 +24,9 @@ Async NETCONF client library, YANG code generation, vendor profiles, connection 
 
 Built on [tokio](https://tokio.rs), [russh](https://crates.io/crates/russh), and [rustls](https://crates.io/crates/rustls) — pure Rust, no OpenSSL, no libssh2.
 
-> **Latest release — [v0.18.0](https://github.com/mechubsec/rustnetconf/releases/tag/v0.18.0)** (SSH gains a real trust-on-first-use host key mode, `HostKeyVerification::AcceptNew`).
-> On crates.io: `rustnetconf` 0.18.0 · `rustnetconf-cli` 0.5.0 · `rustnetconf-yang` 0.5.0.
-> See [What's New in v0.18.0](#whats-new-in-v0180) below.
+> **Latest release — [v0.18.1](https://github.com/mechubsec/rustnetconf/releases/tag/v0.18.1)** (security: russh bumped to fix CVE-2026-102823).
+> On crates.io: `rustnetconf` 0.18.1 · `rustnetconf-cli` 0.5.0 · `rustnetconf-yang` 0.5.0.
+> See [What's New in v0.18.1](#whats-new-in-v0181) below.
 
 ## Workspace
 
@@ -47,6 +47,16 @@ SSH is present as a *transport for NETCONF*, not as a general-purpose capability
 - Remote shell or command execution
 
 Consumers that need those should use a dedicated SSH crate alongside this one. A native SCP1 client was briefly added and then reverted before it was ever released (#52, reverted by #53) for exactly this reason; issues #47 and #51 were closed as not planned on the same grounds. The round trip is visible in `git log` between v0.13.2 and the next release — it was a deliberate reversal, not an accident.
+
+## What's New in v0.18.1
+
+**Security: russh bumped to `>=0.63.2, <0.64`** (#121, CVE-2026-102823).
+
+rustnetconf pinned russh 0.62, so every consumer's lockfile still carried the vulnerable 0.62.x line transitively even after rustjunosmcp and mecmcp moved their own direct dependencies to 0.63.x. `check_server_key` adapts to the renamed trait signature: russh 0.63 generalized the host-key callback from `&PublicKey` to `&PublicKeyOrCertificate` so client certificate auth can share the same verification path. Fingerprinting and known-hosts/pin checks now run against `PublicKeyOrCertificate::public_key()`, which resolves to the same `PublicKey` as before for the non-certificate case this crate uses today. No public API change.
+
+### `rustnetconf-cli` and `rustnetconf-yang`
+
+Both stay at 0.5.0 — neither has a code change of its own in this release — but their `rustnetconf` dependency requirement moves to `0.18.1` so a fresh `cargo publish`/`cargo install` pulls in the fixed russh line rather than resolving to 0.18.0.
 
 ## What's New in v0.18.0
 
